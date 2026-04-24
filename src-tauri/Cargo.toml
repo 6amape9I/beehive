@@ -1,0 +1,30 @@
+[package]
+name = "beehive"
+version = "0.1.0"
+description = "Stage-based JSON pipeline desktop foundation"
+authors = ["beehive"]
+edition = "2021"
+
+[lib]
+name = "beehive_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "beehive"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.4.1", features = [] }
+
+[dependencies]
+chrono = { version = "0.4.41", features = ["serde"] }
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+serde_yaml = "0.9.34"
+tauri = { version = "2.8.5", features = [] }
+tauri-plugin-dialog = "2.4.0"
+thiserror = "2.0.16"
+
+[dev-dependencies]
+tempfile = "3.20.0"
