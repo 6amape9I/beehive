@@ -9,7 +9,10 @@ use crate::domain::{
 use crate::workdir;
 
 pub fn initialize_workdir(path: &str) -> BootstrapResult {
-    let workdir_path = workdir::normalize_path(path);
+    let workdir_path = match resolve_workdir_path(path) {
+        Ok(path) => path,
+        Err(result) => return result,
+    };
     match workdir::initialize(&workdir_path) {
         Ok(workdir_state) => bootstrap_from_workdir(workdir_state),
         Err(message) => failed_state(&workdir_path, "workdir_initialization_failed", message),
@@ -17,7 +20,10 @@ pub fn initialize_workdir(path: &str) -> BootstrapResult {
 }
 
 pub fn open_workdir(path: &str) -> BootstrapResult {
-    let workdir_path = workdir::normalize_path(path);
+    let workdir_path = match resolve_workdir_path(path) {
+        Ok(path) => path,
+        Err(result) => return result,
+    };
     let workdir_state = workdir::inspect(&workdir_path, false);
     bootstrap_from_workdir(workdir_state)
 }
@@ -127,19 +133,20 @@ fn state_from_parts(
         .as_ref()
         .map(|state| state.database_path.clone());
     let project_name = config.as_ref().map(|config| config.project.name.clone());
-    let stage_ids: Vec<String> = config
-    .as_ref()
-    .map(|config| {
+    let stage_ids: Vec<String> = if let Some(database_state) = &database_state {
+        database_state.synced_stage_ids.clone()
+    } else {
         config
-            .stages
-            .iter()
-            .map(|stage| stage.id.clone())
-            .collect()
-    })
-    .unwrap_or_default();
+            .as_ref()
+            .map(|config| config.stages.iter().map(|stage| stage.id.clone()).collect())
+            .unwrap_or_default()
+    };
 
-    let stage_count = stage_ids.len() as u64;
-    let config_loaded = config.is_some() || !validation.is_valid;
+    let stage_count = if let Some(database_state) = &database_state {
+        database_state.stage_count
+    } else {
+        stage_ids.len() as u64
+    };
     let database_status = if database_state.as_ref().is_some_and(|state| state.is_ready) {
         "ready"
     } else {
@@ -161,7 +168,6 @@ fn state_from_parts(
             project_name,
             config_path,
             database_path,
-            config_loaded,
             config_status: config_status.to_string(),
             database_status: database_status.to_string(),
             stage_count,
@@ -172,6 +178,51 @@ fn state_from_parts(
             database_state,
             config,
             errors,
+        },
+    }
+}
+
+fn resolve_workdir_path(path: &str) -> Result<std::path::PathBuf, BootstrapResult> {
+    let parsed_path = match workdir::parse_user_path(path) {
+        Ok(path) => path,
+        Err(message) => return Err(invalid_path_state(path, "invalid_workdir_path", message)),
+    };
+
+    if let Err(message) = workdir::validate_runtime_location(&parsed_path) {
+        return Err(invalid_path_state(
+            path,
+            "workdir_inside_application_directory",
+            message,
+        ));
+    }
+
+    Ok(parsed_path)
+}
+
+fn invalid_path_state(path: &str, code: &str, message: String) -> BootstrapResult {
+    let selected_workdir_path = Some(path.trim().to_string()).filter(|value| !value.is_empty());
+    BootstrapResult {
+        state: AppInitializationState {
+            phase: AppInitializationPhase::BootstrapFailed,
+            message: message.clone(),
+            selected_workdir_path,
+            project_name: None,
+            config_path: None,
+            database_path: None,
+            config_status: "not_loaded".to_string(),
+            database_status: "not_ready".to_string(),
+            stage_count: 0,
+            stage_ids: Vec::new(),
+            last_config_load_at: None,
+            validation: ConfigValidationResult::valid(),
+            workdir_state: None,
+            database_state: None,
+            config: None,
+            errors: vec![BootstrapErrorInfo {
+                code: code.to_string(),
+                message,
+                path: None,
+            }],
         },
     }
 }
@@ -218,4 +269,127 @@ fn has_blocking_workdir_issue(workdir_state: &WorkdirState) -> bool {
         .health_issues
         .iter()
         .any(|issue| issue.severity == WorkdirHealthSeverity::Error)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+    use crate::config::default_pipeline_yaml;
+
+    fn write_pipeline(path: &Path, content: &str) {
+        fs::write(path.join("pipeline.yaml"), content).expect("write pipeline");
+    }
+
+    #[test]
+    fn initialize_workdir_bootstraps_to_fully_initialized() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("fresh-workdir");
+
+        let result = initialize_workdir(&workdir.to_string_lossy());
+
+        assert_eq!(result.state.phase, AppInitializationPhase::FullyInitialized);
+        assert_eq!(result.state.config_status, "valid");
+        assert_eq!(result.state.database_status, "ready");
+        assert!(workdir.join("pipeline.yaml").exists());
+        assert!(workdir.join("app.db").exists());
+        assert!(workdir.join("stages").is_dir());
+        assert!(workdir.join("logs").is_dir());
+    }
+
+    #[test]
+    fn open_existing_workdir_returns_fully_initialized_state() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("existing-workdir");
+        fs::create_dir_all(workdir.join("stages")).expect("create stages");
+        fs::create_dir_all(workdir.join("logs")).expect("create logs");
+        write_pipeline(&workdir, default_pipeline_yaml());
+
+        let result = open_workdir(&workdir.to_string_lossy());
+
+        assert_eq!(result.state.phase, AppInitializationPhase::FullyInitialized);
+        assert_eq!(
+            result.state.stage_ids,
+            vec!["ingest".to_string(), "normalize".to_string()]
+        );
+        assert!(workdir.join("app.db").exists());
+    }
+
+    #[test]
+    fn invalid_config_returns_config_invalid_state() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("invalid-workdir");
+        fs::create_dir_all(&workdir).expect("create workdir");
+        fs::create_dir_all(workdir.join("stages")).expect("create stages");
+        fs::create_dir_all(workdir.join("logs")).expect("create logs");
+        write_pipeline(
+            &workdir,
+            r#"
+project:
+  name: beehive
+  workdir: .
+stages:
+  - id: ingest
+    output_folder: stages/out
+    workflow_url: http://localhost:5678/webhook/ingest
+"#,
+        );
+
+        let result = open_workdir(&workdir.to_string_lossy());
+
+        assert_eq!(result.state.phase, AppInitializationPhase::ConfigInvalid);
+        assert_eq!(result.state.config_status, "invalid");
+        assert_eq!(result.state.database_status, "not_ready");
+        assert!(!result.state.validation.is_valid);
+    }
+
+    #[test]
+    fn missing_pipeline_returns_bootstrap_failed_state() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("missing-pipeline");
+        fs::create_dir_all(&workdir).expect("create workdir");
+
+        let result = open_workdir(&workdir.to_string_lossy());
+
+        assert_eq!(result.state.phase, AppInitializationPhase::BootstrapFailed);
+        assert_eq!(result.state.config_status, "not_loaded");
+        assert!(result
+            .state
+            .errors
+            .iter()
+            .any(|error| error.code == "pipeline_config_missing"));
+    }
+
+    #[test]
+    fn relative_workdir_path_returns_bootstrap_failed_state() {
+        let result = open_workdir("relative-workdir");
+
+        assert_eq!(result.state.phase, AppInitializationPhase::BootstrapFailed);
+        assert_eq!(
+            result.state.selected_workdir_path.as_deref(),
+            Some("relative-workdir")
+        );
+        assert!(result
+            .state
+            .errors
+            .iter()
+            .any(|error| error.code == "invalid_workdir_path"));
+    }
+
+    #[test]
+    fn workdir_inside_application_directory_returns_bootstrap_failed_state() {
+        let nested_path = std::env::current_dir()
+            .expect("current dir")
+            .join("nested-workdir-inside-app");
+
+        let result = open_workdir(&nested_path.to_string_lossy());
+
+        assert_eq!(result.state.phase, AppInitializationPhase::BootstrapFailed);
+        assert!(result
+            .state
+            .errors
+            .iter()
+            .any(|error| error.code == "workdir_inside_application_directory"));
+    }
 }

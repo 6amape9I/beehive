@@ -363,4 +363,51 @@ stages:
             .iter()
             .any(|issue| issue.code == "duplicate_stage_id"));
     }
+
+    #[test]
+    fn missing_required_stage_field_is_invalid() {
+        let yaml = r#"
+project:
+  name: beehive
+  workdir: .
+stages:
+  - id: ingest
+    output_folder: stages/normalized
+    workflow_url: http://localhost:5678/webhook/ingest
+"#;
+
+        let loaded = parse_pipeline_config(yaml, "now".to_string());
+
+        assert!(!loaded.validation.is_valid);
+        assert!(loaded
+            .validation
+            .issues
+            .iter()
+            .any(|issue| issue.code == "missing_stage_input_folder"));
+    }
+
+    #[test]
+    fn missing_runtime_applies_defaults_without_invalidating_config() {
+        let yaml = r#"
+project:
+  name: beehive
+  workdir: .
+stages:
+  - id: ingest
+    input_folder: stages/incoming
+    output_folder: stages/normalized
+    workflow_url: http://localhost:5678/webhook/ingest
+"#;
+
+        let loaded = parse_pipeline_config(yaml, "now".to_string());
+        let config = loaded.config.expect("config");
+
+        assert!(loaded.validation.is_valid);
+        assert_eq!(config.runtime, RuntimeConfig::default());
+        assert!(loaded
+            .validation
+            .issues
+            .iter()
+            .any(|issue| issue.code == "runtime_defaults_applied"));
+    }
 }

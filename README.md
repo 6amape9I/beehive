@@ -59,6 +59,8 @@ Use it to:
 - open an existing workdir,
 - reload the current workdir.
 
+Use an absolute path outside the application directory. Relative paths are rejected. This avoids ambiguous path resolution and, during `tauri dev`, prevents choosing a workdir inside `src-tauri/` where SQLite writes would trigger automatic rebuilds and relaunches.
+
 Initializing a new workdir creates:
 
 ```text

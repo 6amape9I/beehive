@@ -1,11 +1,17 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useBootstrap } from "../../app/BootstrapContext";
 
 export function WorkdirSetupPanel() {
   const { initializeWorkdir, openWorkdir, isBusy, lastActionError, state } = useBootstrap();
   const [path, setPath] = useState(state.selected_workdir_path ?? "");
+
+  useEffect(() => {
+    if (state.selected_workdir_path) {
+      setPath(state.selected_workdir_path);
+    }
+  }, [state.selected_workdir_path]);
 
   async function chooseDirectory() {
     const selected = await openDialog({
@@ -51,6 +57,9 @@ export function WorkdirSetupPanel() {
             Browse
           </button>
         </div>
+        <p className="field-hint">
+          Use an absolute path outside the application directory. Relative paths are rejected.
+        </p>
       </div>
       <div className="button-row">
         <button

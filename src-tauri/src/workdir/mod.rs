@@ -105,8 +105,39 @@ pub fn inspect(path: &Path, initialization_flow: bool) -> WorkdirState {
     }
 }
 
-pub fn normalize_path(path: &str) -> PathBuf {
-    PathBuf::from(path.trim())
+pub fn parse_user_path(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Workdir path cannot be empty.".to_string());
+    }
+
+    let candidate = PathBuf::from(trimmed);
+    if !candidate.is_absolute() {
+        return Err(
+            "Workdir path must be absolute. Use Browse or enter a full path outside the application directory."
+                .to_string(),
+        );
+    }
+
+    Ok(candidate)
+}
+
+pub fn validate_runtime_location(path: &Path) -> Result<(), String> {
+    let runtime_dir = std::env::current_dir()
+        .map_err(|error| format!("Failed to determine the application directory: {error}"))?;
+
+    validate_runtime_location_with_base(path, &runtime_dir)
+}
+
+fn validate_runtime_location_with_base(path: &Path, runtime_dir: &Path) -> Result<(), String> {
+    if path.starts_with(runtime_dir) {
+        return Err(format!(
+            "Workdir must be outside the application directory '{}'. Choose a separate folder to avoid dev-mode restarts and mutable runtime files inside the app tree.",
+            runtime_dir.display()
+        ));
+    }
+
+    Ok(())
 }
 
 pub fn path_string(path: &Path) -> String {
@@ -124,5 +155,67 @@ fn health_issue(
         code: code.into(),
         path: path_string(path),
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+
+    use super::*;
+
+    #[test]
+    fn initialize_creates_required_stage_one_files_and_directories() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("new-workdir");
+
+        let state = initialize(&workdir).expect("initialize workdir");
+
+        assert_eq!(state.workdir_path, path_string(&workdir));
+        assert!(workdir.join("pipeline.yaml").exists());
+        assert!(workdir.join("stages").is_dir());
+        assert!(workdir.join("logs").is_dir());
+        assert!(!workdir.join("app.db").exists());
+        assert!(state.pipeline_config_exists);
+        assert!(!state.database_exists);
+        assert!(state.stages_dir_exists);
+        assert!(state.logs_dir_exists);
+    }
+
+    #[test]
+    fn inspect_existing_workdir_reports_healthy_state() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("existing-workdir");
+        fs::create_dir_all(workdir.join("stages")).expect("create stages");
+        fs::create_dir_all(workdir.join("logs")).expect("create logs");
+        fs::write(workdir.join("pipeline.yaml"), default_pipeline_yaml()).expect("write pipeline");
+        fs::write(workdir.join("app.db"), []).expect("write db placeholder");
+
+        let state = inspect(&workdir, false);
+
+        assert!(state.exists);
+        assert!(state.pipeline_config_exists);
+        assert!(state.database_exists);
+        assert!(state.stages_dir_exists);
+        assert!(state.logs_dir_exists);
+        assert!(state.health_issues.is_empty());
+    }
+
+    #[test]
+    fn parse_user_path_rejects_relative_paths() {
+        let error = parse_user_path("relative-workdir").expect_err("relative path should fail");
+
+        assert!(error.contains("must be absolute"));
+    }
+
+    #[test]
+    fn validate_runtime_location_rejects_paths_inside_application_directory() {
+        let runtime_dir = env::temp_dir().join("beehive-runtime-dir");
+        let workdir = runtime_dir.join("nested-workdir");
+
+        let error = validate_runtime_location_with_base(&workdir, &runtime_dir)
+            .expect_err("nested workdir should fail");
+
+        assert!(error.contains("outside the application directory"));
     }
 }

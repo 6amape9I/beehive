@@ -4,34 +4,35 @@ The authoritative checklist source is `instructions/beehive_stage1_codex_task.md
 
 ## Definition Of Done
 
-- [ ] Desktop application runs locally.
-- [ ] Stable UI shell with working navigation. Implemented; desktop runtime verification blocked by Windows SDK.
-- [ ] New workdir can be initialized. Implemented; desktop runtime verification blocked by Windows SDK.
-- [ ] Existing workdir can be opened. Implemented; desktop runtime verification blocked by Windows SDK.
-- [ ] `pipeline.yaml` is loaded and validated. Implemented; Rust test verification blocked by Windows SDK.
-- [ ] `app.db` is created/opened. Implemented; Rust test verification blocked by Windows SDK.
-- [ ] SQLite schema bootstrap works. Implemented; Rust test verification blocked by Windows SDK.
-- [ ] Stage definitions sync from YAML into SQLite. Implemented; Rust test verification blocked by Windows SDK.
-- [ ] Dashboard shows real bootstrap data. Implemented; desktop runtime verification blocked by Windows SDK.
-- [ ] Stage Editor shows real stage information. Implemented; desktop runtime verification blocked by Windows SDK.
-- [ ] Diagnostics/Settings shows technical initialization data. Implemented; desktop runtime verification blocked by Windows SDK.
+- [x] Desktop application runs locally.
+- [x] Stable UI shell with working navigation.
+- [x] New workdir can be initialized.
+- [x] Existing workdir can be opened.
+- [x] `pipeline.yaml` is loaded and validated.
+- [x] `app.db` is created/opened.
+- [x] SQLite schema bootstrap works.
+- [x] Stage definitions sync from YAML into SQLite.
+- [x] Dashboard shows real bootstrap data.
+- [x] Stage Editor shows real stage information.
+- [x] Diagnostics/Settings shows technical initialization data.
 - [x] README explains setup and launch.
 - [x] Code structure is clean enough for Stage 2.
 
 ## Manual Verification Scenarios
 
-- [ ] Fresh app launch.
-- [ ] Create a new workdir.
-- [ ] Confirm `pipeline.yaml`, `app.db`, `stages/`, and `logs/` are created.
-- [ ] Load a valid `pipeline.yaml`.
-- [ ] Verify stages are visible in UI.
-- [ ] Verify stage definitions are synced into SQLite.
-- [ ] Open an existing workdir.
-- [ ] Test invalid config scenario and confirm meaningful UI errors.
+- [x] Fresh app launch.
+- [x] Create a new workdir.
+- [x] Confirm `pipeline.yaml`, `app.db`, `stages/`, and `logs/` are created.
+- [x] Load a valid `pipeline.yaml`.
+- [x] Verify stages are visible in UI.
+- [x] Verify stage definitions are synced into SQLite.
+- [x] Open an existing workdir.
+- [x] Test invalid config scenario and confirm meaningful UI errors.
 
 ## Verification Notes
 
 - `npm.cmd run build` passed.
-- `cargo test --manifest-path src-tauri/Cargo.toml` could not complete because the Windows SDK library `kernel32.lib` is missing from the machine.
-- `npm.cmd run tauri dev` starts Vite when run with elevated command permissions, then fails at Rust linking because the regular shell cannot find `link.exe`.
-- Running Cargo through `vcvars64.bat` finds `link.exe`, but still fails because the Windows SDK library `kernel32.lib` is absent.
+- `cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul && cargo test --manifest-path src-tauri\Cargo.toml'` passed.
+- `tauri dev` works when launched through the same `vcvars64.bat` wrapper.
+- Stage sync behavior was re-checked after update/removal of stages in `pipeline.yaml`; SQLite now mirrors YAML exactly, including removal of stale rows.
+- Relative manual workdir paths are now rejected, and workdir paths inside the application directory are rejected to prevent dev-mode rebuild/relaunch loops.

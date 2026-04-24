@@ -1,66 +1,75 @@
 # Stage 1 Delivery Report
 
-This report is updated during implementation and finalized after verification.
+## A. What was fixed
 
-## A. What was implemented
+- Completed the Stage 1 polish pass on top of the existing foundation.
+- Fixed stage synchronization so SQLite now mirrors `pipeline.yaml` exactly, including hard deletion of stale stage rows.
+- Simplified the initialization phase model to real Stage 1 states only.
+- Fixed the workdir path flow so manual input must be absolute and outside the application directory.
+- Closed the dev-mode relaunch scenario reproduced when a relative workdir path resolved inside `src-tauri/`.
 
-- Tauri v2 + React + TypeScript project foundation.
-- Rust backend layers for domain types, workdir init/open, YAML parsing and validation, SQLite schema bootstrap, stage sync, and Tauri commands.
-- React app shell with routing for Dashboard, Entities, Entity Detail, Stage Editor, Workspace Explorer, and Settings / Diagnostics.
-- Workdir setup UI with manual path input and native folder picker.
-- Dashboard, Stage Editor, and Diagnostics views showing real bootstrap/config/database state returned from backend commands.
-- Stage 1 markdown logs for questions, progress, checklist, execution plan, and delivery.
+## B. Files changed
 
-## B. Files added or changed
+- Frontend: `src/app/styles.css`, `src/features/workdir/WorkdirSetupPanel.tsx`, `src/types/domain.ts`
+- Backend: `src-tauri/src/bootstrap/mod.rs`, `src-tauri/src/config/mod.rs`, `src-tauri/src/database/mod.rs`, `src-tauri/src/domain/mod.rs`, `src-tauri/src/workdir/mod.rs`
+- Docs: `README.md`, `docs/codex_stage1_progress.md`, `docs/codex_stage1_questions.md`, `docs/codex_stage1_instruction_checklist.md`, `docs/codex_stage1_delivery_report.md`
 
-- Frontend: `src/app/`, `src/components/`, `src/features/`, `src/lib/`, `src/pages/`, `src/types/`.
-- Tauri backend: `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `src-tauri/src/`.
-- Project config: `package.json`, `package-lock.json`, `index.html`, `vite.config.ts`, `tsconfig.json`, `.gitignore`.
-- Documentation: `README.md`, `docs/codex_stage1_*.md`.
+## C. Stage sync behavior after the fix
 
-## C. Architecture choices
+- Sync behavior is explicit hard delete.
+- On bootstrap/reload, current YAML stages are upserted into SQLite by `stage_id`.
+- Any row in `stages` that is no longer present in `pipeline.yaml` is deleted in the same sync transaction.
+- Repeated syncs are deterministic and idempotent.
 
-- Filesystem, YAML validation, SQLite bootstrap, and stage sync live in Rust/Tauri backend modules, not React components.
-- Frontend calls typed wrappers around Tauri commands and renders the returned `AppInitializationState`.
-- SQLite uses idempotent schema creation plus deterministic stage upsert by `stage_id`.
-- Runtime orchestration features are intentionally excluded from Stage 1.
+## D. Initialization state model after the fix
 
-## D. How to run
+- The app now uses only these phases:
+  - `app_not_configured`
+  - `config_invalid`
+  - `bootstrap_failed`
+  - `fully_initialized`
+- Removed dead phases that were never reached by the real bootstrap flow.
+- `config_status` and `database_status` remain visible, but are derived from actual bootstrap outcomes.
 
-```powershell
-npm.cmd install
-npm.cmd run tauri dev
-```
+## E. Tests added or updated
 
-Frontend build:
+- Added or expanded tests for:
+  - new workdir initialization
+  - opening an existing workdir
+  - valid config loading
+  - invalid config handling
+  - duplicate stage ids
+  - stage sync updates
+  - stage sync removals
+  - SQLite schema bootstrap and required tables
+  - bootstrap state behavior
+  - relative path rejection
+  - rejecting workdirs inside the application directory
+- Current automated verification:
+  - `npm.cmd run build` passed
+  - `cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul && cargo test --manifest-path src-tauri\Cargo.toml'` passed
 
-```powershell
-npm.cmd run build
-```
+## F. What was manually verified by you
 
-Backend tests:
+- Verified manually: fresh app launch.
+- Verified manually: new workdir initialization.
+- Verified manually: creation of `pipeline.yaml`, `app.db`, `stages/`, `logs/`.
+- Verified manually: valid config loading.
+- Verified manually: stage visibility in Dashboard and Stage Editor.
+- Verified manually: stage sync into SQLite.
+- Verified manually: opening an existing workdir using `F:/pycharm_projects/beehive/test-workdirs/manual-open-existing`.
+- Verified manually: invalid config scenario.
+- Verified manually: stage update/removal sync behavior.
+- Reproduced: in `tauri dev`, a relative path like `123123` resolved inside `src-tauri/` and SQLite writes triggered a rebuild/relaunch.
+- Fixed and re-tested: opening an existing workdir with an absolute path outside the application directory keeps the same app PID and reaches `fully_initialized`.
 
-```powershell
-cargo test --manifest-path src-tauri/Cargo.toml
-```
+## G. .gitignore changes
 
-## E. What was manually tested
+- Reviewed `.gitignore`.
+- The required Stage 1 ignores are already present, including `.vscode/`, `.env`, `.env.*`, `*.db`, `*.db-shm`, `*.db-wal`, `*.sqlite`, `*.sqlite3`, and `*.tsbuildinfo`.
+- No additional `.gitignore` changes were required in this polish pass.
 
-- `npm.cmd install` completed successfully.
-- `npm.cmd run build` completed successfully.
-- `cargo test --manifest-path src-tauri/Cargo.toml` downloaded Rust crates but could not complete because this machine is missing Windows SDK linker libraries, specifically `kernel32.lib`.
-- `npm.cmd run tauri dev` starts Vite when command execution is allowed, then fails at Rust linking because the regular shell cannot find `link.exe`.
-- Running Cargo through `vcvars64.bat` finds `link.exe`, but still fails because the Windows SDK library `kernel32.lib` is absent.
-- Full UI workdir scenarios could not be manually completed until the local Rust/Tauri linker environment is repaired.
+## H. Remaining blockers for Stage 1
 
-## F. What remains for Stage 2
-
-- n8n workflow execution.
-- Runtime task queue processing.
-- Retry engine runtime.
-- File scanning runtime.
-- JSON entity processing.
-- Stage transition execution.
-- Graph routing logic.
-- Full stage CRUD editor.
-- Advanced workspace reconciliation and run history.
+- No blocker remains in the Stage 1 foundation scope.
+- Stage 2 features remain intentionally out of scope: n8n runtime execution, retries, scanning runtime, entity processing, stage graph execution, advanced editor work, and orchestration scheduling.

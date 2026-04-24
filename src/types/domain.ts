@@ -81,10 +81,7 @@ export interface DatabaseState {
 
 export type AppInitializationPhase =
   | "app_not_configured"
-  | "workdir_selected"
-  | "config_loaded"
   | "config_invalid"
-  | "database_ready"
   | "bootstrap_failed"
   | "fully_initialized";
 
@@ -101,7 +98,6 @@ export interface AppInitializationState {
   project_name: string | null;
   config_path: string | null;
   database_path: string | null;
-  config_loaded: boolean;
   config_status: string;
   database_status: string;
   stage_count: number;
@@ -125,7 +121,6 @@ export const notConfiguredState: AppInitializationState = {
   project_name: null,
   config_path: null,
   database_path: null,
-  config_loaded: false,
   config_status: "not_loaded",
   database_status: "not_ready",
   stage_count: 0,

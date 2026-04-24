@@ -127,6 +127,7 @@ fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Resul
         .transaction()
         .map_err(|error| format!("Failed to begin stage sync transaction: {error}"))?;
     let now = Utc::now().to_rfc3339();
+    let stage_ids: Vec<&str> = stages.iter().map(|stage| stage.id.as_str()).collect();
 
     for stage in stages {
         transaction
@@ -167,6 +168,23 @@ fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Resul
             .map_err(|error| format!("Failed to sync stage '{}': {error}", stage.id))?;
     }
 
+    if stage_ids.is_empty() {
+        transaction
+            .execute("DELETE FROM stages", [])
+            .map_err(|error| format!("Failed to clear stale stages: {error}"))?;
+    } else {
+        let placeholders = std::iter::repeat_n("?", stage_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let delete_sql = format!("DELETE FROM stages WHERE stage_id NOT IN ({placeholders})");
+        transaction
+            .execute(
+                &delete_sql,
+                rusqlite::params_from_iter(stage_ids.iter().copied()),
+            )
+            .map_err(|error| format!("Failed to delete stale stages: {error}"))?;
+    }
+
     transaction
         .execute(
             r#"
@@ -204,30 +222,85 @@ fn load_stage_ids(connection: &Connection) -> Result<Vec<String>, String> {
 }
 
 #[cfg(test)]
+fn load_stage_by_id(connection: &Connection, stage_id: &str) -> Result<StageDefinition, String> {
+    connection
+        .query_row(
+            r#"
+            SELECT
+                stage_id,
+                input_folder,
+                output_folder,
+                workflow_url,
+                max_attempts,
+                retry_delay_sec,
+                next_stage
+            FROM stages
+            WHERE stage_id = ?1
+            "#,
+            params![stage_id],
+            |row| {
+                Ok(StageDefinition {
+                    id: row.get(0)?,
+                    input_folder: row.get(1)?,
+                    output_folder: row.get(2)?,
+                    workflow_url: row.get(3)?,
+                    max_attempts: row.get::<_, i64>(4)? as u64,
+                    retry_delay_sec: row.get::<_, i64>(5)? as u64,
+                    next_stage: row.get(6)?,
+                })
+            },
+        )
+        .map_err(|error| format!("Failed to load stage '{stage_id}': {error}"))
+}
+
+#[cfg(test)]
+fn load_table_names(connection: &Connection) -> Result<Vec<String>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )
+        .map_err(|error| format!("Failed to prepare table list query: {error}"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("Failed to query table list: {error}"))?;
+
+    let mut names = Vec::new();
+    for row in rows {
+        names.push(row.map_err(|error| format!("Failed to read table name: {error}"))?);
+    }
+
+    Ok(names)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::{PipelineConfig, ProjectConfig, RuntimeConfig, StageDefinition};
 
-    #[test]
-    fn stage_sync_is_idempotent() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let database_path = tempdir.path().join("app.db");
-        let config = PipelineConfig {
+    fn test_config(stages: Vec<StageDefinition>) -> PipelineConfig {
+        PipelineConfig {
             project: ProjectConfig {
                 name: "beehive".to_string(),
                 workdir: ".".to_string(),
             },
             runtime: RuntimeConfig::default(),
-            stages: vec![StageDefinition {
-                id: "ingest".to_string(),
-                input_folder: "stages/incoming".to_string(),
-                output_folder: "stages/normalized".to_string(),
-                workflow_url: "http://localhost:5678/webhook/ingest".to_string(),
-                max_attempts: 3,
-                retry_delay_sec: 10,
-                next_stage: Some("normalize".to_string()),
-            }],
-        };
+            stages,
+        }
+    }
+
+    #[test]
+    fn stage_sync_is_idempotent() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("app.db");
+        let config = test_config(vec![StageDefinition {
+            id: "ingest".to_string(),
+            input_folder: "stages/incoming".to_string(),
+            output_folder: "stages/normalized".to_string(),
+            workflow_url: "http://localhost:5678/webhook/ingest".to_string(),
+            max_attempts: 3,
+            retry_delay_sec: 10,
+            next_stage: Some("normalize".to_string()),
+        }]);
 
         let first = bootstrap_database(&database_path, &config).expect("first bootstrap");
         let second = bootstrap_database(&database_path, &config).expect("second bootstrap");
@@ -235,5 +308,119 @@ mod tests {
         assert_eq!(first.stage_count, 1);
         assert_eq!(second.stage_count, 1);
         assert_eq!(second.synced_stage_ids, vec!["ingest".to_string()]);
+    }
+
+    #[test]
+    fn stage_sync_updates_existing_stage_definition() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("app.db");
+        let first_config = test_config(vec![StageDefinition {
+            id: "ingest".to_string(),
+            input_folder: "stages/incoming".to_string(),
+            output_folder: "stages/normalized".to_string(),
+            workflow_url: "http://localhost:5678/webhook/ingest".to_string(),
+            max_attempts: 3,
+            retry_delay_sec: 10,
+            next_stage: Some("normalize".to_string()),
+        }]);
+        let second_config = test_config(vec![StageDefinition {
+            id: "ingest".to_string(),
+            input_folder: "stages/review".to_string(),
+            output_folder: "stages/final".to_string(),
+            workflow_url: "http://localhost:5678/webhook/ingest-v2".to_string(),
+            max_attempts: 5,
+            retry_delay_sec: 45,
+            next_stage: None,
+        }]);
+
+        bootstrap_database(&database_path, &first_config).expect("first bootstrap");
+        bootstrap_database(&database_path, &second_config).expect("second bootstrap");
+
+        let connection = Connection::open(&database_path).expect("open db");
+        let stage = load_stage_by_id(&connection, "ingest").expect("load stage");
+
+        assert_eq!(stage.input_folder, "stages/review");
+        assert_eq!(stage.output_folder, "stages/final");
+        assert_eq!(
+            stage.workflow_url,
+            "http://localhost:5678/webhook/ingest-v2"
+        );
+        assert_eq!(stage.max_attempts, 5);
+        assert_eq!(stage.retry_delay_sec, 45);
+        assert_eq!(stage.next_stage, None);
+    }
+
+    #[test]
+    fn stage_sync_removes_stale_stage_definitions() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("app.db");
+        let first_config = test_config(vec![
+            StageDefinition {
+                id: "ingest".to_string(),
+                input_folder: "stages/incoming".to_string(),
+                output_folder: "stages/normalized".to_string(),
+                workflow_url: "http://localhost:5678/webhook/ingest".to_string(),
+                max_attempts: 3,
+                retry_delay_sec: 10,
+                next_stage: Some("normalize".to_string()),
+            },
+            StageDefinition {
+                id: "normalize".to_string(),
+                input_folder: "stages/normalized".to_string(),
+                output_folder: "stages/done".to_string(),
+                workflow_url: "http://localhost:5678/webhook/normalize".to_string(),
+                max_attempts: 3,
+                retry_delay_sec: 10,
+                next_stage: None,
+            },
+        ]);
+        let second_config = test_config(vec![StageDefinition {
+            id: "normalize".to_string(),
+            input_folder: "stages/normalized".to_string(),
+            output_folder: "stages/done".to_string(),
+            workflow_url: "http://localhost:5678/webhook/normalize".to_string(),
+            max_attempts: 3,
+            retry_delay_sec: 10,
+            next_stage: None,
+        }]);
+
+        bootstrap_database(&database_path, &first_config).expect("first bootstrap");
+        let result = bootstrap_database(&database_path, &second_config).expect("second bootstrap");
+        let repeated = bootstrap_database(&database_path, &second_config).expect("third bootstrap");
+
+        assert_eq!(result.synced_stage_ids, vec!["normalize".to_string()]);
+        assert_eq!(repeated.synced_stage_ids, vec!["normalize".to_string()]);
+
+        let connection = Connection::open(&database_path).expect("open db");
+        let stage_ids = load_stage_ids(&connection).expect("load stage ids");
+        assert_eq!(stage_ids, vec!["normalize".to_string()]);
+    }
+
+    #[test]
+    fn bootstrap_creates_database_file_and_required_tables() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("app.db");
+        let config = test_config(vec![StageDefinition {
+            id: "ingest".to_string(),
+            input_folder: "stages/incoming".to_string(),
+            output_folder: "stages/normalized".to_string(),
+            workflow_url: "http://localhost:5678/webhook/ingest".to_string(),
+            max_attempts: 3,
+            retry_delay_sec: 10,
+            next_stage: Some("normalize".to_string()),
+        }]);
+
+        let result = bootstrap_database(&database_path, &config).expect("bootstrap");
+        let connection = Connection::open(&database_path).expect("open db");
+        let table_names = load_table_names(&connection).expect("load table names");
+
+        assert!(database_path.exists());
+        assert_eq!(result.schema_version, 1);
+        assert!(table_names.contains(&"settings".to_string()));
+        assert!(table_names.contains(&"stages".to_string()));
+        assert!(table_names.contains(&"entities".to_string()));
+        assert!(table_names.contains(&"entity_stage_states".to_string()));
+        assert!(table_names.contains(&"stage_runs".to_string()));
+        assert!(table_names.contains(&"app_events".to_string()));
     }
 }

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StageStatus {
@@ -136,10 +137,7 @@ pub struct DatabaseState {
 #[serde(rename_all = "snake_case")]
 pub enum AppInitializationPhase {
     AppNotConfigured,
-    WorkdirSelected,
-    ConfigLoaded,
     ConfigInvalid,
-    DatabaseReady,
     BootstrapFailed,
     FullyInitialized,
 }
@@ -159,7 +157,6 @@ pub struct AppInitializationState {
     pub project_name: Option<String>,
     pub config_path: Option<String>,
     pub database_path: Option<String>,
-    pub config_loaded: bool,
     pub config_status: String,
     pub database_status: String,
     pub stage_count: u64,
@@ -170,30 +167,6 @@ pub struct AppInitializationState {
     pub database_state: Option<DatabaseState>,
     pub config: Option<PipelineConfig>,
     pub errors: Vec<BootstrapErrorInfo>,
-}
-
-impl AppInitializationState {
-    pub fn not_configured() -> Self {
-        Self {
-            phase: AppInitializationPhase::AppNotConfigured,
-            message: "No workdir is selected.".to_string(),
-            selected_workdir_path: None,
-            project_name: None,
-            config_path: None,
-            database_path: None,
-            config_loaded: false,
-            config_status: "not_loaded".to_string(),
-            database_status: "not_ready".to_string(),
-            stage_count: 0,
-            stage_ids: Vec::new(),
-            last_config_load_at: None,
-            validation: ConfigValidationResult::valid(),
-            workdir_state: None,
-            database_state: None,
-            config: None,
-            errors: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

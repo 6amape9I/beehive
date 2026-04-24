@@ -250,6 +250,13 @@ code {
   font-size: 13px;
 }
 
+.field-hint {
+  margin: 0;
+  color: #6b7785;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .path-control {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
