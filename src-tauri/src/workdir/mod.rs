@@ -1,5 +1,6 @@
+use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::config::default_pipeline_yaml;
 use crate::domain::{WorkdirHealthIssue, WorkdirHealthSeverity, WorkdirState};
@@ -105,7 +106,7 @@ pub fn inspect(path: &Path, initialization_flow: bool) -> WorkdirState {
     }
 }
 
-pub fn parse_user_path(path: &str) -> Result<PathBuf, String> {
+pub fn resolve_user_path(path: &str) -> Result<PathBuf, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("Workdir path cannot be empty.".to_string());
@@ -119,29 +120,137 @@ pub fn parse_user_path(path: &str) -> Result<PathBuf, String> {
         );
     }
 
-    Ok(candidate)
+    let runtime_dir = fs::canonicalize(
+        std::env::current_dir()
+            .map_err(|error| format!("Failed to determine the application directory: {error}"))?,
+    )
+    .map_err(|error| format!("Failed to resolve the application directory: {error}"))?;
+
+    resolve_user_path_with_runtime_dir(&candidate, &runtime_dir)
 }
 
-pub fn validate_runtime_location(path: &Path) -> Result<(), String> {
-    let runtime_dir = std::env::current_dir()
-        .map_err(|error| format!("Failed to determine the application directory: {error}"))?;
+fn resolve_user_path_with_runtime_dir(path: &Path, runtime_dir: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err(
+            "Workdir path must be absolute. Use Browse or enter a full path outside the application directory."
+                .to_string(),
+        );
+    }
 
-    validate_runtime_location_with_base(path, &runtime_dir)
-}
+    let normalized = normalize_absolute_path(path)?;
+    let comparison_target = canonicalize_for_validation(&normalized)?;
 
-fn validate_runtime_location_with_base(path: &Path, runtime_dir: &Path) -> Result<(), String> {
-    if path.starts_with(runtime_dir) {
+    if path_is_within(&comparison_target, runtime_dir) {
         return Err(format!(
             "Workdir must be outside the application directory '{}'. Choose a separate folder to avoid dev-mode restarts and mutable runtime files inside the app tree.",
             runtime_dir.display()
         ));
     }
 
-    Ok(())
+    Ok(strip_windows_verbatim_prefix(&comparison_target))
+}
+
+fn normalize_absolute_path(path: &Path) -> Result<PathBuf, String> {
+    let mut normalized = PathBuf::new();
+    let mut tail = Vec::<OsString>::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(part) => tail.push(part.to_os_string()),
+            Component::ParentDir => {
+                if tail.pop().is_none() {
+                    return Err(format!(
+                        "Workdir path '{}' escapes beyond its root through '..'.",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    for part in tail {
+        normalized.push(part);
+    }
+
+    Ok(normalized)
+}
+
+fn canonicalize_for_validation(path: &Path) -> Result<PathBuf, String> {
+    if path.exists() {
+        return fs::canonicalize(path).map_err(|error| {
+            format!(
+                "Failed to resolve workdir path '{}': {error}",
+                path.display()
+            )
+        });
+    }
+
+    let mut existing_parent = path;
+    let mut remainder = Vec::<OsString>::new();
+
+    while !existing_parent.exists() {
+        let Some(name) = existing_parent.file_name() else {
+            return Err(format!(
+                "Cannot validate workdir path '{}' because no existing parent directory could be resolved.",
+                path.display()
+            ));
+        };
+        remainder.push(name.to_os_string());
+        existing_parent = existing_parent.parent().ok_or_else(|| {
+            format!(
+                "Cannot validate workdir path '{}' because no existing parent directory could be resolved.",
+                path.display()
+            )
+        })?;
+    }
+
+    let mut resolved = fs::canonicalize(existing_parent).map_err(|error| {
+        format!(
+            "Failed to resolve workdir parent directory '{}': {error}",
+            existing_parent.display()
+        )
+    })?;
+
+    for component in remainder.iter().rev() {
+        resolved.push(component);
+    }
+
+    normalize_absolute_path(&resolved)
+}
+
+fn path_is_within(path: &Path, parent: &Path) -> bool {
+    let path_components = normalized_components(path);
+    let parent_components = normalized_components(parent);
+
+    path_components.len() >= parent_components.len()
+        && path_components
+            .iter()
+            .zip(parent_components.iter())
+            .all(|(left, right)| left == right)
+}
+
+fn normalized_components(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+        .collect()
 }
 
 pub fn path_string(path: &Path) -> String {
-    path.to_string_lossy().to_string()
+    strip_windows_verbatim_prefix(path)
+        .to_string_lossy()
+        .to_string()
+}
+
+fn strip_windows_verbatim_prefix(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        path.to_path_buf()
+    }
 }
 
 fn health_issue(
@@ -202,20 +311,58 @@ mod tests {
     }
 
     #[test]
-    fn parse_user_path_rejects_relative_paths() {
-        let error = parse_user_path("relative-workdir").expect_err("relative path should fail");
+    fn resolve_user_path_rejects_relative_paths() {
+        let error = resolve_user_path_with_runtime_dir(
+            Path::new("relative-workdir"),
+            &env::temp_dir().join("beehive-runtime"),
+        )
+        .expect_err("relative path should fail");
 
         assert!(error.contains("must be absolute"));
     }
 
     #[test]
-    fn validate_runtime_location_rejects_paths_inside_application_directory() {
-        let runtime_dir = env::temp_dir().join("beehive-runtime-dir");
-        let workdir = runtime_dir.join("nested-workdir");
+    fn resolve_user_path_rejects_paths_inside_application_directory() {
+        let runtime_dir = tempfile::tempdir().expect("tempdir");
+        let runtime_canonical = fs::canonicalize(runtime_dir.path()).expect("canonical runtime");
+        let workdir = runtime_canonical.join("nested-workdir");
 
-        let error = validate_runtime_location_with_base(&workdir, &runtime_dir)
+        let error = resolve_user_path_with_runtime_dir(&workdir, &runtime_canonical)
             .expect_err("nested workdir should fail");
 
         assert!(error.contains("outside the application directory"));
+    }
+
+    #[test]
+    fn resolve_user_path_rejects_disguised_nested_paths_with_dot_dot() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = tempdir.path().join("runtime");
+        fs::create_dir_all(&runtime_dir).expect("create runtime");
+        let runtime_canonical = fs::canonicalize(&runtime_dir).expect("canonical runtime");
+        let disguised = runtime_canonical
+            .join("allowed")
+            .join("..")
+            .join("nested-workdir");
+
+        let error = resolve_user_path_with_runtime_dir(&disguised, &runtime_canonical)
+            .expect_err("disguised nested workdir should fail");
+
+        assert!(error.contains("outside the application directory"));
+    }
+
+    #[test]
+    fn resolve_user_path_accepts_absolute_path_outside_runtime_directory() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = tempdir.path().join("runtime");
+        let external_parent = tempdir.path().join("external-parent");
+        fs::create_dir_all(&runtime_dir).expect("create runtime");
+        fs::create_dir_all(&external_parent).expect("create external parent");
+        let runtime_canonical = fs::canonicalize(&runtime_dir).expect("canonical runtime");
+        let candidate = external_parent.join("stage2-workdir");
+
+        let resolved = resolve_user_path_with_runtime_dir(&candidate, &runtime_canonical)
+            .expect("absolute path outside runtime should work");
+
+        assert_eq!(resolved, candidate);
     }
 }

@@ -4,11 +4,11 @@ interface StatusBadgeProps {
 
 export function StatusBadge({ status }: StatusBadgeProps) {
   const tone =
-    status.includes("failed") || status.includes("invalid")
+    status.includes("failed") || status.includes("invalid") || status.includes("error")
       ? "danger"
-      : status.includes("fully") || status === "valid" || status === "ready"
+      : status.includes("fully") || status === "valid" || status === "ready" || status === "active"
         ? "success"
-        : status.includes("warning")
+        : status.includes("warning") || status === "inactive"
           ? "warning"
           : "neutral";
 

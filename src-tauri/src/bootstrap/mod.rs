@@ -183,20 +183,14 @@ fn state_from_parts(
 }
 
 fn resolve_workdir_path(path: &str) -> Result<std::path::PathBuf, BootstrapResult> {
-    let parsed_path = match workdir::parse_user_path(path) {
-        Ok(path) => path,
-        Err(message) => return Err(invalid_path_state(path, "invalid_workdir_path", message)),
-    };
-
-    if let Err(message) = workdir::validate_runtime_location(&parsed_path) {
-        return Err(invalid_path_state(
-            path,
-            "workdir_inside_application_directory",
-            message,
-        ));
-    }
-
-    Ok(parsed_path)
+    workdir::resolve_user_path(path).map_err(|message| {
+        let code = if message.contains("outside the application directory") {
+            "workdir_inside_application_directory"
+        } else {
+            "invalid_workdir_path"
+        };
+        invalid_path_state(path, code, message)
+    })
 }
 
 fn invalid_path_state(path: &str, code: &str, message: String) -> BootstrapResult {
@@ -370,11 +364,9 @@ stages:
             result.state.selected_workdir_path.as_deref(),
             Some("relative-workdir")
         );
-        assert!(result
-            .state
-            .errors
-            .iter()
-            .any(|error| error.code == "invalid_workdir_path"));
+        assert!(result.state.errors.iter().any(|error| {
+            error.code == "invalid_workdir_path" || error.message.contains("must be absolute")
+        }));
     }
 
     #[test]

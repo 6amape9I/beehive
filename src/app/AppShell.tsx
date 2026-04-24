@@ -24,7 +24,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="brand-mark">bh</div>
           <div>
             <h1>{projectName}</h1>
-            <p>Stage 1 foundation</p>
+            <p>Stage 2 runtime foundation</p>
           </div>
         </div>
         <nav className="nav-list" aria-label="Main navigation">

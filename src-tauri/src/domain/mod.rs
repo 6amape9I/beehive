@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -131,6 +132,8 @@ pub struct DatabaseState {
     pub schema_version: u32,
     pub stage_count: u64,
     pub synced_stage_ids: Vec<String>,
+    pub active_stage_count: u64,
+    pub inactive_stage_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,11 +146,13 @@ pub enum AppInitializationPhase {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BootstrapErrorInfo {
+pub struct CommandErrorInfo {
     pub code: String,
     pub message: String,
     pub path: Option<String>,
 }
+
+pub type BootstrapErrorInfo = CommandErrorInfo;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppInitializationState {
@@ -172,4 +177,202 @@ pub struct AppInitializationState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BootstrapResult {
     pub state: AppInitializationState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageRecord {
+    pub id: String,
+    pub input_folder: String,
+    pub output_folder: String,
+    pub workflow_url: String,
+    pub max_attempts: u64,
+    pub retry_delay_sec: u64,
+    pub next_stage: Option<String>,
+    pub is_active: bool,
+    pub archived_at: Option<String>,
+    pub last_seen_in_config_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub entity_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EntityValidationStatus {
+    Valid,
+    Warning,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityRecord {
+    pub entity_id: String,
+    pub file_path: String,
+    pub file_name: String,
+    pub stage_id: String,
+    pub current_stage: Option<String>,
+    pub next_stage: Option<String>,
+    pub status: String,
+    pub checksum: String,
+    pub file_mtime: String,
+    pub file_size: u64,
+    pub payload_json: String,
+    pub meta_json: String,
+    pub validation_status: EntityValidationStatus,
+    pub validation_errors: Vec<ConfigValidationIssue>,
+    pub discovered_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityStageStateRecord {
+    pub id: i64,
+    pub entity_id: String,
+    pub stage_id: String,
+    pub file_path: String,
+    pub status: String,
+    pub attempts: u64,
+    pub max_attempts: u64,
+    pub last_error: Option<String>,
+    pub last_http_status: Option<i64>,
+    pub next_retry_at: Option<String>,
+    pub last_started_at: Option<String>,
+    pub last_finished_at: Option<String>,
+    pub created_child_path: Option<String>,
+    pub discovered_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AppEventLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AppEventRecord {
+    pub id: i64,
+    pub level: AppEventLevel,
+    pub code: String,
+    pub message: String,
+    pub context: Option<Value>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StatusCount {
+    pub status: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeSummary {
+    pub schema_version: u32,
+    pub active_stage_count: u64,
+    pub inactive_stage_count: u64,
+    pub total_registered_entities: u64,
+    pub entities_by_status: Vec<StatusCount>,
+    pub latest_discovery_at: Option<String>,
+    pub discovery_error_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct EntityFilters {
+    pub stage_id: Option<String>,
+    pub status: Option<String>,
+    pub validation_status: Option<EntityValidationStatus>,
+    pub search: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScanSummary {
+    pub scan_id: String,
+    pub scanned_file_count: u64,
+    pub registered_count: u64,
+    pub updated_count: u64,
+    pub unchanged_count: u64,
+    pub invalid_count: u64,
+    pub duplicate_count: u64,
+    pub elapsed_ms: u128,
+    pub latest_discovery_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScanWorkspaceResult {
+    pub summary: Option<ScanSummary>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeSummaryResult {
+    pub summary: Option<RuntimeSummary>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageListResult {
+    pub stages: Vec<StageRecord>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityListResult {
+    pub entities: Vec<EntityRecord>,
+    pub total: u64,
+    pub available_stages: Vec<String>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityDetailPayload {
+    pub entity: EntityRecord,
+    pub stage_states: Vec<EntityStageStateRecord>,
+    pub json_preview: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityDetailResult {
+    pub detail: Option<EntityDetailPayload>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AppEventsResult {
+    pub events: Vec<AppEventRecord>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceFileRecord {
+    pub entity_id: String,
+    pub file_name: String,
+    pub file_path: String,
+    pub status: String,
+    pub validation_status: EntityValidationStatus,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InvalidDiscoveryRecord {
+    pub stage_id: Option<String>,
+    pub file_name: String,
+    pub file_path: String,
+    pub code: String,
+    pub message: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceStageGroup {
+    pub stage: StageRecord,
+    pub files: Vec<WorkspaceFileRecord>,
+    pub invalid_files: Vec<InvalidDiscoveryRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceExplorerResult {
+    pub groups: Vec<WorkspaceStageGroup>,
+    pub errors: Vec<CommandErrorInfo>,
 }
