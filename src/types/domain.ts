@@ -12,6 +12,7 @@ export type ValidationSeverity = "info" | "warning" | "error";
 export type WorkdirHealthSeverity = "info" | "warning" | "error";
 export type EntityValidationStatus = "valid" | "warning" | "invalid";
 export type AppEventLevel = "info" | "warning" | "error";
+export type FileCopyStatus = "created" | "already_exists" | "blocked" | "failed";
 
 export interface ConfigValidationIssue {
   severity: ValidationSeverity;
@@ -136,20 +137,40 @@ export interface StageRecord {
 
 export interface EntityRecord {
   entity_id: string;
+  current_stage_id: string | null;
+  current_status: string;
+  latest_file_path: string | null;
+  latest_file_id: number | null;
+  file_count: number;
+  validation_status: EntityValidationStatus;
+  validation_errors: ConfigValidationIssue[];
+  first_seen_at: string;
+  last_seen_at: string;
+  updated_at: string;
+}
+
+export interface EntityFileRecord {
+  id: number;
+  entity_id: string;
+  stage_id: string;
   file_path: string;
   file_name: string;
-  stage_id: string;
-  current_stage: string | null;
-  next_stage: string | null;
-  status: string;
   checksum: string;
   file_mtime: string;
   file_size: number;
   payload_json: string;
   meta_json: string;
+  current_stage: string | null;
+  next_stage: string | null;
+  status: string;
   validation_status: EntityValidationStatus;
   validation_errors: ConfigValidationIssue[];
-  discovered_at: string;
+  is_managed_copy: boolean;
+  copy_source_file_id: number | null;
+  file_exists: boolean;
+  missing_since: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
   updated_at: string;
 }
 
@@ -158,6 +179,8 @@ export interface EntityStageStateRecord {
   entity_id: string;
   stage_id: string;
   file_path: string;
+  file_instance_id: number | null;
+  file_exists: boolean;
   status: string;
   attempts: number;
   max_attempts: number;
@@ -168,6 +191,7 @@ export interface EntityStageStateRecord {
   last_finished_at: string | null;
   created_child_path: string | null;
   discovered_at: string;
+  last_seen_at: string | null;
   updated_at: string;
 }
 
@@ -189,10 +213,13 @@ export interface RuntimeSummary {
   schema_version: number;
   active_stage_count: number;
   inactive_stage_count: number;
-  total_registered_entities: number;
+  total_entities: number;
+  present_file_count: number;
+  missing_file_count: number;
+  managed_copy_count: number;
+  invalid_file_count: number;
   entities_by_status: StatusCount[];
-  latest_discovery_at: string | null;
-  discovery_error_count: number;
+  last_reconciliation_at: string | null;
 }
 
 export interface EntityFilters {
@@ -205,17 +232,32 @@ export interface EntityFilters {
 export interface ScanSummary {
   scan_id: string;
   scanned_file_count: number;
-  registered_count: number;
-  updated_count: number;
-  unchanged_count: number;
+  registered_file_count: number;
+  registered_entity_count: number;
+  updated_file_count: number;
+  unchanged_file_count: number;
+  missing_file_count: number;
+  restored_file_count: number;
   invalid_count: number;
   duplicate_count: number;
+  created_directory_count: number;
+  managed_copy_count: number;
   elapsed_ms: number;
   latest_discovery_at: string;
 }
 
+export interface StageDirectoryProvisionSummary {
+  created_paths: string[];
+  created_directory_count: number;
+}
+
 export interface ScanWorkspaceResult {
   summary: ScanSummary | null;
+  errors: CommandErrorInfo[];
+}
+
+export interface StageDirectoryProvisionResult {
+  summary: StageDirectoryProvisionSummary | null;
   errors: CommandErrorInfo[];
 }
 
@@ -236,14 +278,36 @@ export interface EntityListResult {
   errors: CommandErrorInfo[];
 }
 
+export interface EntityFilesResult {
+  files: EntityFileRecord[];
+  errors: CommandErrorInfo[];
+}
+
 export interface EntityDetailPayload {
   entity: EntityRecord;
+  files: EntityFileRecord[];
   stage_states: EntityStageStateRecord[];
-  json_preview: string;
+  latest_json_preview: string;
 }
 
 export interface EntityDetailResult {
   detail: EntityDetailPayload | null;
+  errors: CommandErrorInfo[];
+}
+
+export interface FileCopyPayload {
+  status: FileCopyStatus;
+  entity_id: string;
+  source_stage_id: string;
+  target_stage_id: string | null;
+  source_file_path: string | null;
+  target_file_path: string | null;
+  target_file: EntityFileRecord | null;
+  message: string;
+}
+
+export interface FileCopyResult {
+  payload: FileCopyPayload | null;
   errors: CommandErrorInfo[];
 }
 
@@ -253,12 +317,16 @@ export interface AppEventsResult {
 }
 
 export interface WorkspaceFileRecord {
+  file_id: number;
   entity_id: string;
   file_name: string;
   file_path: string;
   status: string;
   validation_status: EntityValidationStatus;
   updated_at: string;
+  file_exists: boolean;
+  missing_since: string | null;
+  is_managed_copy: boolean;
 }
 
 export interface InvalidDiscoveryRecord {

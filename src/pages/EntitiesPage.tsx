@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { useBootstrap } from "../app/BootstrapContext";
 import { CommandErrorsPanel } from "../components/CommandErrorsPanel";
 import { StatusBadge } from "../components/StatusBadge";
-import { formatDateTime, shortChecksum } from "../lib/formatters";
+import { formatDateTime } from "../lib/formatters";
 import { listEntities } from "../lib/runtimeApi";
 import type {
   CommandErrorInfo,
@@ -161,7 +161,7 @@ export function EntitiesPage() {
         <div className="panel-heading">
           <h2>Registered Entities</h2>
           <span className="muted">
-            {isLoading ? "Loading..." : canQueryRuntime ? "Click a row for details" : "Open a workdir to query runtime data"}
+            {isLoading ? "Loading..." : canQueryRuntime ? "Logical entities with physical file instances" : "Open a workdir to query runtime data"}
           </span>
         </div>
         {!canQueryRuntime ? (
@@ -174,12 +174,12 @@ export function EntitiesPage() {
               <thead>
                 <tr>
                   <th>Entity ID</th>
-                  <th>File</th>
-                  <th>Stage</th>
+                  <th>Current stage</th>
                   <th>Status</th>
                   <th>Validation</th>
-                  <th>File path</th>
-                  <th>Checksum</th>
+                  <th>File count</th>
+                  <th>Latest file path</th>
+                  <th>Last seen</th>
                   <th>Updated at</th>
                   <th>Errors</th>
                 </tr>
@@ -187,27 +187,25 @@ export function EntitiesPage() {
               <tbody>
                 {entities.map((entity) => (
                   <tr
-                    key={`${entity.entity_id}-${entity.file_path}`}
+                    key={entity.entity_id}
                     className="clickable-row"
                     onClick={() => void navigate(`/entities/${entity.entity_id}`)}
                   >
                     <td>
                       <strong>{entity.entity_id}</strong>
                     </td>
-                    <td>{entity.file_name}</td>
-                    <td>{entity.stage_id}</td>
+                    <td>{entity.current_stage_id ?? "Not available"}</td>
                     <td>
-                      <StatusBadge status={entity.status} />
+                      <StatusBadge status={entity.current_status} />
                     </td>
                     <td>
                       <StatusBadge status={entity.validation_status} />
                     </td>
+                    <td>{entity.file_count}</td>
                     <td>
-                      <code>{entity.file_path}</code>
+                      <code>{entity.latest_file_path ?? "Not available"}</code>
                     </td>
-                    <td>
-                      <code>{shortChecksum(entity.checksum)}</code>
-                    </td>
+                    <td>{formatDateTime(entity.last_seen_at)}</td>
                     <td>{formatDateTime(entity.updated_at)}</td>
                     <td>{entity.validation_errors.length}</td>
                   </tr>

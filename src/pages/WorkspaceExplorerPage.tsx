@@ -87,12 +87,14 @@ export function WorkspaceExplorerPage() {
                           <th>File</th>
                           <th>Status</th>
                           <th>Validation</th>
+                          <th>Presence</th>
+                          <th>Managed copy</th>
                           <th>Updated</th>
                         </tr>
                       </thead>
                       <tbody>
                         {group.files.map((file) => (
-                          <tr key={`${group.stage.id}-${file.entity_id}-${file.file_path}`}>
+                          <tr key={file.file_id}>
                             <td>{file.entity_id}</td>
                             <td>
                               <code>{file.file_path}</code>
@@ -103,6 +105,12 @@ export function WorkspaceExplorerPage() {
                             <td>
                               <StatusBadge status={file.validation_status} />
                             </td>
+                            <td>
+                              {file.file_exists
+                                ? "Present"
+                                : `Missing since ${formatDateTime(file.missing_since)}`}
+                            </td>
+                            <td>{file.is_managed_copy ? "Yes" : "No"}</td>
                             <td>{formatDateTime(file.updated_at)}</td>
                           </tr>
                         ))}

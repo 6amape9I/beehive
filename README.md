@@ -1,28 +1,27 @@
 # beehive
 
-beehive is a desktop foundation for a local JSON pipeline operator tool. Stage 1 proves the bootstrap chain:
+beehive is a local desktop operator tool for JSON stage pipelines.
 
-`desktop app -> workdir -> pipeline.yaml -> validation -> SQLite bootstrap -> stage sync -> UI visibility`
+Stage 3 turns the Stage 2 runtime foundation into a file lifecycle foundation:
+
+`workdir -> active stages -> stage folders -> JSON file instances -> logical entities -> entity_files -> stage states -> managed next-stage copy`
 
 ## Stack
 
 - Tauri v2
 - React
 - TypeScript
-- SQLite through Rust `rusqlite`
-- YAML through Rust `serde_yaml`
+- Rust
+- SQLite through `rusqlite`
+- YAML through `serde_yaml`
 
 ## Install
-
-From the repository root:
 
 ```powershell
 npm.cmd install
 ```
 
-In this Windows PowerShell environment, use `npm.cmd` instead of `npm` because direct `npm` resolves to a blocked PowerShell script.
-
-Rust/Tauri builds on Windows require Visual Studio C++ tools and a Windows SDK that provides `kernel32.lib`.
+In this PowerShell environment use `npm.cmd`, not `npm`.
 
 ## Run
 
@@ -30,36 +29,25 @@ Rust/Tauri builds on Windows require Visual Studio C++ tools and a Windows SDK t
 npm.cmd run tauri dev
 ```
 
-If Rust fails with `link.exe not found` or `cannot open input file 'kernel32.lib'`, install the Visual Studio C++ build tools plus a Windows 10/11 SDK, then retry.
+On Windows, Rust/Tauri builds require Visual Studio C++ tools and a Windows SDK.
 
-## Frontend Build
+If the shell cannot find `link.exe` or `kernel32.lib`, run from a Developer Command Prompt or load MSVC/SDK paths with `vcvars64.bat`.
+
+## Technical Verification
 
 ```powershell
+cargo fmt --manifest-path src-tauri/Cargo.toml
+cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul && cargo test --manifest-path src-tauri\Cargo.toml'
 npm.cmd run build
 ```
 
-This runs TypeScript checking and the Vite production build.
+## Workdir Rules
 
-## Backend Tests
+Use an absolute path outside the application directory.
 
-```powershell
-cargo test --manifest-path src-tauri/Cargo.toml
-```
-
-On Windows, run this from a Developer Command Prompt or an environment where MSVC and Windows SDK library paths are available.
-
-## Workdir Flow
-
-The Settings / Diagnostics and Dashboard screens include a Workdir Setup panel.
-
-Use it to:
-
-- choose a folder with the native folder picker,
-- initialize a new workdir,
-- open an existing workdir,
-- reload the current workdir.
-
-Use an absolute path outside the application directory. Relative paths are rejected. This avoids ambiguous path resolution and, during `tauri dev`, prevents choosing a workdir inside `src-tauri/` where SQLite writes would trigger automatic rebuilds and relaunches.
+- relative paths are rejected;
+- nested paths inside the app/runtime directory are rejected;
+- path validation uses normalized/canonical checks to avoid disguised `..` traversal or case-mismatch issues.
 
 Initializing a new workdir creates:
 
@@ -70,28 +58,134 @@ stages/
 logs/
 ```
 
-The generated `pipeline.yaml` is a valid default config with `ingest` and `normalize` stages.
+## Stage 3 Runtime Model
 
-## Stage 1 Supports
+Stage 3 separates logical entities from physical file instances:
 
-- routable app shell: Dashboard, Entities, Entity Detail, Stage Editor, Workspace Explorer, Settings / Diagnostics,
-- explicit initialization state model,
-- structured YAML validation issues,
-- workdir health checks,
-- SQLite schema bootstrap for `settings`, `stages`, `entities`, `entity_stage_states`, `stage_runs`, `app_events`,
-- deterministic stage upsert from YAML into SQLite,
-- UI visibility for project name, workdir path, config path, database path, config status, database status, stage count, and stage IDs.
+- `entities` = logical aggregate by `entity_id`
+- `entity_files` = physical JSON file instances in stage folders
+- `entity_stage_states` = logical per-stage runtime state linked to the latest relevant file instance
+
+This allows one logical entity to exist in multiple stage folders at once:
+
+```text
+stages/incoming/entity-001.json
+stages/normalized/entity-001.json
+stages/enriched/entity-001.json
+```
+
+Still invalid:
+
+- the same `entity_id` twice in the same stage;
+- a registered file path changing to a different `entity_id`;
+- destructive overwrite of an existing target file during managed copy.
+
+## `pipeline.yaml`
+
+The app expects `pipeline.yaml` with:
+
+- `project`
+- `runtime`
+- `stages`
+
+Each stage should define:
+
+- `id`
+- `input_folder`
+- `output_folder`
+- `workflow_url`
+- `max_attempts`
+- `retry_delay_sec`
+- optional `next_stage`
+
+## JSON File Requirements
+
+Eligible files must be:
+
+- `.json` files, case-insensitive;
+- regular readable files;
+- inside an active stage input folder;
+- JSON objects at the root;
+- with non-empty `id`;
+- with non-null `payload`.
+
+Example:
+
+```json
+{
+  "id": "entity-0001",
+  "current_stage": "incoming",
+  "next_stage": "normalized",
+  "status": "pending",
+  "payload": {
+    "value": 1
+  },
+  "meta": {
+    "source": "manual"
+  }
+}
+```
+
+## Reconciliation Scan
+
+`Scan workspace` now performs reconciliation, not only discovery.
+
+It:
+
+1. loads active stages;
+2. provisions missing input/output directories;
+3. scans active input folders non-recursively;
+4. registers new file instances;
+5. updates changed file instances;
+6. marks missing files instead of deleting rows;
+7. restores missing files if they reappear;
+8. recomputes logical entity summaries;
+9. records file lifecycle app events.
+
+Inactive stages are not scanned for new files, but their historical rows remain visible.
+
+## Managed Next-Stage Copy
+
+Stage 3 adds a safe backend-managed copy operation for future runtime use.
+
+Behavior:
+
+- source file stays unchanged;
+- target stage is resolved from file `next_stage`, then stage config `next_stage`;
+- target JSON is updated in memory before write;
+- write uses a temporary file plus rename for atomicity;
+- destructive overwrite is not allowed.
+
+Managed copy updates target JSON fields:
+
+- `current_stage`
+- `status`
+- `next_stage`
+- `meta.updated_at`
+- `meta.beehive.copy_source_stage`
+- `meta.beehive.copy_target_stage`
+- `meta.beehive.copy_created_at`
+
+## UI
+
+Stage 3 surfaces:
+
+- Dashboard: reconciliation summary, present/missing files, managed copy count
+- Entities: logical entity rows
+- Entity Detail: all file instances plus stage states and managed copy action
+- Workspace Explorer: present/missing/invalid/managed-copy file visibility
+- Settings / Diagnostics: schema v3, reconciliation summary, file lifecycle events
 
 ## Intentionally Deferred
 
-Stage 1 does not implement:
+Stage 3 does not implement:
 
-- n8n workflow execution,
-- task queues,
-- retry runtime,
-- file scanning runtime,
-- JSON entity processing,
-- stage transition execution,
-- graph routing logic,
-- full stage CRUD editing,
-- runtime history operations.
+- n8n workflow execution
+- HTTP workflow calls
+- retry runtime
+- task queue worker
+- background watcher
+- file moves between stages
+- automatic source-stage completion
+- full JSON editor
+- advanced UI polish

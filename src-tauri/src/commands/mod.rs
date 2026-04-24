@@ -5,10 +5,11 @@ use crate::config;
 use crate::database;
 use crate::discovery;
 use crate::domain::{
-    AppEventsResult, BootstrapResult, CommandErrorInfo, EntityDetailResult, EntityFilters,
-    EntityListResult, RuntimeSummaryResult, ScanWorkspaceResult, StageListResult,
-    WorkspaceExplorerResult,
+    AppEventsResult, BootstrapResult, CommandErrorInfo, EntityDetailResult, EntityFilesResult,
+    EntityFilters, EntityListResult, FileCopyResult, RuntimeSummaryResult, ScanWorkspaceResult,
+    StageDirectoryProvisionResult, StageListResult, WorkspaceExplorerResult,
 };
+use crate::file_ops;
 use crate::workdir;
 
 #[tauri::command]
@@ -39,6 +40,33 @@ pub fn scan_workspace(path: String) -> ScanWorkspaceResult {
             }
         }
         Err(error) => ScanWorkspaceResult {
+            summary: None,
+            errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn ensure_stage_directories(path: String) -> StageDirectoryProvisionResult {
+    match load_runtime_context(&path) {
+        Ok(context) => {
+            match discovery::ensure_stage_directories(&context.workdir_path, &context.database_path)
+            {
+                Ok(summary) => StageDirectoryProvisionResult {
+                    summary: Some(summary),
+                    errors: Vec::new(),
+                },
+                Err(message) => StageDirectoryProvisionResult {
+                    summary: None,
+                    errors: vec![command_error(
+                        "ensure_stage_directories_failed",
+                        message,
+                        None,
+                    )],
+                },
+            }
+        }
+        Err(error) => StageDirectoryProvisionResult {
             summary: None,
             errors: vec![error],
         },
@@ -118,6 +146,28 @@ pub fn list_entities(path: String, filters: Option<EntityFilters>) -> EntityList
 }
 
 #[tauri::command]
+pub fn list_entity_files(path: String, entity_id: Option<String>) -> EntityFilesResult {
+    match load_runtime_context(&path) {
+        Ok(context) => {
+            match database::list_entity_files(&context.database_path, entity_id.as_deref()) {
+                Ok(files) => EntityFilesResult {
+                    files,
+                    errors: Vec::new(),
+                },
+                Err(message) => EntityFilesResult {
+                    files: Vec::new(),
+                    errors: vec![command_error("list_entity_files_failed", message, None)],
+                },
+            }
+        }
+        Err(error) => EntityFilesResult {
+            files: Vec::new(),
+            errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
 pub fn get_entity(path: String, entity_id: String) -> EntityDetailResult {
     match load_runtime_context(&path) {
         Ok(context) => match database::get_entity_detail(&context.database_path, &entity_id) {
@@ -140,6 +190,39 @@ pub fn get_entity(path: String, entity_id: String) -> EntityDetailResult {
         },
         Err(error) => EntityDetailResult {
             detail: None,
+            errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn create_next_stage_copy(
+    path: String,
+    entity_id: String,
+    source_stage_id: String,
+) -> FileCopyResult {
+    match load_runtime_context(&path) {
+        Ok(context) => match file_ops::create_next_stage_copy(
+            &context.workdir_path,
+            &context.database_path,
+            &entity_id,
+            &source_stage_id,
+        ) {
+            Ok(payload) => FileCopyResult {
+                payload: Some(payload),
+                errors: Vec::new(),
+            },
+            Err(message) => FileCopyResult {
+                payload: None,
+                errors: vec![command_error(
+                    "create_next_stage_copy_failed",
+                    message,
+                    None,
+                )],
+            },
+        },
+        Err(error) => FileCopyResult {
+            payload: None,
             errors: vec![error],
         },
     }

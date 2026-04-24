@@ -1,0 +1,848 @@
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use chrono::Utc;
+use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
+
+use crate::database::{
+    ensure_entity_stub, find_latest_entity_file_for_stage, find_stage_by_id, insert_app_event,
+    open_connection, recompute_entity_summaries, system_time_to_rfc3339, upsert_entity_file,
+    upsert_entity_stage_state, PersistEntityFileInput, PersistEntityStageStateInput,
+};
+use crate::discovery::ensure_stage_directories_for_stage_ids;
+use crate::domain::{
+    AppEventLevel, EntityValidationStatus, FileCopyPayload, FileCopyStatus, StageStatus,
+};
+use crate::workdir::path_string;
+
+pub fn create_next_stage_copy(
+    workdir_path: &Path,
+    database_path: &Path,
+    entity_id: &str,
+    source_stage_id: &str,
+) -> Result<FileCopyPayload, String> {
+    let connection = open_connection(database_path)?;
+    let source_stage = find_stage_by_id(&connection, source_stage_id)?
+        .ok_or_else(|| format!("Source stage '{source_stage_id}' was not found."))?;
+    let source_file = find_latest_entity_file_for_stage(&connection, entity_id, source_stage_id)?
+        .ok_or_else(|| {
+        format!(
+            "No file instance was found for entity '{}' on source stage '{}'.",
+            entity_id, source_stage_id
+        )
+    })?;
+
+    if !source_file.file_exists {
+        return Err(format!(
+            "Source file '{}' is currently marked missing and cannot be copied.",
+            source_file.file_path
+        ));
+    }
+
+    let target_stage_id = source_file
+        .next_stage
+        .clone()
+        .or_else(|| source_stage.next_stage.clone());
+
+    let now = Utc::now().to_rfc3339();
+    let Some(target_stage_id) = target_stage_id else {
+        insert_app_event(
+            &connection,
+            AppEventLevel::Warning,
+            "managed_copy_failed",
+            &format!(
+                "No next stage is configured for entity '{}' from source stage '{}'.",
+                entity_id, source_stage_id
+            ),
+            Some(json!({
+                "entity_id": entity_id,
+                "source_stage_id": source_stage_id,
+            })),
+            &now,
+        )?;
+        return Ok(FileCopyPayload {
+            status: FileCopyStatus::Blocked,
+            entity_id: entity_id.to_string(),
+            source_stage_id: source_stage_id.to_string(),
+            target_stage_id: None,
+            source_file_path: Some(source_file.file_path),
+            target_file_path: None,
+            target_file: None,
+            message: "No next stage is configured for this source stage.".to_string(),
+        });
+    };
+
+    let Some(target_stage) = find_stage_by_id(&connection, &target_stage_id)? else {
+        insert_app_event(
+            &connection,
+            AppEventLevel::Warning,
+            "managed_copy_failed",
+            &format!(
+                "Target stage '{}' does not exist for entity '{}'.",
+                target_stage_id, entity_id
+            ),
+            Some(json!({
+                "entity_id": entity_id,
+                "source_stage_id": source_stage_id,
+                "target_stage_id": target_stage_id,
+            })),
+            &now,
+        )?;
+        return Ok(FileCopyPayload {
+            status: FileCopyStatus::Blocked,
+            entity_id: entity_id.to_string(),
+            source_stage_id: source_stage_id.to_string(),
+            target_stage_id: Some(target_stage_id),
+            source_file_path: Some(source_file.file_path),
+            target_file_path: None,
+            target_file: None,
+            message: "The resolved next stage does not exist.".to_string(),
+        });
+    };
+
+    if !target_stage.is_active {
+        insert_app_event(
+            &connection,
+            AppEventLevel::Warning,
+            "managed_copy_failed",
+            &format!(
+                "Target stage '{}' is inactive for entity '{}'.",
+                target_stage.id, entity_id
+            ),
+            Some(json!({
+                "entity_id": entity_id,
+                "source_stage_id": source_stage_id,
+                "target_stage_id": target_stage.id,
+            })),
+            &now,
+        )?;
+        return Ok(FileCopyPayload {
+            status: FileCopyStatus::Blocked,
+            entity_id: entity_id.to_string(),
+            source_stage_id: source_stage_id.to_string(),
+            target_stage_id: Some(target_stage.id),
+            source_file_path: Some(source_file.file_path),
+            target_file_path: None,
+            target_file: None,
+            message: "The resolved next stage is inactive.".to_string(),
+        });
+    }
+
+    ensure_stage_directories_for_stage_ids(
+        workdir_path,
+        database_path,
+        &[target_stage.id.clone()],
+    )?;
+
+    let source_path = PathBuf::from(&source_file.file_path);
+    let source_bytes = fs::read(&source_path).map_err(|error| {
+        format!(
+            "Failed to read source file '{}': {error}",
+            source_path.display()
+        )
+    })?;
+    let source_json = serde_json::from_slice::<Value>(&source_bytes).map_err(|error| {
+        format!(
+            "Failed to parse source file '{}' as JSON before copy: {error}",
+            source_path.display()
+        )
+    })?;
+    let Some(root) = source_json.as_object() else {
+        return Err(format!(
+            "Source file '{}' must contain a JSON object before managed copy.",
+            source_path.display()
+        ));
+    };
+
+    let updated_json = build_target_json(
+        root,
+        source_stage_id,
+        &target_stage.id,
+        target_stage.next_stage.as_deref(),
+        &now,
+    )?;
+    let target_path = workdir_path
+        .join(&target_stage.input_folder)
+        .join(&source_file.file_name);
+    let target_path_string = path_string(&target_path);
+    let target_bytes = serde_json::to_vec_pretty(&updated_json)
+        .map_err(|error| format!("Failed to serialize target JSON for managed copy: {error}"))?;
+    let target_checksum = format!("{:x}", Sha256::digest(&target_bytes));
+
+    if target_path.exists() {
+        let existing_bytes = fs::read(&target_path).map_err(|error| {
+            format!(
+                "Failed to read existing target file '{}' during collision check: {error}",
+                target_path.display()
+            )
+        })?;
+        let existing_json = serde_json::from_slice::<Value>(&existing_bytes).map_err(|error| {
+            format!(
+                "Failed to parse existing target file '{}' during collision check: {error}",
+                target_path.display()
+            )
+        })?;
+        let existing_entity_id = existing_json
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let existing_checksum = format!("{:x}", Sha256::digest(&existing_bytes));
+
+        if existing_entity_id != entity_id {
+            insert_app_event(
+                &connection,
+                AppEventLevel::Error,
+                "unsafe_file_operation_rejected",
+                &format!(
+                    "Managed copy target '{}' already belongs to entity '{}'.",
+                    target_path.display(),
+                    existing_entity_id
+                ),
+                Some(json!({
+                    "entity_id": entity_id,
+                    "source_stage_id": source_stage_id,
+                    "target_stage_id": target_stage.id,
+                    "target_file_path": target_path_string,
+                })),
+                &now,
+            )?;
+            return Ok(FileCopyPayload {
+                status: FileCopyStatus::Failed,
+                entity_id: entity_id.to_string(),
+                source_stage_id: source_stage_id.to_string(),
+                target_stage_id: Some(target_stage.id),
+                source_file_path: Some(source_file.file_path),
+                target_file_path: Some(path_string(&target_path)),
+                target_file: None,
+                message: "Target path already exists for another entity.".to_string(),
+            });
+        }
+
+        let is_compatible_existing_target = existing_checksum == target_checksum
+            || existing_json.as_object().is_some_and(|root| {
+                root.get("id").and_then(Value::as_str) == Some(entity_id)
+                    && root.get("current_stage").and_then(Value::as_str)
+                        == Some(target_stage.id.as_str())
+                    && root.get("status").and_then(Value::as_str) == Some("pending")
+                    && root.get("next_stage").and_then(Value::as_str)
+                        == target_stage.next_stage.as_deref()
+                    && root
+                        .get("meta")
+                        .and_then(Value::as_object)
+                        .and_then(|meta| meta.get("beehive"))
+                        .and_then(Value::as_object)
+                        .and_then(|beehive| beehive.get("copy_source_stage"))
+                        .and_then(Value::as_str)
+                        == Some(source_stage_id)
+                    && root
+                        .get("meta")
+                        .and_then(Value::as_object)
+                        .and_then(|meta| meta.get("beehive"))
+                        .and_then(Value::as_object)
+                        .and_then(|beehive| beehive.get("copy_target_stage"))
+                        .and_then(Value::as_str)
+                        == Some(target_stage.id.as_str())
+            });
+
+        if !is_compatible_existing_target {
+            insert_app_event(
+                &connection,
+                AppEventLevel::Error,
+                "managed_copy_failed",
+                &format!(
+                    "Managed copy target '{}' already exists with different content.",
+                    target_path.display()
+                ),
+                Some(json!({
+                    "entity_id": entity_id,
+                    "source_stage_id": source_stage_id,
+                    "target_stage_id": target_stage.id,
+                    "target_file_path": target_path_string,
+                })),
+                &now,
+            )?;
+            return Ok(FileCopyPayload {
+                status: FileCopyStatus::Failed,
+                entity_id: entity_id.to_string(),
+                source_stage_id: source_stage_id.to_string(),
+                target_stage_id: Some(target_stage.id),
+                source_file_path: Some(source_file.file_path),
+                target_file_path: Some(path_string(&target_path)),
+                target_file: None,
+                message: "Target path already exists with different content.".to_string(),
+            });
+        }
+
+        let target_file = register_target_file(
+            database_path,
+            &target_stage.id,
+            &target_stage.next_stage,
+            entity_id,
+            &target_path,
+            &source_file.file_name,
+            &target_checksum,
+            &target_bytes,
+            Some(source_file.id),
+            &now,
+        )?;
+        insert_app_event(
+            &connection,
+            AppEventLevel::Info,
+            "managed_copy_skipped",
+            &format!(
+                "Managed copy target '{}' already exists with compatible content.",
+                target_path.display()
+            ),
+            Some(json!({
+                "entity_id": entity_id,
+                "source_stage_id": source_stage_id,
+                "target_stage_id": target_stage.id,
+                "target_file_path": path_string(&target_path),
+            })),
+            &now,
+        )?;
+
+        return Ok(FileCopyPayload {
+            status: FileCopyStatus::AlreadyExists,
+            entity_id: entity_id.to_string(),
+            source_stage_id: source_stage_id.to_string(),
+            target_stage_id: Some(target_stage.id),
+            source_file_path: Some(source_file.file_path),
+            target_file_path: Some(path_string(&target_path)),
+            target_file: Some(target_file),
+            message: "Target file already exists with compatible content.".to_string(),
+        });
+    }
+
+    write_atomic_json(&target_path, &target_bytes)?;
+    let target_file = register_target_file(
+        database_path,
+        &target_stage.id,
+        &target_stage.next_stage,
+        entity_id,
+        &target_path,
+        &source_file.file_name,
+        &target_checksum,
+        &target_bytes,
+        Some(source_file.id),
+        &now,
+    )?;
+
+    let connection = open_connection(database_path)?;
+    insert_app_event(
+        &connection,
+        AppEventLevel::Info,
+        "managed_copy_created",
+        &format!(
+            "Managed copy created for entity '{}' into stage '{}'.",
+            entity_id, target_stage.id
+        ),
+        Some(json!({
+            "entity_id": entity_id,
+            "source_stage_id": source_stage_id,
+            "target_stage_id": target_stage.id,
+            "source_file_path": source_file.file_path,
+            "target_file_path": path_string(&target_path),
+        })),
+        &now,
+    )?;
+
+    Ok(FileCopyPayload {
+        status: FileCopyStatus::Created,
+        entity_id: entity_id.to_string(),
+        source_stage_id: source_stage_id.to_string(),
+        target_stage_id: Some(target_stage.id),
+        source_file_path: Some(source_file.file_path),
+        target_file_path: Some(path_string(&target_path)),
+        target_file: Some(target_file),
+        message: "Managed copy created successfully.".to_string(),
+    })
+}
+
+fn build_target_json(
+    root: &Map<String, Value>,
+    source_stage_id: &str,
+    target_stage_id: &str,
+    next_stage: Option<&str>,
+    now: &str,
+) -> Result<Value, String> {
+    let mut next_root = root.clone();
+    next_root.insert(
+        "current_stage".to_string(),
+        Value::String(target_stage_id.to_string()),
+    );
+    next_root.insert("status".to_string(), Value::String("pending".to_string()));
+    next_root.insert(
+        "next_stage".to_string(),
+        next_stage
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null),
+    );
+
+    let mut meta = next_root
+        .remove("meta")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    meta.insert("updated_at".to_string(), Value::String(now.to_string()));
+
+    let mut beehive = meta
+        .remove("beehive")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    beehive.insert(
+        "copy_source_stage".to_string(),
+        Value::String(source_stage_id.to_string()),
+    );
+    beehive.insert(
+        "copy_target_stage".to_string(),
+        Value::String(target_stage_id.to_string()),
+    );
+    beehive.insert(
+        "copy_created_at".to_string(),
+        Value::String(now.to_string()),
+    );
+    meta.insert("beehive".to_string(), Value::Object(beehive));
+    next_root.insert("meta".to_string(), Value::Object(meta));
+
+    Ok(Value::Object(next_root))
+}
+
+fn write_atomic_json(target_path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let Some(parent) = target_path.parent() else {
+        return Err(format!(
+            "Target path '{}' does not have a parent directory.",
+            target_path.display()
+        ));
+    };
+
+    let tmp_path = parent.join(format!(
+        ".beehive-tmp-{}-{}.json",
+        Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_else(|| Utc::now().timestamp_micros() * 1000),
+        std::process::id()
+    ));
+
+    let write_result = (|| -> Result<(), String> {
+        let mut file = File::create(&tmp_path).map_err(|error| {
+            format!(
+                "Failed to create temporary file '{}' for managed copy: {error}",
+                tmp_path.display()
+            )
+        })?;
+        file.write_all(bytes).map_err(|error| {
+            format!(
+                "Failed to write temporary file '{}' for managed copy: {error}",
+                tmp_path.display()
+            )
+        })?;
+        file.sync_all().map_err(|error| {
+            format!(
+                "Failed to sync temporary file '{}' for managed copy: {error}",
+                tmp_path.display()
+            )
+        })?;
+        fs::rename(&tmp_path, target_path).map_err(|error| {
+            format!(
+                "Failed to move temporary file '{}' to '{}': {error}",
+                tmp_path.display(),
+                target_path.display()
+            )
+        })?;
+        Ok(())
+    })();
+
+    if write_result.is_err() && tmp_path.exists() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+
+    write_result
+}
+
+fn register_target_file(
+    database_path: &Path,
+    target_stage_id: &str,
+    target_stage_next_stage: &Option<String>,
+    entity_id: &str,
+    target_path: &Path,
+    file_name: &str,
+    checksum: &str,
+    bytes: &[u8],
+    copy_source_file_id: Option<i64>,
+    now: &str,
+) -> Result<crate::domain::EntityFileRecord, String> {
+    let mut connection = open_connection(database_path)?;
+    let transaction = connection.transaction().map_err(|error| {
+        format!("Failed to start target file registration transaction: {error}")
+    })?;
+    ensure_entity_stub(&transaction, entity_id, now)?;
+
+    let metadata = fs::metadata(target_path).map_err(|error| {
+        format!(
+            "Failed to read target file metadata '{}': {error}",
+            target_path.display()
+        )
+    })?;
+    let file_mtime = metadata
+        .modified()
+        .map(system_time_to_rfc3339)
+        .map_err(|error| {
+            format!(
+                "Failed to read target file modified time '{}': {error}",
+                target_path.display()
+            )
+        })?;
+    let file_size = metadata.len();
+
+    let parsed = serde_json::from_slice::<Value>(bytes)
+        .map_err(|error| format!("Failed to parse target JSON after write: {error}"))?;
+    let root = parsed
+        .as_object()
+        .ok_or_else(|| "Managed copy target JSON root must be an object.".to_string())?;
+    let payload_value = root
+        .get("payload")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    let meta_value = root
+        .get("meta")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    let payload_json = serde_json::to_string(&payload_value)
+        .map_err(|error| format!("Failed to serialize managed copy payload JSON: {error}"))?;
+    let meta_json = serde_json::to_string(&meta_value)
+        .map_err(|error| format!("Failed to serialize managed copy meta JSON: {error}"))?;
+
+    let (_outcome, file_id) = upsert_entity_file(
+        &transaction,
+        &PersistEntityFileInput {
+            entity_id: entity_id.to_string(),
+            stage_id: target_stage_id.to_string(),
+            file_path: path_string(target_path),
+            file_name: file_name.to_string(),
+            checksum: checksum.to_string(),
+            file_mtime,
+            file_size,
+            payload_json,
+            meta_json,
+            current_stage: Some(target_stage_id.to_string()),
+            next_stage: target_stage_next_stage.clone(),
+            status: StageStatus::Pending,
+            validation_status: EntityValidationStatus::Valid,
+            validation_errors: Vec::new(),
+            is_managed_copy: true,
+            copy_source_file_id,
+            first_seen_at: now.to_string(),
+            last_seen_at: now.to_string(),
+            updated_at: now.to_string(),
+        },
+    )?;
+
+    let stage = find_stage_by_id(&transaction, target_stage_id)?.ok_or_else(|| {
+        format!(
+            "Target stage '{}' disappeared during registration.",
+            target_stage_id
+        )
+    })?;
+    upsert_entity_stage_state(
+        &transaction,
+        &PersistEntityStageStateInput {
+            entity_id: entity_id.to_string(),
+            stage_id: target_stage_id.to_string(),
+            file_path: path_string(target_path),
+            file_instance_id: Some(file_id),
+            file_exists: true,
+            status: StageStatus::Pending,
+            max_attempts: stage.max_attempts,
+            discovered_at: now.to_string(),
+            last_seen_at: now.to_string(),
+            updated_at: now.to_string(),
+        },
+    )?;
+    recompute_entity_summaries(&transaction)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("Failed to commit target file registration: {error}"))?;
+
+    let connection = open_connection(database_path)?;
+    find_latest_entity_file_for_stage(&connection, entity_id, target_stage_id)?
+        .ok_or_else(|| {
+            format!(
+                "Target file registration finished but no entity file was found for entity '{}' on stage '{}'.",
+                entity_id, target_stage_id
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::{bootstrap_database, get_entity_detail, list_entity_files};
+    use crate::discovery::scan_workspace;
+    use crate::domain::{PipelineConfig, ProjectConfig, RuntimeConfig, StageDefinition};
+
+    fn test_config(stages: Vec<StageDefinition>) -> PipelineConfig {
+        PipelineConfig {
+            project: ProjectConfig {
+                name: "beehive".to_string(),
+                workdir: ".".to_string(),
+            },
+            runtime: RuntimeConfig::default(),
+            stages,
+        }
+    }
+
+    fn stage(
+        id: &str,
+        input_folder: &str,
+        output_folder: &str,
+        next_stage: Option<&str>,
+    ) -> StageDefinition {
+        StageDefinition {
+            id: id.to_string(),
+            input_folder: input_folder.to_string(),
+            output_folder: output_folder.to_string(),
+            workflow_url: format!("http://localhost:5678/webhook/{id}"),
+            max_attempts: 3,
+            retry_delay_sec: 10,
+            next_stage: next_stage.map(ToOwned::to_owned),
+        }
+    }
+
+    fn write_json(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent");
+        }
+        fs::write(path, contents).expect("write json");
+    }
+
+    #[test]
+    fn copy_to_active_next_stage_creates_target_file_and_keeps_source_unchanged() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        let source_path = workdir
+            .join("stages")
+            .join("incoming")
+            .join("entity-1.json");
+        bootstrap_database(
+            &database_path,
+            &test_config(vec![
+                stage(
+                    "incoming",
+                    "stages/incoming",
+                    "stages/incoming-out",
+                    Some("normalized"),
+                ),
+                stage(
+                    "normalized",
+                    "stages/normalized",
+                    "stages/normalized-out",
+                    Some("enriched"),
+                ),
+                stage("enriched", "stages/enriched", "stages/enriched-out", None),
+            ]),
+        )
+        .expect("bootstrap");
+
+        write_json(
+            &source_path,
+            r#"{
+  "id": "entity-1",
+  "current_stage": "incoming",
+  "next_stage": "normalized",
+  "status": "pending",
+  "payload": {"value": 1},
+  "meta": {"source": "manual"}
+}"#,
+        );
+        scan_workspace(&workdir, &database_path).expect("scan");
+
+        let payload = create_next_stage_copy(&workdir, &database_path, "entity-1", "incoming")
+            .expect("copy payload");
+        let detail = get_entity_detail(&database_path, "entity-1")
+            .expect("detail result")
+            .expect("detail exists");
+        let target_path = workdir
+            .join("stages")
+            .join("normalized")
+            .join("entity-1.json");
+        let target_json =
+            serde_json::from_slice::<Value>(&fs::read(&target_path).expect("read target"))
+                .expect("parse target");
+        let source_json =
+            serde_json::from_slice::<Value>(&fs::read(&source_path).expect("read source"))
+                .expect("parse source");
+
+        assert_eq!(payload.status, FileCopyStatus::Created);
+        assert!(target_path.exists());
+        assert_eq!(detail.files.len(), 2);
+        assert_eq!(
+            target_json.get("current_stage").and_then(Value::as_str),
+            Some("normalized")
+        );
+        assert_eq!(
+            target_json.get("status").and_then(Value::as_str),
+            Some("pending")
+        );
+        assert_eq!(
+            target_json.get("next_stage").and_then(Value::as_str),
+            Some("enriched")
+        );
+        assert_eq!(
+            target_json
+                .get("meta")
+                .and_then(Value::as_object)
+                .and_then(|meta| meta.get("beehive"))
+                .and_then(Value::as_object)
+                .and_then(|beehive| beehive.get("copy_source_stage"))
+                .and_then(Value::as_str),
+            Some("incoming")
+        );
+        assert_eq!(
+            source_json.get("current_stage").and_then(Value::as_str),
+            Some("incoming")
+        );
+        assert_eq!(
+            detail
+                .stage_states
+                .iter()
+                .find(|state| state.stage_id == "normalized")
+                .map(|state| state.status.as_str()),
+            Some("pending")
+        );
+        assert_eq!(
+            detail
+                .stage_states
+                .iter()
+                .find(|state| state.stage_id == "incoming")
+                .map(|state| state.status.as_str()),
+            Some("pending")
+        );
+    }
+
+    #[test]
+    fn repeated_compatible_copy_returns_already_exists() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(
+            &database_path,
+            &test_config(vec![
+                stage(
+                    "incoming",
+                    "stages/incoming",
+                    "stages/incoming-out",
+                    Some("normalized"),
+                ),
+                stage(
+                    "normalized",
+                    "stages/normalized",
+                    "stages/normalized-out",
+                    None,
+                ),
+            ]),
+        )
+        .expect("bootstrap");
+
+        write_json(
+            &workdir
+                .join("stages")
+                .join("incoming")
+                .join("entity-1.json"),
+            r#"{"id":"entity-1","current_stage":"incoming","next_stage":"normalized","status":"pending","payload":{"value":1},"meta":{"source":"manual"}}"#,
+        );
+        scan_workspace(&workdir, &database_path).expect("scan");
+        create_next_stage_copy(&workdir, &database_path, "entity-1", "incoming")
+            .expect("first copy");
+
+        let second = create_next_stage_copy(&workdir, &database_path, "entity-1", "incoming")
+            .expect("second copy");
+
+        assert_eq!(second.status, FileCopyStatus::AlreadyExists);
+    }
+
+    #[test]
+    fn target_collision_with_different_content_fails_safely() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(
+            &database_path,
+            &test_config(vec![
+                stage(
+                    "incoming",
+                    "stages/incoming",
+                    "stages/incoming-out",
+                    Some("normalized"),
+                ),
+                stage(
+                    "normalized",
+                    "stages/normalized",
+                    "stages/normalized-out",
+                    None,
+                ),
+            ]),
+        )
+        .expect("bootstrap");
+
+        write_json(
+            &workdir
+                .join("stages")
+                .join("incoming")
+                .join("entity-1.json"),
+            r#"{"id":"entity-1","current_stage":"incoming","next_stage":"normalized","status":"pending","payload":{"value":1},"meta":{"source":"manual"}}"#,
+        );
+        write_json(
+            &workdir
+                .join("stages")
+                .join("normalized")
+                .join("entity-1.json"),
+            r#"{"id":"entity-1","current_stage":"normalized","next_stage":null,"status":"pending","payload":{"value":999},"meta":{"source":"manual"}}"#,
+        );
+        scan_workspace(&workdir, &database_path).expect("scan");
+
+        let payload = create_next_stage_copy(&workdir, &database_path, "entity-1", "incoming")
+            .expect("copy payload");
+        let files = list_entity_files(&database_path, Some("entity-1")).expect("files");
+
+        assert_eq!(payload.status, FileCopyStatus::Failed);
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn no_target_stage_returns_blocked_without_fake_stage() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(
+            &database_path,
+            &test_config(vec![stage(
+                "incoming",
+                "stages/incoming",
+                "stages/incoming-out",
+                None,
+            )]),
+        )
+        .expect("bootstrap");
+
+        write_json(
+            &workdir
+                .join("stages")
+                .join("incoming")
+                .join("entity-1.json"),
+            r#"{"id":"entity-1","current_stage":"incoming","status":"pending","payload":{"value":1},"meta":{"source":"manual"}}"#,
+        );
+        scan_workspace(&workdir, &database_path).expect("scan");
+
+        let payload = create_next_stage_copy(&workdir, &database_path, "entity-1", "incoming")
+            .expect("copy payload");
+        let detail = get_entity_detail(&database_path, "entity-1")
+            .expect("detail result")
+            .expect("detail exists");
+
+        assert_eq!(payload.status, FileCopyStatus::Blocked);
+        assert_eq!(detail.files.len(), 1);
+    }
+}

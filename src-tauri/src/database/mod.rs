@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -7,30 +8,33 @@ use serde_json::{json, Value};
 
 use crate::domain::{
     AppEventLevel, AppEventRecord, ConfigValidationIssue, DatabaseState, EntityDetailPayload,
-    EntityFilters, EntityRecord, EntityStageStateRecord, EntityValidationStatus,
+    EntityFileRecord, EntityFilters, EntityRecord, EntityStageStateRecord, EntityValidationStatus,
     InvalidDiscoveryRecord, PipelineConfig, RuntimeSummary, StageDefinition, StageRecord,
     StageStatus, StatusCount, WorkspaceExplorerResult, WorkspaceFileRecord, WorkspaceStageGroup,
 };
 use crate::workdir::path_string;
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
-pub(crate) struct PersistEntityInput {
+pub(crate) struct PersistEntityFileInput {
     pub entity_id: String,
+    pub stage_id: String,
     pub file_path: String,
     pub file_name: String,
-    pub stage_id: String,
-    pub current_stage: Option<String>,
-    pub next_stage: Option<String>,
-    pub status: StageStatus,
     pub checksum: String,
     pub file_mtime: String,
     pub file_size: u64,
     pub payload_json: String,
     pub meta_json: String,
+    pub current_stage: Option<String>,
+    pub next_stage: Option<String>,
+    pub status: StageStatus,
     pub validation_status: EntityValidationStatus,
     pub validation_errors: Vec<ConfigValidationIssue>,
-    pub discovered_at: String,
+    pub is_managed_copy: bool,
+    pub copy_source_file_id: Option<i64>,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
     pub updated_at: String,
 }
 
@@ -38,17 +42,21 @@ pub(crate) struct PersistEntityStageStateInput {
     pub entity_id: String,
     pub stage_id: String,
     pub file_path: String,
+    pub file_instance_id: Option<i64>,
+    pub file_exists: bool,
     pub status: StageStatus,
     pub max_attempts: u64,
     pub discovered_at: String,
+    pub last_seen_at: String,
     pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EntityWriteOutcome {
+pub(crate) enum EntityFileWriteOutcome {
     Inserted,
     Updated,
     Unchanged,
+    Restored,
 }
 
 pub fn bootstrap_database(path: &Path, config: &PipelineConfig) -> Result<DatabaseState, String> {
@@ -73,6 +81,14 @@ pub fn bootstrap_database(path: &Path, config: &PipelineConfig) -> Result<Databa
 }
 
 pub fn open_connection(path: &Path) -> Result<Connection, String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create SQLite parent directory '{}': {error}",
+                parent.display()
+            )
+        })?;
+    }
     let connection = Connection::open(path).map_err(|error| {
         format!(
             "Failed to open SQLite database '{}': {error}",
@@ -98,21 +114,39 @@ pub fn get_runtime_summary(path: &Path) -> Result<RuntimeSummary, String> {
         "SELECT COUNT(*) FROM stages WHERE is_active = 0",
         [],
     )?;
-    let total_registered_entities = query_count(&connection, "SELECT COUNT(*) FROM entities", [])?;
-    let latest_discovery_at = load_setting(&connection, "last_scan_completed_at")?;
-    let discovery_error_count = load_setting(&connection, "last_scan_error_count")?
+    let total_entities = query_count(&connection, "SELECT COUNT(*) FROM entities", [])?;
+    let present_file_count = query_count(
+        &connection,
+        "SELECT COUNT(*) FROM entity_files WHERE file_exists = 1",
+        [],
+    )?;
+    let missing_file_count = query_count(
+        &connection,
+        "SELECT COUNT(*) FROM entity_files WHERE file_exists = 0",
+        [],
+    )?;
+    let managed_copy_count = query_count(
+        &connection,
+        "SELECT COUNT(*) FROM entity_files WHERE is_managed_copy = 1",
+        [],
+    )?;
+    let invalid_file_count = load_setting(&connection, "last_scan_invalid_count")?
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0);
+    let last_reconciliation_at = load_setting(&connection, "last_scan_completed_at")?;
     let entities_by_status = load_status_counts(&connection)?;
 
     Ok(RuntimeSummary {
         schema_version,
         active_stage_count,
         inactive_stage_count,
-        total_registered_entities,
+        total_entities,
+        present_file_count,
+        missing_file_count,
+        managed_copy_count,
+        invalid_file_count,
         entities_by_status,
-        latest_discovery_at,
-        discovery_error_count,
+        last_reconciliation_at,
     })
 }
 
@@ -126,10 +160,10 @@ pub fn list_entities(path: &Path, filters: &EntityFilters) -> Result<Vec<EntityR
     let mut entities = load_entities_from_connection(&connection)?;
 
     if let Some(stage_id) = filters.stage_id.as_ref().filter(|value| !value.is_empty()) {
-        entities.retain(|entity| entity.stage_id == *stage_id);
+        entities.retain(|entity| entity.current_stage_id.as_deref() == Some(stage_id.as_str()));
     }
     if let Some(status) = filters.status.as_ref().filter(|value| !value.is_empty()) {
-        entities.retain(|entity| entity.status == *status);
+        entities.retain(|entity| entity.current_status == *status);
     }
     if let Some(validation_status) = filters.validation_status.as_ref() {
         entities.retain(|entity| &entity.validation_status == validation_status);
@@ -142,12 +176,25 @@ pub fn list_entities(path: &Path, filters: &EntityFilters) -> Result<Vec<EntityR
         if !search.is_empty() {
             entities.retain(|entity| {
                 entity.entity_id.to_lowercase().contains(&search)
-                    || entity.file_name.to_lowercase().contains(&search)
+                    || entity
+                        .latest_file_path
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&search)
             });
         }
     }
 
     Ok(entities)
+}
+
+pub fn list_entity_files(
+    path: &Path,
+    entity_id: Option<&str>,
+) -> Result<Vec<EntityFileRecord>, String> {
+    let connection = open_connection(path)?;
+    load_entity_files_from_connection(&connection, entity_id)
 }
 
 pub fn get_entity_detail(
@@ -158,13 +205,20 @@ pub fn get_entity_detail(
     let Some(entity) = find_entity_by_id(&connection, entity_id)? else {
         return Ok(None);
     };
+    let files = load_entity_files_from_connection(&connection, Some(entity_id))?;
     let stage_states = load_stage_states_for_entity(&connection, entity_id)?;
-    let json_preview = build_json_preview(&entity)?;
+    let json_preview = build_json_preview(
+        files
+            .iter()
+            .find(|file| Some(file.id) == entity.latest_file_id)
+            .or_else(|| files.first()),
+    )?;
 
     Ok(Some(EntityDetailPayload {
         entity,
+        files,
         stage_states,
-        json_preview,
+        latest_json_preview: json_preview,
     }))
 }
 
@@ -177,17 +231,22 @@ pub fn get_workspace_explorer(path: &Path) -> Result<WorkspaceExplorerResult, St
     let connection = open_connection(path)?;
     let stages = load_stage_records_from_connection(&connection)?;
     let mut files_by_stage: HashMap<String, Vec<WorkspaceFileRecord>> = HashMap::new();
-    for entity in load_entities_from_connection(&connection)? {
+
+    for file in load_entity_files_from_connection(&connection, None)? {
         files_by_stage
-            .entry(entity.stage_id.clone())
+            .entry(file.stage_id.clone())
             .or_default()
             .push(WorkspaceFileRecord {
-                entity_id: entity.entity_id,
-                file_name: entity.file_name,
-                file_path: entity.file_path,
-                status: entity.status,
-                validation_status: entity.validation_status,
-                updated_at: entity.updated_at,
+                file_id: file.id,
+                entity_id: file.entity_id,
+                file_name: file.file_name,
+                file_path: file.file_path,
+                status: file.status,
+                validation_status: file.validation_status,
+                updated_at: file.updated_at,
+                file_exists: file.file_exists,
+                missing_since: file.missing_since,
+                is_managed_copy: file.is_managed_copy,
             });
     }
 
@@ -195,16 +254,17 @@ pub fn get_workspace_explorer(path: &Path) -> Result<WorkspaceExplorerResult, St
     let mut invalid_by_stage: HashMap<String, Vec<InvalidDiscoveryRecord>> = HashMap::new();
     if let Some(scan_id) = last_scan_id {
         for event in load_app_events_from_connection(&connection, 250)? {
-            if !matches!(
+            let is_relevant = matches!(
                 event.code.as_str(),
                 "invalid_json_file"
                     | "missing_entity_id"
                     | "missing_payload"
-                    | "duplicate_entity_id"
+                    | "duplicate_entity_in_stage"
                     | "entity_id_changed_for_path"
                     | "file_metadata_unavailable"
                     | "file_read_failed"
-            ) {
+            );
+            if !is_relevant {
                 continue;
             }
 
@@ -217,20 +277,15 @@ pub fn get_workspace_explorer(path: &Path) -> Result<WorkspaceExplorerResult, St
             if event_scan_id != scan_id {
                 continue;
             }
-
-            let Some(stage_id) = context
-                .get("stage_id")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-            else {
+            let Some(stage_id) = context.get("stage_id").and_then(Value::as_str) else {
                 continue;
             };
 
             invalid_by_stage
-                .entry(stage_id.clone())
+                .entry(stage_id.to_string())
                 .or_default()
                 .push(InvalidDiscoveryRecord {
-                    stage_id: Some(stage_id),
+                    stage_id: Some(stage_id.to_string()),
                     file_name: context
                         .get("file_name")
                         .and_then(Value::as_str)
@@ -270,6 +325,15 @@ pub(crate) fn load_active_stages_from_connection(
     Ok(stages.into_iter().filter(|stage| stage.is_active).collect())
 }
 
+pub(crate) fn find_stage_by_id(
+    connection: &Connection,
+    stage_id: &str,
+) -> Result<Option<StageRecord>, String> {
+    Ok(load_stage_records_from_connection(connection)?
+        .into_iter()
+        .find(|stage| stage.id == stage_id))
+}
+
 pub(crate) fn find_entity_by_id(
     connection: &Connection,
     entity_id: &str,
@@ -279,20 +343,15 @@ pub(crate) fn find_entity_by_id(
             r#"
             SELECT
                 entity_id,
-                file_path,
-                file_name,
-                stage_id,
-                current_stage,
-                next_stage,
-                status,
-                checksum,
-                file_mtime,
-                file_size,
-                payload_json,
-                meta_json,
+                current_stage_id,
+                current_status,
+                latest_file_path,
+                latest_file_id,
+                file_count,
                 validation_status,
                 validation_errors_json,
-                discovered_at,
+                first_seen_at,
+                last_seen_at,
                 updated_at
             FROM entities
             WHERE entity_id = ?1
@@ -304,174 +363,237 @@ pub(crate) fn find_entity_by_id(
         .map_err(|error| format!("Failed to load entity '{entity_id}': {error}"))
 }
 
-pub(crate) fn find_entity_by_file_path(
+pub(crate) fn find_entity_file_by_path(
     connection: &Connection,
     file_path: &str,
-) -> Result<Option<EntityRecord>, String> {
+) -> Result<Option<EntityFileRecord>, String> {
     connection
         .query_row(
-            r#"
-            SELECT
-                entity_id,
-                file_path,
-                file_name,
-                stage_id,
-                current_stage,
-                next_stage,
-                status,
-                checksum,
-                file_mtime,
-                file_size,
-                payload_json,
-                meta_json,
-                validation_status,
-                validation_errors_json,
-                discovered_at,
-                updated_at
-            FROM entities
-            WHERE file_path = ?1
-            "#,
+            entity_files_select_sql(Some("WHERE file_path = ?1")),
             params![file_path],
-            entity_from_row,
+            entity_file_from_row,
         )
         .optional()
-        .map_err(|error| format!("Failed to load entity for path '{file_path}': {error}"))
+        .map_err(|error| format!("Failed to load entity file '{file_path}': {error}"))
 }
 
-pub(crate) fn upsert_entity(
+pub(crate) fn find_entity_file_by_entity_stage(
+    connection: &Connection,
+    entity_id: &str,
+    stage_id: &str,
+) -> Result<Option<EntityFileRecord>, String> {
+    connection
+        .query_row(
+            entity_files_select_sql(Some(
+                "WHERE entity_id = ?1 AND stage_id = ?2 ORDER BY updated_at DESC, id DESC LIMIT 1",
+            )),
+            params![entity_id, stage_id],
+            entity_file_from_row,
+        )
+        .optional()
+        .map_err(|error| {
+            format!("Failed to load entity file for entity '{entity_id}' on stage '{stage_id}': {error}")
+        })
+}
+
+pub(crate) fn find_latest_entity_file_for_stage(
+    connection: &Connection,
+    entity_id: &str,
+    stage_id: &str,
+) -> Result<Option<EntityFileRecord>, String> {
+    find_entity_file_by_entity_stage(connection, entity_id, stage_id)
+}
+
+pub(crate) fn ensure_entity_stub(
     transaction: &Transaction<'_>,
-    entity: &PersistEntityInput,
-) -> Result<EntityWriteOutcome, String> {
-    let existing = find_entity_by_id(transaction, &entity.entity_id)?;
+    entity_id: &str,
+    now: &str,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            r#"
+            INSERT INTO entities (
+                entity_id,
+                current_stage_id,
+                current_status,
+                latest_file_path,
+                latest_file_id,
+                file_count,
+                validation_status,
+                validation_errors_json,
+                first_seen_at,
+                last_seen_at,
+                updated_at
+            )
+            VALUES (?1, NULL, 'pending', NULL, NULL, 0, 'valid', '[]', ?2, ?2, ?2)
+            ON CONFLICT(entity_id) DO NOTHING
+            "#,
+            params![entity_id, now],
+        )
+        .map_err(|error| format!("Failed to ensure logical entity stub '{entity_id}': {error}"))?;
+    Ok(())
+}
 
-    let serialized_errors = serialize_json(&entity.validation_errors)?;
-    let status = stage_status_value(&entity.status);
-    let validation_status = validation_status_value(&entity.validation_status);
+pub(crate) fn upsert_entity_file(
+    transaction: &Transaction<'_>,
+    file: &PersistEntityFileInput,
+) -> Result<(EntityFileWriteOutcome, i64), String> {
+    let serialized_errors = serialize_json(&file.validation_errors)?;
+    let status = stage_status_value(&file.status);
+    let validation_status = validation_status_value(&file.validation_status);
 
+    let existing = find_entity_file_by_path(transaction, &file.file_path)?;
     match existing {
         Some(existing)
-            if existing.file_path == entity.file_path
-                && existing.checksum == entity.checksum
-                && existing.file_mtime == entity.file_mtime
-                && existing.file_size == entity.file_size
-                && existing.current_stage == entity.current_stage
-                && existing.next_stage == entity.next_stage
-                && existing.payload_json == entity.payload_json
-                && existing.meta_json == entity.meta_json
+            if existing.entity_id == file.entity_id
+                && existing.stage_id == file.stage_id
+                && existing.checksum == file.checksum
+                && existing.file_mtime == file.file_mtime
+                && existing.file_size == file.file_size
+                && existing.current_stage == file.current_stage
+                && existing.next_stage == file.next_stage
                 && existing.status == status
-                && existing.validation_status == entity.validation_status
-                && existing.validation_errors == entity.validation_errors =>
+                && existing.payload_json == file.payload_json
+                && existing.meta_json == file.meta_json
+                && existing.validation_status == file.validation_status
+                && existing.validation_errors == file.validation_errors
+                && existing.file_exists
+                && existing.is_managed_copy == file.is_managed_copy
+                && existing.copy_source_file_id == file.copy_source_file_id =>
         {
-            Ok(EntityWriteOutcome::Unchanged)
+            transaction
+                .execute(
+                    "UPDATE entity_files SET last_seen_at = ?2 WHERE id = ?1",
+                    params![existing.id, file.last_seen_at],
+                )
+                .map_err(|error| {
+                    format!(
+                        "Failed to refresh last_seen_at for entity file '{}': {error}",
+                        existing.file_path
+                    )
+                })?;
+            Ok((EntityFileWriteOutcome::Unchanged, existing.id))
         }
         Some(existing) => {
             transaction
                 .execute(
                     r#"
-                    UPDATE entities
+                    UPDATE entity_files
                     SET
-                        file_path = ?2,
-                        file_name = ?3,
-                        stage_id = ?4,
-                        current_stage = ?5,
-                        next_stage = ?6,
-                        status = ?7,
-                        checksum = ?8,
-                        file_mtime = ?9,
-                        file_size = ?10,
-                        payload_json = ?11,
-                        meta_json = ?12,
+                        entity_id = ?2,
+                        stage_id = ?3,
+                        file_name = ?4,
+                        checksum = ?5,
+                        file_mtime = ?6,
+                        file_size = ?7,
+                        payload_json = ?8,
+                        meta_json = ?9,
+                        current_stage = ?10,
+                        next_stage = ?11,
+                        status = ?12,
                         validation_status = ?13,
                         validation_errors_json = ?14,
-                        updated_at = ?15
-                    WHERE entity_id = ?1
+                        is_managed_copy = ?15,
+                        copy_source_file_id = ?16,
+                        file_exists = 1,
+                        missing_since = NULL,
+                        last_seen_at = ?17,
+                        updated_at = ?18
+                    WHERE id = ?1
                     "#,
                     params![
-                        entity.entity_id,
-                        entity.file_path,
-                        entity.file_name,
-                        entity.stage_id,
-                        entity.current_stage,
-                        entity.next_stage,
+                        existing.id,
+                        file.entity_id,
+                        file.stage_id,
+                        file.file_name,
+                        file.checksum,
+                        file.file_mtime,
+                        file.file_size as i64,
+                        file.payload_json,
+                        file.meta_json,
+                        file.current_stage,
+                        file.next_stage,
                         status,
-                        entity.checksum,
-                        entity.file_mtime,
-                        entity.file_size as i64,
-                        entity.payload_json,
-                        entity.meta_json,
                         validation_status,
                         serialized_errors,
-                        entity.updated_at,
+                        bool_to_i64(file.is_managed_copy),
+                        file.copy_source_file_id,
+                        file.last_seen_at,
+                        file.updated_at,
                     ],
                 )
                 .map_err(|error| {
-                    format!("Failed to update entity '{}': {error}", entity.entity_id)
+                    format!(
+                        "Failed to update entity file '{}': {error}",
+                        existing.file_path
+                    )
                 })?;
 
-            if existing.discovered_at != entity.discovered_at {
-                transaction
-                    .execute(
-                        "UPDATE entities SET discovered_at = ?2 WHERE entity_id = ?1 AND discovered_at = ''",
-                        params![entity.entity_id, entity.discovered_at],
-                    )
-                    .map_err(|error| {
-                        format!(
-                            "Failed to reconcile discovery timestamp for entity '{}': {error}",
-                            entity.entity_id
-                        )
-                    })?;
-            }
-
-            Ok(EntityWriteOutcome::Updated)
+            let outcome = if existing.file_exists {
+                EntityFileWriteOutcome::Updated
+            } else {
+                EntityFileWriteOutcome::Restored
+            };
+            Ok((outcome, existing.id))
         }
         None => {
             transaction
                 .execute(
                     r#"
-                    INSERT INTO entities (
+                    INSERT INTO entity_files (
                         entity_id,
+                        stage_id,
                         file_path,
                         file_name,
-                        stage_id,
-                        current_stage,
-                        next_stage,
-                        status,
                         checksum,
                         file_mtime,
                         file_size,
                         payload_json,
                         meta_json,
+                        current_stage,
+                        next_stage,
+                        status,
                         validation_status,
                         validation_errors_json,
-                        discovered_at,
+                        is_managed_copy,
+                        copy_source_file_id,
+                        file_exists,
+                        missing_since,
+                        first_seen_at,
+                        last_seen_at,
                         updated_at
                     )
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 1, NULL, ?17, ?18, ?19)
                     "#,
                     params![
-                        entity.entity_id,
-                        entity.file_path,
-                        entity.file_name,
-                        entity.stage_id,
-                        entity.current_stage,
-                        entity.next_stage,
+                        file.entity_id,
+                        file.stage_id,
+                        file.file_path,
+                        file.file_name,
+                        file.checksum,
+                        file.file_mtime,
+                        file.file_size as i64,
+                        file.payload_json,
+                        file.meta_json,
+                        file.current_stage,
+                        file.next_stage,
                         status,
-                        entity.checksum,
-                        entity.file_mtime,
-                        entity.file_size as i64,
-                        entity.payload_json,
-                        entity.meta_json,
                         validation_status,
                         serialized_errors,
-                        entity.discovered_at,
-                        entity.updated_at,
+                        bool_to_i64(file.is_managed_copy),
+                        file.copy_source_file_id,
+                        file.first_seen_at,
+                        file.last_seen_at,
+                        file.updated_at,
                     ],
                 )
                 .map_err(|error| {
-                    format!("Failed to insert entity '{}': {error}", entity.entity_id)
+                    format!("Failed to insert entity file '{}': {error}", file.file_path)
                 })?;
-
-            Ok(EntityWriteOutcome::Inserted)
+            Ok((
+                EntityFileWriteOutcome::Inserted,
+                transaction.last_insert_rowid(),
+            ))
         }
     }
 }
@@ -487,6 +609,8 @@ pub(crate) fn upsert_entity_stage_state(
                 entity_id,
                 stage_id,
                 file_path,
+                file_instance_id,
+                file_exists,
                 status,
                 attempts,
                 max_attempts,
@@ -497,21 +621,29 @@ pub(crate) fn upsert_entity_stage_state(
                 last_finished_at,
                 created_child_path,
                 discovered_at,
+                last_seen_at,
                 updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, 0, ?5, NULL, NULL, NULL, NULL, NULL, NULL, ?6, ?7)
-            ON CONFLICT(entity_id, stage_id, file_path) DO UPDATE SET
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, NULL, NULL, NULL, NULL, NULL, NULL, ?8, ?9, ?10)
+            ON CONFLICT(entity_id, stage_id) DO UPDATE SET
+                file_path = excluded.file_path,
+                file_instance_id = excluded.file_instance_id,
+                file_exists = excluded.file_exists,
                 status = excluded.status,
                 max_attempts = excluded.max_attempts,
+                last_seen_at = excluded.last_seen_at,
                 updated_at = excluded.updated_at
             "#,
             params![
                 stage_state.entity_id,
                 stage_state.stage_id,
                 stage_state.file_path,
+                stage_state.file_instance_id,
+                bool_to_i64(stage_state.file_exists),
                 stage_status_value(&stage_state.status),
                 stage_state.max_attempts as i64,
                 stage_state.discovered_at,
+                stage_state.last_seen_at,
                 stage_state.updated_at,
             ],
         )
@@ -521,6 +653,166 @@ pub(crate) fn upsert_entity_stage_state(
                 stage_state.entity_id, stage_state.stage_id
             )
         })?;
+    Ok(())
+}
+
+pub(crate) fn mark_missing_files_for_active_stages(
+    transaction: &Transaction<'_>,
+    active_stage_ids: &HashSet<String>,
+    seen_paths: &HashSet<String>,
+    scan_id: &str,
+    seen_at: &str,
+) -> Result<u64, String> {
+    let existing_files = load_entity_files_from_connection(transaction, None)?;
+    let mut missing_count = 0;
+
+    for file in existing_files {
+        if !active_stage_ids.contains(&file.stage_id) {
+            continue;
+        }
+        if seen_paths.contains(&file.file_path) || !file.file_exists {
+            continue;
+        }
+
+        transaction
+            .execute(
+                r#"
+                UPDATE entity_files
+                SET file_exists = 0,
+                    missing_since = COALESCE(missing_since, ?2),
+                    updated_at = ?2
+                WHERE id = ?1
+                "#,
+                params![file.id, seen_at],
+            )
+            .map_err(|error| {
+                format!(
+                    "Failed to mark file '{}' as missing: {error}",
+                    file.file_path
+                )
+            })?;
+
+        transaction
+            .execute(
+                r#"
+                UPDATE entity_stage_states
+                SET file_exists = 0,
+                    last_seen_at = ?3,
+                    updated_at = ?3
+                WHERE entity_id = ?1 AND stage_id = ?2
+                "#,
+                params![file.entity_id, file.stage_id, seen_at],
+            )
+            .map_err(|error| {
+                format!(
+                    "Failed to mark stage state missing for entity '{}' on stage '{}': {error}",
+                    file.entity_id, file.stage_id
+                )
+            })?;
+
+        insert_app_event(
+            transaction,
+            AppEventLevel::Warning,
+            "file_missing",
+            &format!(
+                "Tracked file '{}' is missing from the workspace.",
+                file.file_path
+            ),
+            Some(json!({
+                "scan_id": scan_id,
+                "entity_id": file.entity_id,
+                "stage_id": file.stage_id,
+                "file_path": file.file_path,
+            })),
+            seen_at,
+        )?;
+        missing_count += 1;
+    }
+
+    Ok(missing_count)
+}
+
+pub(crate) fn recompute_entity_summaries(transaction: &Transaction<'_>) -> Result<(), String> {
+    let entity_ids = load_entity_ids(transaction)?;
+
+    for entity_id in entity_ids {
+        let files = load_entity_files_from_connection(transaction, Some(&entity_id))?;
+        if files.is_empty() {
+            continue;
+        }
+
+        let latest_present = files
+            .iter()
+            .filter(|file| file.file_exists)
+            .max_by(|left, right| compare_file_records(left, right));
+        let latest_any = files
+            .iter()
+            .max_by(|left, right| compare_file_records(left, right));
+        let latest = latest_present.or(latest_any).expect("files is not empty");
+
+        let validation_status = files
+            .iter()
+            .map(|file| validation_rank(&file.validation_status))
+            .max()
+            .map(validation_status_from_rank)
+            .unwrap_or(EntityValidationStatus::Valid);
+
+        let validation_errors = latest.validation_errors.clone();
+        let file_count = files.len() as u64;
+        let first_seen_at = files
+            .iter()
+            .map(|file| file.first_seen_at.as_str())
+            .min()
+            .unwrap_or(latest.first_seen_at.as_str())
+            .to_string();
+        let last_seen_at = files
+            .iter()
+            .map(|file| file.last_seen_at.as_str())
+            .max()
+            .unwrap_or(latest.last_seen_at.as_str())
+            .to_string();
+        let updated_at = files
+            .iter()
+            .map(|file| file.updated_at.as_str())
+            .max()
+            .unwrap_or(latest.updated_at.as_str())
+            .to_string();
+
+        transaction
+            .execute(
+                r#"
+                UPDATE entities
+                SET
+                    current_stage_id = ?2,
+                    current_status = ?3,
+                    latest_file_path = ?4,
+                    latest_file_id = ?5,
+                    file_count = ?6,
+                    validation_status = ?7,
+                    validation_errors_json = ?8,
+                    first_seen_at = ?9,
+                    last_seen_at = ?10,
+                    updated_at = ?11
+                WHERE entity_id = ?1
+                "#,
+                params![
+                    entity_id,
+                    latest.stage_id,
+                    latest.status,
+                    latest.file_path,
+                    latest.id,
+                    file_count as i64,
+                    validation_status_value(&validation_status),
+                    serialize_json(&validation_errors)?,
+                    first_seen_at,
+                    last_seen_at,
+                    updated_at,
+                ],
+            )
+            .map_err(|error| {
+                format!("Failed to recompute entity summary '{entity_id}': {error}")
+            })?;
+    }
 
     Ok(())
 }
@@ -592,23 +884,37 @@ pub(crate) fn load_setting(connection: &Connection, key: &str) -> Result<Option<
 
 fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
     match current_schema_version(connection)? {
-        0 => create_schema_v2(connection),
-        1 => migrate_v1_to_v2(connection),
-        SCHEMA_VERSION => {
-            create_supporting_indexes(connection)?;
-            write_schema_setting(connection, SCHEMA_VERSION, &Utc::now().to_rfc3339())
+        0 => create_schema_v3(connection)?,
+        1 => {
+            migrate_v1_to_v2(connection)?;
+            migrate_v2_to_v3(connection)?;
         }
-        version => Err(format!("Unsupported SQLite schema version: {version}")),
+        2 => migrate_v2_to_v3(connection)?,
+        3 => {}
+        version => {
+            return Err(format!(
+                "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, or 3."
+            ))
+        }
     }
+
+    let now = Utc::now().to_rfc3339();
+    set_setting(
+        connection,
+        "schema_version",
+        &SCHEMA_VERSION.to_string(),
+        &now,
+    )?;
+    Ok(())
 }
 
 fn current_schema_version(connection: &Connection) -> Result<u32, String> {
     connection
         .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
-        .map_err(|error| format!("Failed to read schema version: {error}"))
+        .map_err(|error| format!("Failed to read PRAGMA user_version: {error}"))
 }
 
-fn create_schema_v2(connection: &Connection) -> Result<(), String> {
+fn create_schema_v3(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
             r#"
@@ -637,22 +943,45 @@ fn create_schema_v2(connection: &Connection) -> Result<(), String> {
 
             CREATE TABLE IF NOT EXISTS entities (
                 entity_id TEXT PRIMARY KEY,
-                file_path TEXT NOT NULL,
-                file_name TEXT NOT NULL,
+                current_stage_id TEXT,
+                current_status TEXT NOT NULL,
+                latest_file_path TEXT,
+                latest_file_id INTEGER,
+                file_count INTEGER NOT NULL DEFAULT 0,
+                validation_status TEXT NOT NULL DEFAULT 'valid',
+                validation_errors_json TEXT NOT NULL DEFAULT '[]',
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS entity_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_id TEXT NOT NULL,
                 stage_id TEXT NOT NULL,
-                current_stage TEXT,
-                next_stage TEXT,
-                status TEXT NOT NULL,
+                file_path TEXT NOT NULL UNIQUE,
+                file_name TEXT NOT NULL,
                 checksum TEXT NOT NULL,
                 file_mtime TEXT NOT NULL,
                 file_size INTEGER NOT NULL,
                 payload_json TEXT NOT NULL DEFAULT '{}',
                 meta_json TEXT NOT NULL DEFAULT '{}',
+                current_stage TEXT,
+                next_stage TEXT,
+                status TEXT NOT NULL,
                 validation_status TEXT NOT NULL,
                 validation_errors_json TEXT NOT NULL DEFAULT '[]',
-                discovered_at TEXT NOT NULL,
+                is_managed_copy INTEGER NOT NULL DEFAULT 0,
+                copy_source_file_id INTEGER,
+                file_exists INTEGER NOT NULL DEFAULT 1,
+                missing_since TEXT,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                FOREIGN KEY (stage_id) REFERENCES stages(stage_id)
+                FOREIGN KEY (entity_id) REFERENCES entities(entity_id),
+                FOREIGN KEY (stage_id) REFERENCES stages(stage_id),
+                FOREIGN KEY (copy_source_file_id) REFERENCES entity_files(id),
+                UNIQUE(entity_id, stage_id)
             );
 
             CREATE TABLE IF NOT EXISTS entity_stage_states (
@@ -660,6 +989,8 @@ fn create_schema_v2(connection: &Connection) -> Result<(), String> {
                 entity_id TEXT NOT NULL,
                 stage_id TEXT NOT NULL,
                 file_path TEXT NOT NULL,
+                file_instance_id INTEGER,
+                file_exists INTEGER NOT NULL DEFAULT 1,
                 status TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 max_attempts INTEGER NOT NULL,
@@ -670,10 +1001,12 @@ fn create_schema_v2(connection: &Connection) -> Result<(), String> {
                 last_finished_at TEXT,
                 created_child_path TEXT,
                 discovered_at TEXT NOT NULL,
+                last_seen_at TEXT,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (entity_id) REFERENCES entities(entity_id),
                 FOREIGN KEY (stage_id) REFERENCES stages(stage_id),
-                UNIQUE(entity_id, stage_id, file_path)
+                FOREIGN KEY (file_instance_id) REFERENCES entity_files(id),
+                UNIQUE(entity_id, stage_id)
             );
 
             CREATE TABLE IF NOT EXISTS stage_runs (
@@ -697,40 +1030,28 @@ fn create_schema_v2(connection: &Connection) -> Result<(), String> {
                 created_at TEXT NOT NULL
             );
 
-            PRAGMA user_version = 2;
+            PRAGMA user_version = 3;
             "#,
         )
-        .map_err(|error| format!("Failed to initialize SQLite schema v2: {error}"))?;
-
-    create_supporting_indexes(connection)?;
-    write_schema_setting(connection, SCHEMA_VERSION, &Utc::now().to_rfc3339())?;
-
+        .map_err(|error| format!("Failed to create SQLite schema v3: {error}"))?;
     Ok(())
 }
 
 fn migrate_v1_to_v2(connection: &mut Connection) -> Result<(), String> {
-    let now = Utc::now().to_rfc3339();
-    let transaction = connection
-        .transaction()
-        .map_err(|error| format!("Failed to start schema migration transaction: {error}"))?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(|error| format!("Failed to disable foreign keys for v1->v2 migration: {error}"))?;
 
-    transaction
+    connection
         .execute_batch(
             r#"
-            PRAGMA foreign_keys = OFF;
             ALTER TABLE stages ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1;
             ALTER TABLE stages ADD COLUMN archived_at TEXT;
             ALTER TABLE stages ADD COLUMN last_seen_in_config_at TEXT;
-            UPDATE stages SET last_seen_in_config_at = updated_at WHERE last_seen_in_config_at IS NULL;
-            ALTER TABLE entities RENAME TO entities_v1;
-            ALTER TABLE entity_stage_states RENAME TO entity_stage_states_v1;
-            "#,
-        )
-        .map_err(|error| format!("Failed to prepare schema migration to v2: {error}"))?;
 
-    transaction
-        .execute_batch(
-            r#"
+            ALTER TABLE entities RENAME TO entities_v1_legacy;
+            ALTER TABLE entity_stage_states RENAME TO entity_stage_states_v1_legacy;
+
             CREATE TABLE entities (
                 entity_id TEXT PRIMARY KEY,
                 file_path TEXT NOT NULL,
@@ -744,12 +1065,48 @@ fn migrate_v1_to_v2(connection: &mut Connection) -> Result<(), String> {
                 file_size INTEGER NOT NULL,
                 payload_json TEXT NOT NULL DEFAULT '{}',
                 meta_json TEXT NOT NULL DEFAULT '{}',
-                validation_status TEXT NOT NULL,
+                validation_status TEXT NOT NULL DEFAULT 'warning',
                 validation_errors_json TEXT NOT NULL DEFAULT '[]',
                 discovered_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (stage_id) REFERENCES stages(stage_id)
+                updated_at TEXT NOT NULL
             );
+
+            INSERT INTO entities (
+                entity_id,
+                file_path,
+                file_name,
+                stage_id,
+                current_stage,
+                next_stage,
+                status,
+                checksum,
+                file_mtime,
+                file_size,
+                payload_json,
+                meta_json,
+                validation_status,
+                validation_errors_json,
+                discovered_at,
+                updated_at
+            )
+            SELECT
+                entity_id,
+                'legacy/' || entity_id || '.json',
+                entity_id || '.json',
+                COALESCE(current_stage, 'legacy'),
+                current_stage,
+                next_stage,
+                status,
+                '',
+                created_at,
+                0,
+                payload_json,
+                meta_json,
+                'warning',
+                '[]',
+                created_at,
+                updated_at
+            FROM entities_v1_legacy;
 
             CREATE TABLE entity_stage_states (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -771,58 +1128,9 @@ fn migrate_v1_to_v2(connection: &mut Connection) -> Result<(), String> {
                 FOREIGN KEY (stage_id) REFERENCES stages(stage_id),
                 UNIQUE(entity_id, stage_id, file_path)
             );
-            "#,
-        )
-        .map_err(|error| format!("Failed to create v2 tables during migration: {error}"))?;
 
-    transaction
-        .execute(
-            r#"
-            INSERT INTO entities (
-                entity_id,
-                file_path,
-                file_name,
-                stage_id,
-                current_stage,
-                next_stage,
-                status,
-                checksum,
-                file_mtime,
-                file_size,
-                payload_json,
-                meta_json,
-                validation_status,
-                validation_errors_json,
-                discovered_at,
-                updated_at
-            )
-            SELECT
-                entity_id,
-                '',
-                '',
-                COALESCE(current_stage, ''),
-                current_stage,
-                next_stage,
-                status,
-                '',
-                created_at,
-                0,
-                payload_json,
-                meta_json,
-                'invalid',
-                '[{"severity":"warning","code":"migrated_from_stage1","path":"entities","message":"Entity migrated from Stage 1 without file metadata."}]',
-                created_at,
-                updated_at
-            FROM entities_v1
-            "#,
-            [],
-        )
-        .map_err(|error| format!("Failed to migrate Stage 1 entities to v2: {error}"))?;
-
-    transaction
-        .execute(
-            r#"
             INSERT INTO entity_stage_states (
+                id,
                 entity_id,
                 stage_id,
                 file_path,
@@ -839,83 +1147,309 @@ fn migrate_v1_to_v2(connection: &mut Connection) -> Result<(), String> {
                 updated_at
             )
             SELECT
-                state.entity_id,
-                state.stage_id,
-                '',
-                state.status,
-                state.attempts,
+                legacy.id,
+                legacy.entity_id,
+                legacy.stage_id,
+                COALESCE(entity.file_path, 'legacy/' || legacy.entity_id || '.json'),
+                legacy.status,
+                legacy.attempts,
                 COALESCE(stage.max_attempts, 1),
-                state.last_error,
+                legacy.last_error,
                 NULL,
                 NULL,
                 NULL,
                 NULL,
                 NULL,
-                state.created_at,
-                state.updated_at
-            FROM entity_stage_states_v1 state
-            LEFT JOIN stages stage ON stage.stage_id = state.stage_id
-            "#,
-            [],
-        )
-        .map_err(|error| format!("Failed to migrate Stage 1 entity states to v2: {error}"))?;
+                legacy.created_at,
+                legacy.updated_at
+            FROM entity_stage_states_v1_legacy legacy
+            LEFT JOIN entities entity ON entity.entity_id = legacy.entity_id
+            LEFT JOIN stages stage ON stage.stage_id = legacy.stage_id;
 
-    transaction
-        .execute_batch(
-            r#"
-            DROP TABLE entities_v1;
-            DROP TABLE entity_stage_states_v1;
+            DROP TABLE entities_v1_legacy;
+            DROP TABLE entity_stage_states_v1_legacy;
+
             PRAGMA user_version = 2;
-            PRAGMA foreign_keys = ON;
             "#,
         )
-        .map_err(|error| format!("Failed to finalize schema migration to v2: {error}"))?;
+        .map_err(|error| format!("Failed to migrate schema from v1 to v2: {error}"))?;
 
-    create_supporting_indexes(&transaction)?;
-    write_schema_setting(&transaction, SCHEMA_VERSION, &now)?;
+    let now = Utc::now().to_rfc3339();
     insert_app_event(
-        &transaction,
+        connection,
         AppEventLevel::Info,
         "schema_migrated_to_v2",
         "SQLite schema migrated from version 1 to version 2.",
-        Some(json!({ "from_version": 1, "to_version": 2 })),
+        None,
         &now,
     )?;
-
-    transaction
-        .commit()
-        .map_err(|error| format!("Failed to commit schema migration to v2: {error}"))?;
-
+    set_setting(connection, "schema_version", "2", &now)?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|error| {
+            format!("Failed to re-enable foreign keys after v1->v2 migration: {error}")
+        })?;
     Ok(())
 }
 
-fn create_supporting_indexes(connection: &Connection) -> Result<(), String> {
+fn migrate_v2_to_v3(connection: &mut Connection) -> Result<(), String> {
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(|error| format!("Failed to disable foreign keys for v2->v3 migration: {error}"))?;
+
     connection
         .execute_batch(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_stages_is_active ON stages(is_active);
-            CREATE INDEX IF NOT EXISTS idx_entities_stage_id ON entities(stage_id);
-            CREATE INDEX IF NOT EXISTS idx_entities_status ON entities(status);
-            CREATE INDEX IF NOT EXISTS idx_entities_validation_status ON entities(validation_status);
-            CREATE INDEX IF NOT EXISTS idx_entity_stage_states_entity_id ON entity_stage_states(entity_id);
-            CREATE INDEX IF NOT EXISTS idx_app_events_created_at ON app_events(created_at DESC);
+            ALTER TABLE entities RENAME TO entities_v2_legacy;
+            ALTER TABLE entity_stage_states RENAME TO entity_stage_states_v2_legacy;
+
+            CREATE TABLE entities (
+                entity_id TEXT PRIMARY KEY,
+                current_stage_id TEXT,
+                current_status TEXT NOT NULL,
+                latest_file_path TEXT,
+                latest_file_id INTEGER,
+                file_count INTEGER NOT NULL DEFAULT 0,
+                validation_status TEXT NOT NULL DEFAULT 'valid',
+                validation_errors_json TEXT NOT NULL DEFAULT '[]',
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE entity_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_id TEXT NOT NULL,
+                stage_id TEXT NOT NULL,
+                file_path TEXT NOT NULL UNIQUE,
+                file_name TEXT NOT NULL,
+                checksum TEXT NOT NULL,
+                file_mtime TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                meta_json TEXT NOT NULL DEFAULT '{}',
+                current_stage TEXT,
+                next_stage TEXT,
+                status TEXT NOT NULL,
+                validation_status TEXT NOT NULL,
+                validation_errors_json TEXT NOT NULL DEFAULT '[]',
+                is_managed_copy INTEGER NOT NULL DEFAULT 0,
+                copy_source_file_id INTEGER,
+                file_exists INTEGER NOT NULL DEFAULT 1,
+                missing_since TEXT,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (entity_id) REFERENCES entities(entity_id),
+                FOREIGN KEY (stage_id) REFERENCES stages(stage_id),
+                FOREIGN KEY (copy_source_file_id) REFERENCES entity_files(id),
+                UNIQUE(entity_id, stage_id)
+            );
+
+            INSERT INTO entities (
+                entity_id,
+                current_stage_id,
+                current_status,
+                latest_file_path,
+                latest_file_id,
+                file_count,
+                validation_status,
+                validation_errors_json,
+                first_seen_at,
+                last_seen_at,
+                updated_at
+            )
+            SELECT
+                entity_id,
+                stage_id,
+                status,
+                file_path,
+                NULL,
+                1,
+                validation_status,
+                validation_errors_json,
+                discovered_at,
+                updated_at,
+                updated_at
+            FROM entities_v2_legacy;
+
+            INSERT INTO entity_files (
+                entity_id,
+                stage_id,
+                file_path,
+                file_name,
+                checksum,
+                file_mtime,
+                file_size,
+                payload_json,
+                meta_json,
+                current_stage,
+                next_stage,
+                status,
+                validation_status,
+                validation_errors_json,
+                is_managed_copy,
+                copy_source_file_id,
+                file_exists,
+                missing_since,
+                first_seen_at,
+                last_seen_at,
+                updated_at
+            )
+            SELECT
+                entity_id,
+                stage_id,
+                file_path,
+                file_name,
+                checksum,
+                file_mtime,
+                file_size,
+                payload_json,
+                meta_json,
+                current_stage,
+                next_stage,
+                status,
+                validation_status,
+                validation_errors_json,
+                0,
+                NULL,
+                1,
+                NULL,
+                discovered_at,
+                updated_at,
+                updated_at
+            FROM entities_v2_legacy;
+
+            UPDATE entities
+            SET
+                latest_file_id = (
+                    SELECT file.id
+                    FROM entity_files file
+                    WHERE file.entity_id = entities.entity_id
+                    ORDER BY file.last_seen_at DESC, file.updated_at DESC, file.id DESC
+                    LIMIT 1
+                ),
+                file_count = (
+                    SELECT COUNT(*)
+                    FROM entity_files file
+                    WHERE file.entity_id = entities.entity_id
+                );
+
+            CREATE TABLE entity_stage_states (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_id TEXT NOT NULL,
+                stage_id TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                file_instance_id INTEGER,
+                file_exists INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL,
+                last_error TEXT,
+                last_http_status INTEGER,
+                next_retry_at TEXT,
+                last_started_at TEXT,
+                last_finished_at TEXT,
+                created_child_path TEXT,
+                discovered_at TEXT NOT NULL,
+                last_seen_at TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (entity_id) REFERENCES entities(entity_id),
+                FOREIGN KEY (stage_id) REFERENCES stages(stage_id),
+                FOREIGN KEY (file_instance_id) REFERENCES entity_files(id),
+                UNIQUE(entity_id, stage_id)
+            );
+
+            INSERT INTO entity_stage_states (
+                id,
+                entity_id,
+                stage_id,
+                file_path,
+                file_instance_id,
+                file_exists,
+                status,
+                attempts,
+                max_attempts,
+                last_error,
+                last_http_status,
+                next_retry_at,
+                last_started_at,
+                last_finished_at,
+                created_child_path,
+                discovered_at,
+                last_seen_at,
+                updated_at
+            )
+            SELECT
+                legacy.id,
+                legacy.entity_id,
+                legacy.stage_id,
+                legacy.file_path,
+                file.id,
+                1,
+                legacy.status,
+                legacy.attempts,
+                legacy.max_attempts,
+                legacy.last_error,
+                legacy.last_http_status,
+                legacy.next_retry_at,
+                legacy.last_started_at,
+                legacy.last_finished_at,
+                legacy.created_child_path,
+                legacy.discovered_at,
+                legacy.updated_at,
+                legacy.updated_at
+            FROM entity_stage_states_v2_legacy legacy
+            LEFT JOIN entity_files file
+                ON file.entity_id = legacy.entity_id
+               AND file.stage_id = legacy.stage_id
+               AND file.file_path = legacy.file_path;
+
+            DROP TABLE entities_v2_legacy;
+            DROP TABLE entity_stage_states_v2_legacy;
+
+            PRAGMA user_version = 3;
             "#,
         )
-        .map_err(|error| format!("Failed to create SQLite indexes: {error}"))?;
+        .map_err(|error| format!("Failed to migrate schema from v2 to v3: {error}"))?;
 
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("Failed to start post-migration transaction: {error}"))?;
+    recompute_entity_summaries(&transaction)?;
+    let now = Utc::now().to_rfc3339();
+    insert_app_event(
+        &transaction,
+        AppEventLevel::Info,
+        "schema_migrated_to_v3",
+        "SQLite schema migrated from version 2 to version 3.",
+        None,
+        &now,
+    )?;
+    set_setting(&transaction, "schema_version", "3", &now)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("Failed to commit v2->v3 migration: {error}"))?;
+
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|error| {
+            format!("Failed to re-enable foreign keys after v2->v3 migration: {error}")
+        })?;
     Ok(())
 }
 
-fn write_schema_setting(connection: &Connection, version: u32, now: &str) -> Result<(), String> {
-    set_setting(connection, "schema_version", &version.to_string(), now)
-}
-
 fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
     let transaction = connection
         .transaction()
-        .map_err(|error| format!("Failed to begin stage sync transaction: {error}"))?;
-    let now = Utc::now().to_rfc3339();
-    let current_stage_ids: Vec<&str> = stages.iter().map(|stage| stage.id.as_str()).collect();
+        .map_err(|error| format!("Failed to start stage sync transaction: {error}"))?;
+
+    let incoming_ids = stages
+        .iter()
+        .map(|stage| stage.id.clone())
+        .collect::<HashSet<_>>();
+    let existing_ids = load_existing_stage_ids(&transaction)?;
 
     for stage in stages {
         transaction
@@ -949,85 +1483,85 @@ fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Resul
                     updated_at = excluded.updated_at
                 "#,
                 params![
-                    &stage.id,
-                    &stage.input_folder,
-                    &stage.output_folder,
-                    &stage.workflow_url,
+                    stage.id,
+                    stage.input_folder,
+                    stage.output_folder,
+                    stage.workflow_url,
                     stage.max_attempts as i64,
                     stage.retry_delay_sec as i64,
-                    stage.next_stage.as_deref(),
-                    &now
+                    stage.next_stage,
+                    now,
                 ],
             )
-            .map_err(|error| format!("Failed to sync stage '{}': {error}", stage.id))?;
+            .map_err(|error| format!("Failed to upsert stage '{}': {error}", stage.id))?;
     }
 
-    let stale_stage_ids = load_stale_stage_ids(&transaction, &current_stage_ids)?;
-    for stage_id in stale_stage_ids {
+    for existing_id in existing_ids {
+        if incoming_ids.contains(&existing_id) {
+            continue;
+        }
+
+        let was_active = transaction
+            .query_row(
+                "SELECT is_active FROM stages WHERE stage_id = ?1",
+                params![existing_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| {
+                format!(
+                    "Failed to load stage lifecycle for stage '{}': {error}",
+                    existing_id
+                )
+            })?
+            == 1;
+
         transaction
             .execute(
                 r#"
                 UPDATE stages
-                SET
-                    is_active = 0,
+                SET is_active = 0,
                     archived_at = COALESCE(archived_at, ?2),
                     updated_at = ?2
                 WHERE stage_id = ?1
                 "#,
-                params![stage_id, &now],
+                params![existing_id, now],
             )
-            .map_err(|error| format!("Failed to archive stale stage '{}': {error}", stage_id))?;
+            .map_err(|error| format!("Failed to deactivate stage '{}': {error}", existing_id))?;
 
-        insert_app_event(
-            &transaction,
-            AppEventLevel::Warning,
-            "stage_deactivated",
-            &format!("Stage '{stage_id}' was removed from pipeline.yaml and marked inactive."),
-            Some(json!({ "stage_id": stage_id })),
-            &now,
-        )?;
+        if was_active {
+            insert_app_event(
+                &transaction,
+                AppEventLevel::Info,
+                "stage_deactivated",
+                &format!(
+                    "Stage '{}' is no longer present in pipeline.yaml and was marked inactive.",
+                    existing_id
+                ),
+                Some(json!({ "stage_id": existing_id })),
+                &now,
+            )?;
+        }
     }
-
-    set_setting(&transaction, "last_stage_sync_at", &now, &now)?;
 
     transaction
         .commit()
         .map_err(|error| format!("Failed to commit stage sync transaction: {error}"))?;
-
     Ok(())
 }
 
-fn load_stale_stage_ids(
-    connection: &Connection,
-    current_stage_ids: &[&str],
-) -> Result<Vec<String>, String> {
-    let sql = if current_stage_ids.is_empty() {
-        "SELECT stage_id FROM stages WHERE is_active = 1".to_string()
-    } else {
-        let placeholders = std::iter::repeat_n("?", current_stage_ids.len())
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            "SELECT stage_id FROM stages WHERE is_active = 1 AND stage_id NOT IN ({placeholders})"
-        )
-    };
-
+fn load_existing_stage_ids(connection: &Connection) -> Result<Vec<String>, String> {
     let mut statement = connection
-        .prepare(&sql)
-        .map_err(|error| format!("Failed to prepare stale stage query: {error}"))?;
+        .prepare("SELECT stage_id FROM stages ORDER BY stage_id")
+        .map_err(|error| format!("Failed to prepare stage id query: {error}"))?;
     let rows = statement
-        .query_map(
-            rusqlite::params_from_iter(current_stage_ids.iter().copied()),
-            |row| row.get::<_, String>(0),
-        )
-        .map_err(|error| format!("Failed to query stale stages: {error}"))?;
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("Failed to query stage ids: {error}"))?;
 
-    let mut stage_ids = Vec::new();
+    let mut ids = Vec::new();
     for row in rows {
-        stage_ids.push(row.map_err(|error| format!("Failed to read stale stage id: {error}"))?);
+        ids.push(row.map_err(|error| format!("Failed to read stage id row: {error}"))?);
     }
-
-    Ok(stage_ids)
+    Ok(ids)
 }
 
 fn load_stage_records_from_connection(connection: &Connection) -> Result<Vec<StageRecord>, String> {
@@ -1047,9 +1581,9 @@ fn load_stage_records_from_connection(connection: &Connection) -> Result<Vec<Sta
                 stage.last_seen_in_config_at,
                 stage.created_at,
                 stage.updated_at,
-                COUNT(entity.entity_id) as entity_count
+                COUNT(DISTINCT file.entity_id) AS entity_count
             FROM stages stage
-            LEFT JOIN entities entity ON entity.stage_id = stage.stage_id
+            LEFT JOIN entity_files file ON file.stage_id = stage.stage_id AND file.file_exists = 1
             GROUP BY
                 stage.stage_id,
                 stage.input_folder,
@@ -1066,7 +1600,7 @@ fn load_stage_records_from_connection(connection: &Connection) -> Result<Vec<Sta
             ORDER BY stage.stage_id
             "#,
         )
-        .map_err(|error| format!("Failed to prepare stage list query: {error}"))?;
+        .map_err(|error| format!("Failed to prepare stage query: {error}"))?;
     let rows = statement
         .query_map([], |row| {
             Ok(StageRecord {
@@ -1091,7 +1625,6 @@ fn load_stage_records_from_connection(connection: &Connection) -> Result<Vec<Sta
     for row in rows {
         stages.push(row.map_err(|error| format!("Failed to read stage row: {error}"))?);
     }
-
     Ok(stages)
 }
 
@@ -1101,26 +1634,21 @@ fn load_entities_from_connection(connection: &Connection) -> Result<Vec<EntityRe
             r#"
             SELECT
                 entity_id,
-                file_path,
-                file_name,
-                stage_id,
-                current_stage,
-                next_stage,
-                status,
-                checksum,
-                file_mtime,
-                file_size,
-                payload_json,
-                meta_json,
+                current_stage_id,
+                current_status,
+                latest_file_path,
+                latest_file_id,
+                file_count,
                 validation_status,
                 validation_errors_json,
-                discovered_at,
+                first_seen_at,
+                last_seen_at,
                 updated_at
             FROM entities
             ORDER BY updated_at DESC, entity_id
             "#,
         )
-        .map_err(|error| format!("Failed to prepare entity list query: {error}"))?;
+        .map_err(|error| format!("Failed to prepare entity query: {error}"))?;
     let rows = statement
         .query_map([], entity_from_row)
         .map_err(|error| format!("Failed to query entities: {error}"))?;
@@ -1129,8 +1657,206 @@ fn load_entities_from_connection(connection: &Connection) -> Result<Vec<EntityRe
     for row in rows {
         entities.push(row.map_err(|error| format!("Failed to read entity row: {error}"))?);
     }
-
     Ok(entities)
+}
+
+fn load_entity_files_from_connection(
+    connection: &Connection,
+    entity_id: Option<&str>,
+) -> Result<Vec<EntityFileRecord>, String> {
+    let mut statement = match entity_id {
+        Some(_) => connection
+            .prepare(entity_files_select_sql(Some(
+                "WHERE entity_id = ?1 ORDER BY file_exists DESC, last_seen_at DESC, updated_at DESC, id DESC",
+            )))
+            .map_err(|error| format!("Failed to prepare entity-files query: {error}"))?,
+        None => connection
+            .prepare(entity_files_select_sql(Some(
+                "ORDER BY stage_id, file_exists DESC, last_seen_at DESC, updated_at DESC, id DESC",
+            )))
+            .map_err(|error| format!("Failed to prepare entity-files query: {error}"))?,
+    };
+
+    let rows = match entity_id {
+        Some(entity_id) => statement
+            .query_map(params![entity_id], entity_file_from_row)
+            .map_err(|error| format!("Failed to query entity files for '{entity_id}': {error}"))?,
+        None => statement
+            .query_map([], entity_file_from_row)
+            .map_err(|error| format!("Failed to query entity files: {error}"))?,
+    };
+
+    let mut files = Vec::new();
+    for row in rows {
+        files.push(row.map_err(|error| format!("Failed to read entity-file row: {error}"))?);
+    }
+    Ok(files)
+}
+
+fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
+    match filter {
+        Some(
+            "WHERE file_path = ?1",
+        ) => {
+            r#"
+            SELECT
+                id,
+                entity_id,
+                stage_id,
+                file_path,
+                file_name,
+                checksum,
+                file_mtime,
+                file_size,
+                payload_json,
+                meta_json,
+                current_stage,
+                next_stage,
+                status,
+                validation_status,
+                validation_errors_json,
+                is_managed_copy,
+                copy_source_file_id,
+                file_exists,
+                missing_since,
+                first_seen_at,
+                last_seen_at,
+                updated_at
+            FROM entity_files
+            WHERE file_path = ?1
+            "#
+        }
+        Some(
+            "WHERE entity_id = ?1 AND stage_id = ?2 ORDER BY updated_at DESC, id DESC LIMIT 1",
+        ) => {
+            r#"
+            SELECT
+                id,
+                entity_id,
+                stage_id,
+                file_path,
+                file_name,
+                checksum,
+                file_mtime,
+                file_size,
+                payload_json,
+                meta_json,
+                current_stage,
+                next_stage,
+                status,
+                validation_status,
+                validation_errors_json,
+                is_managed_copy,
+                copy_source_file_id,
+                file_exists,
+                missing_since,
+                first_seen_at,
+                last_seen_at,
+                updated_at
+            FROM entity_files
+            WHERE entity_id = ?1 AND stage_id = ?2
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            "#
+        }
+        Some(
+            "WHERE entity_id = ?1 ORDER BY file_exists DESC, last_seen_at DESC, updated_at DESC, id DESC LIMIT 1",
+        ) => {
+            r#"
+            SELECT
+                id,
+                entity_id,
+                stage_id,
+                file_path,
+                file_name,
+                checksum,
+                file_mtime,
+                file_size,
+                payload_json,
+                meta_json,
+                current_stage,
+                next_stage,
+                status,
+                validation_status,
+                validation_errors_json,
+                is_managed_copy,
+                copy_source_file_id,
+                file_exists,
+                missing_since,
+                first_seen_at,
+                last_seen_at,
+                updated_at
+            FROM entity_files
+            WHERE entity_id = ?1
+            ORDER BY file_exists DESC, last_seen_at DESC, updated_at DESC, id DESC
+            LIMIT 1
+            "#
+        }
+        Some(
+            "WHERE entity_id = ?1 ORDER BY file_exists DESC, last_seen_at DESC, updated_at DESC, id DESC",
+        ) => {
+            r#"
+            SELECT
+                id,
+                entity_id,
+                stage_id,
+                file_path,
+                file_name,
+                checksum,
+                file_mtime,
+                file_size,
+                payload_json,
+                meta_json,
+                current_stage,
+                next_stage,
+                status,
+                validation_status,
+                validation_errors_json,
+                is_managed_copy,
+                copy_source_file_id,
+                file_exists,
+                missing_since,
+                first_seen_at,
+                last_seen_at,
+                updated_at
+            FROM entity_files
+            WHERE entity_id = ?1
+            ORDER BY file_exists DESC, last_seen_at DESC, updated_at DESC, id DESC
+            "#
+        }
+        Some(
+            "ORDER BY stage_id, file_exists DESC, last_seen_at DESC, updated_at DESC, id DESC",
+        ) => {
+            r#"
+            SELECT
+                id,
+                entity_id,
+                stage_id,
+                file_path,
+                file_name,
+                checksum,
+                file_mtime,
+                file_size,
+                payload_json,
+                meta_json,
+                current_stage,
+                next_stage,
+                status,
+                validation_status,
+                validation_errors_json,
+                is_managed_copy,
+                copy_source_file_id,
+                file_exists,
+                missing_since,
+                first_seen_at,
+                last_seen_at,
+                updated_at
+            FROM entity_files
+            ORDER BY stage_id, file_exists DESC, last_seen_at DESC, updated_at DESC, id DESC
+            "#
+        }
+        _ => unreachable!("unexpected entity-files SQL variant"),
+    }
 }
 
 fn load_stage_states_for_entity(
@@ -1145,6 +1871,8 @@ fn load_stage_states_for_entity(
                 entity_id,
                 stage_id,
                 file_path,
+                file_instance_id,
+                file_exists,
                 status,
                 attempts,
                 max_attempts,
@@ -1155,6 +1883,7 @@ fn load_stage_states_for_entity(
                 last_finished_at,
                 created_child_path,
                 discovered_at,
+                last_seen_at,
                 updated_at
             FROM entity_stage_states
             WHERE entity_id = ?1
@@ -1169,28 +1898,28 @@ fn load_stage_states_for_entity(
                 entity_id: row.get(1)?,
                 stage_id: row.get(2)?,
                 file_path: row.get(3)?,
-                status: row.get(4)?,
-                attempts: row.get::<_, i64>(5)? as u64,
-                max_attempts: row.get::<_, i64>(6)? as u64,
-                last_error: row.get(7)?,
-                last_http_status: row.get(8)?,
-                next_retry_at: row.get(9)?,
-                last_started_at: row.get(10)?,
-                last_finished_at: row.get(11)?,
-                created_child_path: row.get(12)?,
-                discovered_at: row.get(13)?,
-                updated_at: row.get(14)?,
+                file_instance_id: row.get(4)?,
+                file_exists: row.get::<_, i64>(5)? == 1,
+                status: row.get(6)?,
+                attempts: row.get::<_, i64>(7)? as u64,
+                max_attempts: row.get::<_, i64>(8)? as u64,
+                last_error: row.get(9)?,
+                last_http_status: row.get(10)?,
+                next_retry_at: row.get(11)?,
+                last_started_at: row.get(12)?,
+                last_finished_at: row.get(13)?,
+                created_child_path: row.get(14)?,
+                discovered_at: row.get(15)?,
+                last_seen_at: row.get(16)?,
+                updated_at: row.get(17)?,
             })
         })
-        .map_err(|error| {
-            format!("Failed to query stage states for entity '{entity_id}': {error}")
-        })?;
+        .map_err(|error| format!("Failed to query stage states for '{entity_id}': {error}"))?;
 
     let mut states = Vec::new();
     for row in rows {
         states.push(row.map_err(|error| format!("Failed to read stage-state row: {error}"))?);
     }
-
     Ok(states)
 }
 
@@ -1238,13 +1967,12 @@ fn load_app_events_from_connection(
     for row in rows {
         events.push(row.map_err(|error| format!("Failed to read app event row: {error}"))?);
     }
-
     Ok(events)
 }
 
 fn load_status_counts(connection: &Connection) -> Result<Vec<StatusCount>, String> {
     let mut statement = connection
-        .prepare("SELECT status, COUNT(*) FROM entities GROUP BY status ORDER BY status")
+        .prepare("SELECT current_status, COUNT(*) FROM entities GROUP BY current_status ORDER BY current_status")
         .map_err(|error| format!("Failed to prepare status count query: {error}"))?;
     let rows = statement
         .query_map([], |row| {
@@ -1259,21 +1987,62 @@ fn load_status_counts(connection: &Connection) -> Result<Vec<StatusCount>, Strin
     for row in rows {
         counts.push(row.map_err(|error| format!("Failed to read status count row: {error}"))?);
     }
-
     Ok(counts)
 }
 
-fn build_json_preview(entity: &EntityRecord) -> Result<String, String> {
-    let payload = parse_json_value(&entity.payload_json)?;
-    let meta = parse_json_value(&entity.meta_json)?;
+fn load_entity_ids(connection: &Connection) -> Result<Vec<String>, String> {
+    let mut statement = connection
+        .prepare("SELECT entity_id FROM entities ORDER BY entity_id")
+        .map_err(|error| format!("Failed to prepare entity id query: {error}"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("Failed to query entity ids: {error}"))?;
+
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(row.map_err(|error| format!("Failed to read entity id row: {error}"))?);
+    }
+    Ok(ids)
+}
+
+fn build_json_preview(file: Option<&EntityFileRecord>) -> Result<String, String> {
+    let Some(file) = file else {
+        return Ok("{}".to_string());
+    };
+    let payload = parse_json_value(&file.payload_json)?;
+    let meta = parse_json_value(&file.meta_json)?;
     serialize_json_pretty(&json!({
-        "id": entity.entity_id,
-        "current_stage": entity.current_stage,
-        "next_stage": entity.next_stage,
-        "status": entity.status,
+        "id": file.entity_id,
+        "current_stage": file.current_stage,
+        "next_stage": file.next_stage,
+        "status": file.status,
         "payload": payload,
         "meta": meta,
     }))
+}
+
+fn compare_file_records(left: &EntityFileRecord, right: &EntityFileRecord) -> std::cmp::Ordering {
+    left.file_exists
+        .cmp(&right.file_exists)
+        .then_with(|| left.last_seen_at.cmp(&right.last_seen_at))
+        .then_with(|| left.updated_at.cmp(&right.updated_at))
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn validation_rank(status: &EntityValidationStatus) -> u8 {
+    match status {
+        EntityValidationStatus::Valid => 0,
+        EntityValidationStatus::Warning => 1,
+        EntityValidationStatus::Invalid => 2,
+    }
+}
+
+fn validation_status_from_rank(rank: u8) -> EntityValidationStatus {
+    match rank {
+        2 => EntityValidationStatus::Invalid,
+        1 => EntityValidationStatus::Warning,
+        _ => EntityValidationStatus::Valid,
+    }
 }
 
 fn query_count<P>(connection: &Connection, sql: &str, params: P) -> Result<u64, String>
@@ -1287,12 +2056,12 @@ where
 }
 
 fn entity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityRecord> {
-    let validation_status = parse_validation_status(&row.get::<_, String>(12)?)?;
-    let validation_errors_json: String = row.get(13)?;
+    let validation_status = parse_validation_status(&row.get::<_, String>(6)?)?;
+    let validation_errors_json: String = row.get(7)?;
     let validation_errors = parse_json::<Vec<ConfigValidationIssue>>(&validation_errors_json)
         .map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                13,
+                7,
                 rusqlite::types::Type::Text,
                 Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
             )
@@ -1300,21 +2069,54 @@ fn entity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityRecord> {
 
     Ok(EntityRecord {
         entity_id: row.get(0)?,
-        file_path: row.get(1)?,
-        file_name: row.get(2)?,
-        stage_id: row.get(3)?,
-        current_stage: row.get(4)?,
-        next_stage: row.get(5)?,
-        status: row.get(6)?,
-        checksum: row.get(7)?,
-        file_mtime: row.get(8)?,
-        file_size: row.get::<_, i64>(9)? as u64,
-        payload_json: row.get(10)?,
-        meta_json: row.get(11)?,
+        current_stage_id: row.get(1)?,
+        current_status: row.get(2)?,
+        latest_file_path: row.get(3)?,
+        latest_file_id: row.get(4)?,
+        file_count: row.get::<_, i64>(5)? as u64,
         validation_status,
         validation_errors,
-        discovered_at: row.get(14)?,
-        updated_at: row.get(15)?,
+        first_seen_at: row.get(8)?,
+        last_seen_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+fn entity_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityFileRecord> {
+    let validation_status = parse_validation_status(&row.get::<_, String>(13)?)?;
+    let validation_errors_json: String = row.get(14)?;
+    let validation_errors = parse_json::<Vec<ConfigValidationIssue>>(&validation_errors_json)
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                14,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+            )
+        })?;
+
+    Ok(EntityFileRecord {
+        id: row.get(0)?,
+        entity_id: row.get(1)?,
+        stage_id: row.get(2)?,
+        file_path: row.get(3)?,
+        file_name: row.get(4)?,
+        checksum: row.get(5)?,
+        file_mtime: row.get(6)?,
+        file_size: row.get::<_, i64>(7)? as u64,
+        payload_json: row.get(8)?,
+        meta_json: row.get(9)?,
+        current_stage: row.get(10)?,
+        next_stage: row.get(11)?,
+        status: row.get(12)?,
+        validation_status,
+        validation_errors,
+        is_managed_copy: row.get::<_, i64>(15)? == 1,
+        copy_source_file_id: row.get(16)?,
+        file_exists: row.get::<_, i64>(17)? == 1,
+        missing_since: row.get(18)?,
+        first_seen_at: row.get(19)?,
+        last_seen_at: row.get(20)?,
+        updated_at: row.get(21)?,
     })
 }
 
@@ -1356,7 +2158,7 @@ fn parse_validation_status(value: &str) -> rusqlite::Result<EntityValidationStat
         "warning" => Ok(EntityValidationStatus::Warning),
         "invalid" => Ok(EntityValidationStatus::Invalid),
         _ => Err(rusqlite::Error::FromSqlConversionFailure(
-            12,
+            0,
             rusqlite::types::Type::Text,
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -1396,66 +2198,16 @@ fn parse_json_value(value: &str) -> Result<Value, String> {
     parse_json::<Value>(value)
 }
 
-pub(crate) fn system_time_to_rfc3339(value: std::time::SystemTime) -> String {
-    DateTime::<Utc>::from(value).to_rfc3339()
+fn bool_to_i64(value: bool) -> i64 {
+    if value {
+        1
+    } else {
+        0
+    }
 }
 
-#[cfg(test)]
-fn load_stage_by_id(connection: &Connection, stage_id: &str) -> Result<StageRecord, String> {
-    connection
-        .query_row(
-            r#"
-            SELECT
-                stage.stage_id,
-                stage.input_folder,
-                stage.output_folder,
-                stage.workflow_url,
-                stage.max_attempts,
-                stage.retry_delay_sec,
-                stage.next_stage,
-                stage.is_active,
-                stage.archived_at,
-                stage.last_seen_in_config_at,
-                stage.created_at,
-                stage.updated_at,
-                COUNT(entity.entity_id) as entity_count
-            FROM stages stage
-            LEFT JOIN entities entity ON entity.stage_id = stage.stage_id
-            WHERE stage.stage_id = ?1
-            GROUP BY
-                stage.stage_id,
-                stage.input_folder,
-                stage.output_folder,
-                stage.workflow_url,
-                stage.max_attempts,
-                stage.retry_delay_sec,
-                stage.next_stage,
-                stage.is_active,
-                stage.archived_at,
-                stage.last_seen_in_config_at,
-                stage.created_at,
-                stage.updated_at
-            "#,
-            params![stage_id],
-            |row| {
-                Ok(StageRecord {
-                    id: row.get(0)?,
-                    input_folder: row.get(1)?,
-                    output_folder: row.get(2)?,
-                    workflow_url: row.get(3)?,
-                    max_attempts: row.get::<_, i64>(4)? as u64,
-                    retry_delay_sec: row.get::<_, i64>(5)? as u64,
-                    next_stage: row.get(6)?,
-                    is_active: row.get::<_, i64>(7)? == 1,
-                    archived_at: row.get(8)?,
-                    last_seen_in_config_at: row.get(9)?,
-                    created_at: row.get(10)?,
-                    updated_at: row.get(11)?,
-                    entity_count: row.get::<_, i64>(12)? as u64,
-                })
-            },
-        )
-        .map_err(|error| format!("Failed to load stage '{stage_id}': {error}"))
+pub(crate) fn system_time_to_rfc3339(value: std::time::SystemTime) -> String {
+    DateTime::<Utc>::from(value).to_rfc3339()
 }
 
 #[cfg(test)]
@@ -1580,74 +2332,193 @@ mod tests {
             .expect("create v1 schema");
     }
 
+    fn create_v2_schema(connection: &Connection) {
+        connection
+            .execute_batch(
+                r#"
+                PRAGMA foreign_keys = ON;
+
+                CREATE TABLE settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE stages (
+                    stage_id TEXT PRIMARY KEY,
+                    input_folder TEXT NOT NULL,
+                    output_folder TEXT NOT NULL,
+                    workflow_url TEXT NOT NULL,
+                    max_attempts INTEGER NOT NULL CHECK (max_attempts >= 1),
+                    retry_delay_sec INTEGER NOT NULL CHECK (retry_delay_sec >= 0),
+                    next_stage TEXT,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    archived_at TEXT,
+                    last_seen_in_config_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE entities (
+                    entity_id TEXT PRIMARY KEY,
+                    file_path TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    stage_id TEXT NOT NULL,
+                    current_stage TEXT,
+                    next_stage TEXT,
+                    status TEXT NOT NULL,
+                    checksum TEXT NOT NULL,
+                    file_mtime TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    meta_json TEXT NOT NULL DEFAULT '{}',
+                    validation_status TEXT NOT NULL DEFAULT 'valid',
+                    validation_errors_json TEXT NOT NULL DEFAULT '[]',
+                    discovered_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE entity_stage_states (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entity_id TEXT NOT NULL,
+                    stage_id TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL,
+                    last_error TEXT,
+                    last_http_status INTEGER,
+                    next_retry_at TEXT,
+                    last_started_at TEXT,
+                    last_finished_at TEXT,
+                    created_child_path TEXT,
+                    discovered_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(entity_id, stage_id, file_path)
+                );
+
+                CREATE TABLE stage_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entity_id TEXT,
+                    stage_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    error_message TEXT
+                );
+
+                CREATE TABLE app_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    level TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    context_json TEXT,
+                    created_at TEXT NOT NULL
+                );
+
+                PRAGMA user_version = 2;
+                "#,
+            )
+            .expect("create v2 schema");
+    }
+
     #[test]
-    fn bootstrap_creates_database_file_and_required_tables_at_v2() {
+    fn bootstrap_creates_database_file_and_required_tables_at_v3() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let database_path = tempdir.path().join("app.db");
         let config = test_config(vec![stage("ingest", Some("normalize"))]);
 
         let result = bootstrap_database(&database_path, &config).expect("bootstrap");
         let connection = Connection::open(&database_path).expect("open db");
-        let table_names = load_table_names(&connection).expect("load table names");
+        let table_names = load_table_names(&connection).expect("table names");
 
         assert!(database_path.exists());
-        assert_eq!(result.schema_version, 2);
-        assert_eq!(result.active_stage_count, 1);
-        assert_eq!(result.inactive_stage_count, 0);
-        assert!(table_names.contains(&"settings".to_string()));
-        assert!(table_names.contains(&"stages".to_string()));
+        assert_eq!(result.schema_version, 3);
+        assert!(table_names.contains(&"entity_files".to_string()));
         assert!(table_names.contains(&"entities".to_string()));
         assert!(table_names.contains(&"entity_stage_states".to_string()));
-        assert!(table_names.contains(&"stage_runs".to_string()));
-        assert!(table_names.contains(&"app_events".to_string()));
     }
 
     #[test]
-    fn existing_v1_database_is_migrated_to_v2() {
+    fn existing_v2_database_is_migrated_to_v3() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let database_path = tempdir.path().join("app.db");
         let connection = Connection::open(&database_path).expect("open db");
-        create_v1_schema(&connection);
+        create_v2_schema(&connection);
         let now = Utc::now().to_rfc3339();
         connection
             .execute(
                 r#"
                 INSERT INTO stages (
-                    stage_id,
-                    input_folder,
-                    output_folder,
-                    workflow_url,
-                    max_attempts,
-                    retry_delay_sec,
-                    next_stage,
-                    created_at,
-                    updated_at
+                    stage_id, input_folder, output_folder, workflow_url, max_attempts, retry_delay_sec,
+                    next_stage, is_active, archived_at, last_seen_in_config_at, created_at, updated_at
                 )
-                VALUES (?1, ?2, ?3, ?4, 3, 10, NULL, ?5, ?5)
+                VALUES (?1, ?2, ?3, ?4, 3, 10, ?5, 1, NULL, ?6, ?6, ?6)
                 "#,
-                params![
-                    "ingest",
-                    "stages/incoming",
-                    "stages/out",
-                    "http://localhost/workflow",
-                    &now
-                ],
+                params!["ingest", "stages/ingest", "stages/out", "http://localhost/workflow", "normalize", &now],
             )
             .expect("seed stage");
+        connection
+            .execute(
+                r#"
+                INSERT INTO entities (
+                    entity_id, file_path, file_name, stage_id, current_stage, next_stage, status,
+                    checksum, file_mtime, file_size, payload_json, meta_json, validation_status,
+                    validation_errors_json, discovered_at, updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?4, ?5, 'pending', 'abc', ?6, 12, '{}', '{}', 'valid', '[]', ?6, ?6)
+                "#,
+                params!["entity-1", "stages/ingest/entity-1.json", "entity-1.json", "ingest", "normalize", &now],
+            )
+            .expect("seed entity");
+        connection
+            .execute(
+                r#"
+                INSERT INTO entity_stage_states (
+                    entity_id, stage_id, file_path, status, attempts, max_attempts, last_error,
+                    last_http_status, next_retry_at, last_started_at, last_finished_at, created_child_path,
+                    discovered_at, updated_at
+                )
+                VALUES (?1, ?2, ?3, 'pending', 0, 3, NULL, NULL, NULL, NULL, NULL, NULL, ?4, ?4)
+                "#,
+                params!["entity-1", "ingest", "stages/ingest/entity-1.json", &now],
+            )
+            .expect("seed stage state");
+        drop(connection);
+
+        let result = bootstrap_database(
+            &database_path,
+            &test_config(vec![stage("ingest", Some("normalize"))]),
+        )
+        .expect("bootstrap");
+        let connection = Connection::open(&database_path).expect("open migrated db");
+        let entity = find_entity_by_id(&connection, "entity-1")
+            .expect("load entity")
+            .expect("entity exists");
+        let files =
+            load_entity_files_from_connection(&connection, Some("entity-1")).expect("load files");
+        let events = load_app_events_from_connection(&connection, 20).expect("events");
+
+        assert_eq!(result.schema_version, 3);
+        assert_eq!(entity.file_count, 1);
+        assert_eq!(files.len(), 1);
+        assert!(events
+            .iter()
+            .any(|event| event.code == "schema_migrated_to_v3"));
+    }
+
+    #[test]
+    fn v1_database_can_bootstrap_through_v3() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("app.db");
+        let connection = Connection::open(&database_path).expect("open db");
+        create_v1_schema(&connection);
         drop(connection);
 
         let result = bootstrap_database(&database_path, &test_config(vec![stage("ingest", None)]))
-            .expect("bootstrap migrated db");
-        let connection = Connection::open(&database_path).expect("open migrated db");
-        let stage = load_stage_by_id(&connection, "ingest").expect("load stage");
-        let events = load_app_events_from_connection(&connection, 10).expect("load events");
+            .expect("bootstrap");
 
-        assert_eq!(result.schema_version, 2);
-        assert!(stage.is_active);
-        assert!(stage.last_seen_in_config_at.is_some());
-        assert!(events
-            .iter()
-            .any(|event| event.code == "schema_migrated_to_v2"));
+        assert_eq!(result.schema_version, 3);
     }
 
     #[test]
@@ -1662,50 +2533,19 @@ mod tests {
                 stage("normalize", None),
             ]),
         )
-        .expect("first bootstrap");
+        .expect("bootstrap one");
         let result =
             bootstrap_database(&database_path, &test_config(vec![stage("normalize", None)]))
-                .expect("second bootstrap");
-
+                .expect("bootstrap two");
         let connection = Connection::open(&database_path).expect("open db");
-        let ingest = load_stage_by_id(&connection, "ingest").expect("load ingest");
-        let normalize = load_stage_by_id(&connection, "normalize").expect("load normalize");
+        let stages = load_stage_records_from_connection(&connection).expect("stages");
+        let ingest = stages
+            .into_iter()
+            .find(|stage| stage.id == "ingest")
+            .expect("ingest stage");
 
         assert_eq!(result.active_stage_count, 1);
-        assert_eq!(result.inactive_stage_count, 1);
         assert!(!ingest.is_active);
         assert!(ingest.archived_at.is_some());
-        assert!(normalize.is_active);
-    }
-
-    #[test]
-    fn active_stage_is_reactivated_when_it_returns_to_yaml() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let database_path = tempdir.path().join("app.db");
-
-        bootstrap_database(
-            &database_path,
-            &test_config(vec![
-                stage("ingest", Some("normalize")),
-                stage("normalize", None),
-            ]),
-        )
-        .expect("first bootstrap");
-        bootstrap_database(&database_path, &test_config(vec![stage("normalize", None)]))
-            .expect("second bootstrap");
-        bootstrap_database(
-            &database_path,
-            &test_config(vec![
-                stage("ingest", Some("normalize")),
-                stage("normalize", None),
-            ]),
-        )
-        .expect("third bootstrap");
-
-        let connection = Connection::open(&database_path).expect("open db");
-        let ingest = load_stage_by_id(&connection, "ingest").expect("load ingest");
-
-        assert!(ingest.is_active);
-        assert_eq!(ingest.archived_at, None);
     }
 }

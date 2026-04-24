@@ -80,21 +80,21 @@ export function DashboardPage() {
         <div className="panel-heading">
           <h2>Runtime Summary</h2>
           <span className="muted">
-            {isLoadingSummary ? "Loading..." : runtimeSummary ? "Live Stage 2 data" : "No runtime data"}
+            {isLoadingSummary ? "Loading..." : runtimeSummary ? "Live Stage 3 data" : "No runtime data"}
           </span>
         </div>
         <InfoGrid
           items={[
             { label: "Active stages", value: runtimeSummary?.active_stage_count },
             { label: "Inactive stages", value: runtimeSummary?.inactive_stage_count },
-            { label: "Registered entities", value: runtimeSummary?.total_registered_entities },
+            { label: "Logical entities", value: runtimeSummary?.total_entities },
+            { label: "Present files", value: runtimeSummary?.present_file_count },
+            { label: "Missing files", value: runtimeSummary?.missing_file_count },
+            { label: "Managed copies", value: runtimeSummary?.managed_copy_count },
+            { label: "Invalid files", value: runtimeSummary?.invalid_file_count },
             {
-              label: "Discovery errors",
-              value: runtimeSummary?.discovery_error_count,
-            },
-            {
-              label: "Latest scan",
-              value: formatDateTime(runtimeSummary?.latest_discovery_at),
+              label: "Last reconciliation",
+              value: formatDateTime(runtimeSummary?.last_reconciliation_at),
             },
             { label: "Schema version", value: runtimeSummary?.schema_version },
           ]}
@@ -120,11 +120,16 @@ export function DashboardPage() {
           <InfoGrid
             items={[
               { label: "Scanned files", value: lastScan.scanned_file_count },
-              { label: "Registered", value: lastScan.registered_count },
-              { label: "Updated", value: lastScan.updated_count },
-              { label: "Unchanged", value: lastScan.unchanged_count },
+              { label: "Registered files", value: lastScan.registered_file_count },
+              { label: "Registered entities", value: lastScan.registered_entity_count },
+              { label: "Updated files", value: lastScan.updated_file_count },
+              { label: "Unchanged files", value: lastScan.unchanged_file_count },
+              { label: "Missing files", value: lastScan.missing_file_count },
+              { label: "Restored files", value: lastScan.restored_file_count },
               { label: "Invalid", value: lastScan.invalid_count },
               { label: "Duplicates", value: lastScan.duplicate_count },
+              { label: "Created directories", value: lastScan.created_directory_count },
+              { label: "Managed copies", value: lastScan.managed_copy_count },
               { label: "Elapsed (ms)", value: lastScan.elapsed_ms },
               { label: "Scan ID", value: lastScan.scan_id },
             ]}

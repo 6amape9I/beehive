@@ -84,8 +84,11 @@ export function SettingsDiagnosticsPage() {
             },
             { label: "Active stages", value: summary?.active_stage_count },
             { label: "Inactive stages", value: summary?.inactive_stage_count },
-            { label: "Last scan", value: formatDateTime(summary?.latest_discovery_at) },
-            { label: "Discovery errors", value: summary?.discovery_error_count },
+            { label: "Present files", value: summary?.present_file_count },
+            { label: "Missing files", value: summary?.missing_file_count },
+            { label: "Managed copies", value: summary?.managed_copy_count },
+            { label: "Invalid files", value: summary?.invalid_file_count },
+            { label: "Last reconciliation", value: formatDateTime(summary?.last_reconciliation_at) },
           ]}
         />
       </section>

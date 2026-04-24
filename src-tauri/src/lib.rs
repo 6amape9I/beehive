@@ -4,6 +4,7 @@ mod config;
 mod database;
 mod discovery;
 mod domain;
+mod file_ops;
 mod workdir;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -15,10 +16,13 @@ pub fn run() {
             commands::open_workdir,
             commands::reload_workdir,
             commands::scan_workspace,
+            commands::ensure_stage_directories,
             commands::get_runtime_summary,
             commands::list_stages,
             commands::list_entities,
+            commands::list_entity_files,
             commands::get_entity,
+            commands::create_next_stage_copy,
             commands::list_app_events,
             commands::get_workspace_explorer
         ])

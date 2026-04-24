@@ -7,15 +7,17 @@ import { InfoGrid } from "../components/InfoGrid";
 import { StatusBadge } from "../components/StatusBadge";
 import { ValidationIssues } from "../components/ValidationIssues";
 import { formatDateTime, shortChecksum } from "../lib/formatters";
-import { getEntity } from "../lib/runtimeApi";
-import type { CommandErrorInfo, EntityDetailPayload } from "../types/domain";
+import { createNextStageCopy, getEntity } from "../lib/runtimeApi";
+import type { CommandErrorInfo, EntityDetailPayload, FileCopyPayload } from "../types/domain";
 
 export function EntityDetailPage() {
   const { entityId } = useParams();
   const { state } = useBootstrap();
   const [detail, setDetail] = useState<EntityDetailPayload | null>(null);
   const [errors, setErrors] = useState<CommandErrorInfo[]>([]);
+  const [copyResult, setCopyResult] = useState<FileCopyPayload | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isCopyingStageId, setIsCopyingStageId] = useState<string | null>(null);
 
   const workdirPath = state.selected_workdir_path;
   const canQueryRuntime = state.phase === "fully_initialized" && !!workdirPath && !!entityId;
@@ -40,6 +42,25 @@ export function EntityDetailPage() {
 
     void loadDetail();
   }, [canQueryRuntime, entityId, workdirPath]);
+
+  async function handleCreateNextStageCopy(sourceStageId: string) {
+    if (!workdirPath || !entityId) {
+      return;
+    }
+
+    setIsCopyingStageId(sourceStageId);
+    try {
+      const result = await createNextStageCopy(workdirPath, entityId, sourceStageId);
+      setCopyResult(result.payload);
+      setErrors(result.errors);
+
+      const refreshed = await getEntity(workdirPath, entityId);
+      setDetail(refreshed.detail);
+      setErrors((current) => [...current, ...refreshed.errors]);
+    } finally {
+      setIsCopyingStageId(null);
+    }
+  }
 
   return (
     <div className="page-stack">
@@ -67,25 +88,39 @@ export function EntityDetailPage() {
             <div className="panel-heading">
               <h2>{detail.entity.entity_id}</h2>
               <div className="button-row">
-                <StatusBadge status={detail.entity.status} />
+                <StatusBadge status={detail.entity.current_status} />
                 <StatusBadge status={detail.entity.validation_status} />
               </div>
             </div>
             <InfoGrid
               items={[
-                { label: "File name", value: detail.entity.file_name },
-                { label: "Stage", value: detail.entity.stage_id },
-                { label: "File path", value: detail.entity.file_path },
-                { label: "Checksum", value: shortChecksum(detail.entity.checksum) },
-                { label: "File size", value: detail.entity.file_size },
-                { label: "Modified at", value: formatDateTime(detail.entity.file_mtime) },
-                { label: "Discovered at", value: formatDateTime(detail.entity.discovered_at) },
+                { label: "Current stage", value: detail.entity.current_stage_id },
+                { label: "Latest file path", value: detail.entity.latest_file_path },
+                { label: "Latest file id", value: detail.entity.latest_file_id },
+                { label: "File count", value: detail.entity.file_count },
+                { label: "First seen", value: formatDateTime(detail.entity.first_seen_at) },
+                { label: "Last seen", value: formatDateTime(detail.entity.last_seen_at) },
                 { label: "Updated at", value: formatDateTime(detail.entity.updated_at) },
-                { label: "Current stage", value: detail.entity.current_stage },
-                { label: "Next stage", value: detail.entity.next_stage },
               ]}
             />
           </section>
+          {copyResult ? (
+            <section className="panel">
+              <div className="panel-heading">
+                <h2>Last Managed Copy</h2>
+                <StatusBadge status={copyResult.status} />
+              </div>
+              <InfoGrid
+                items={[
+                  { label: "Source stage", value: copyResult.source_stage_id },
+                  { label: "Target stage", value: copyResult.target_stage_id },
+                  { label: "Source file", value: copyResult.source_file_path },
+                  { label: "Target file", value: copyResult.target_file_path },
+                  { label: "Message", value: copyResult.message },
+                ]}
+              />
+            </section>
+          ) : null}
           <ValidationIssues
             title="Validation Issues"
             issues={detail.entity.validation_errors}
@@ -94,9 +129,68 @@ export function EntityDetailPage() {
           <section className="panel">
             <div className="panel-heading">
               <h2>JSON Preview</h2>
-              <span className="muted">Read-only reconstructed entity payload</span>
+              <span className="muted">Read-only preview of the latest file instance</span>
             </div>
-            <pre className="json-preview">{detail.json_preview}</pre>
+            <pre className="json-preview">{detail.latest_json_preview}</pre>
+          </section>
+          <section className="panel">
+            <div className="panel-heading">
+              <h2>File Instances</h2>
+              <span className="muted">{detail.files.length} file record(s)</span>
+            </div>
+            {detail.files.length === 0 ? (
+              <p className="empty-text">No file instances were recorded for this entity.</p>
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Stage</th>
+                      <th>Path</th>
+                      <th>Status</th>
+                      <th>Validation</th>
+                      <th>Presence</th>
+                      <th>Checksum</th>
+                      <th>Size</th>
+                      <th>Updated</th>
+                      <th>Copy</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detail.files.map((file) => (
+                      <tr key={file.id}>
+                        <td>{file.stage_id}</td>
+                        <td>
+                          <code>{file.file_path}</code>
+                        </td>
+                        <td>
+                          <StatusBadge status={file.status} />
+                        </td>
+                        <td>
+                          <StatusBadge status={file.validation_status} />
+                        </td>
+                        <td>{file.file_exists ? "Present" : `Missing since ${formatDateTime(file.missing_since)}`}</td>
+                        <td>
+                          <code>{shortChecksum(file.checksum)}</code>
+                        </td>
+                        <td>{file.file_size}</td>
+                        <td>{formatDateTime(file.updated_at)}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="button secondary"
+                            disabled={!file.file_exists || isCopyingStageId === file.stage_id}
+                            onClick={() => void handleCreateNextStageCopy(file.stage_id)}
+                          >
+                            {isCopyingStageId === file.stage_id ? "Creating..." : "Create next-stage copy"}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
           <section className="panel">
             <div className="panel-heading">
@@ -115,6 +209,7 @@ export function EntityDetailPage() {
                       <th>Attempts</th>
                       <th>Max attempts</th>
                       <th>File path</th>
+                      <th>Presence</th>
                       <th>Last error</th>
                       <th>Updated</th>
                     </tr>
@@ -131,6 +226,7 @@ export function EntityDetailPage() {
                         <td>
                           <code>{stageState.file_path}</code>
                         </td>
+                        <td>{stageState.file_exists ? "Present" : "Missing"}</td>
                         <td>{stageState.last_error ?? "Not available"}</td>
                         <td>{formatDateTime(stageState.updated_at)}</td>
                       </tr>

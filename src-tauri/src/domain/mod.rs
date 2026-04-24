@@ -207,20 +207,41 @@ pub enum EntityValidationStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityRecord {
     pub entity_id: String,
+    pub current_stage_id: Option<String>,
+    pub current_status: String,
+    pub latest_file_path: Option<String>,
+    pub latest_file_id: Option<i64>,
+    pub file_count: u64,
+    pub validation_status: EntityValidationStatus,
+    pub validation_errors: Vec<ConfigValidationIssue>,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityFileRecord {
+    pub id: i64,
+    pub entity_id: String,
+    pub stage_id: String,
     pub file_path: String,
     pub file_name: String,
-    pub stage_id: String,
-    pub current_stage: Option<String>,
-    pub next_stage: Option<String>,
-    pub status: String,
     pub checksum: String,
     pub file_mtime: String,
     pub file_size: u64,
     pub payload_json: String,
     pub meta_json: String,
+    pub current_stage: Option<String>,
+    pub next_stage: Option<String>,
+    pub status: String,
     pub validation_status: EntityValidationStatus,
     pub validation_errors: Vec<ConfigValidationIssue>,
-    pub discovered_at: String,
+    pub is_managed_copy: bool,
+    pub copy_source_file_id: Option<i64>,
+    pub file_exists: bool,
+    pub missing_since: Option<String>,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
     pub updated_at: String,
 }
 
@@ -230,6 +251,8 @@ pub struct EntityStageStateRecord {
     pub entity_id: String,
     pub stage_id: String,
     pub file_path: String,
+    pub file_instance_id: Option<i64>,
+    pub file_exists: bool,
     pub status: String,
     pub attempts: u64,
     pub max_attempts: u64,
@@ -240,6 +263,7 @@ pub struct EntityStageStateRecord {
     pub last_finished_at: Option<String>,
     pub created_child_path: Option<String>,
     pub discovered_at: String,
+    pub last_seen_at: Option<String>,
     pub updated_at: String,
 }
 
@@ -272,10 +296,13 @@ pub struct RuntimeSummary {
     pub schema_version: u32,
     pub active_stage_count: u64,
     pub inactive_stage_count: u64,
-    pub total_registered_entities: u64,
+    pub total_entities: u64,
+    pub present_file_count: u64,
+    pub missing_file_count: u64,
+    pub managed_copy_count: u64,
+    pub invalid_file_count: u64,
     pub entities_by_status: Vec<StatusCount>,
-    pub latest_discovery_at: Option<String>,
-    pub discovery_error_count: u64,
+    pub last_reconciliation_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -290,13 +317,24 @@ pub struct EntityFilters {
 pub struct ScanSummary {
     pub scan_id: String,
     pub scanned_file_count: u64,
-    pub registered_count: u64,
-    pub updated_count: u64,
-    pub unchanged_count: u64,
+    pub registered_file_count: u64,
+    pub registered_entity_count: u64,
+    pub updated_file_count: u64,
+    pub unchanged_file_count: u64,
+    pub missing_file_count: u64,
+    pub restored_file_count: u64,
     pub invalid_count: u64,
     pub duplicate_count: u64,
+    pub created_directory_count: u64,
+    pub managed_copy_count: u64,
     pub elapsed_ms: u128,
     pub latest_discovery_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageDirectoryProvisionSummary {
+    pub created_paths: Vec<String>,
+    pub created_directory_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -326,10 +364,17 @@ pub struct EntityListResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityFilesResult {
+    pub files: Vec<EntityFileRecord>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityDetailPayload {
     pub entity: EntityRecord,
+    pub files: Vec<EntityFileRecord>,
     pub stage_states: Vec<EntityStageStateRecord>,
-    pub json_preview: String,
+    pub latest_json_preview: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -346,12 +391,16 @@ pub struct AppEventsResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceFileRecord {
+    pub file_id: i64,
     pub entity_id: String,
     pub file_name: String,
     pub file_path: String,
     pub status: String,
     pub validation_status: EntityValidationStatus,
     pub updated_at: String,
+    pub file_exists: bool,
+    pub missing_since: Option<String>,
+    pub is_managed_copy: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -374,5 +423,38 @@ pub struct WorkspaceStageGroup {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceExplorerResult {
     pub groups: Vec<WorkspaceStageGroup>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileCopyStatus {
+    Created,
+    AlreadyExists,
+    Blocked,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileCopyPayload {
+    pub status: FileCopyStatus,
+    pub entity_id: String,
+    pub source_stage_id: String,
+    pub target_stage_id: Option<String>,
+    pub source_file_path: Option<String>,
+    pub target_file_path: Option<String>,
+    pub target_file: Option<EntityFileRecord>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileCopyResult {
+    pub payload: Option<FileCopyPayload>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageDirectoryProvisionResult {
+    pub summary: Option<StageDirectoryProvisionSummary>,
     pub errors: Vec<CommandErrorInfo>,
 }
