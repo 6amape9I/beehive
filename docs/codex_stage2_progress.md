@@ -20,3 +20,10 @@
 - Replaced the placeholder runtime pages with real Stage 2 views for Dashboard, Entities, Entity Detail, Stage Editor, Workspace Explorer, and Settings / Diagnostics.
 - Updated shared UI styles and status badges for Stage 2 runtime states.
 - Ran `npm.cmd run build` successfully after the frontend pass.
+- Re-read `instructions/beehive_stage2_codex_task.md` for the Stage 2 finalization pass.
+- Limited the finalization pass to procedural closure only: documentation reconciliation, technical verification, and smoke-level UI truthfulness.
+- Re-ran `cargo fmt --manifest-path src-tauri/Cargo.toml`; it completed successfully.
+- Re-ran Rust tests through `vcvars64.bat`; 29 tests passed.
+- Re-ran `npm.cmd run build`; TypeScript compilation and Vite production build passed.
+- Confirmed the desktop app process and main window were present during the finalization pass, but did not repeat full mouse-driven UI verification.
+- Finalized `docs/codex_stage2_delivery_report.md` and tightened `docs/codex_stage2_instruction_checklist.md` to mark only what was actually re-verified in this pass.

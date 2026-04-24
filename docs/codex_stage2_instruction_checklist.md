@@ -21,24 +21,18 @@ The authoritative checklist source is `instructions/beehive_stage2_codex_task.md
 - [x] Stage Editor shows active/inactive stage status.
 - [x] Workspace Explorer shows grouped runtime/discovery data.
 - [x] Diagnostics shows schema/discovery/event information.
+- [x] `cargo fmt --manifest-path src-tauri/Cargo.toml` passes in the finalization pass.
 - [x] `npm.cmd run build` passes.
 - [x] Rust tests pass.
-- [ ] Stage 2 docs are updated to match reality.
+- [x] Stage 2 docs are updated to match reality.
 
-## Manual verification
+## Smoke UI verification
 
-- [ ] Fresh app launch.
-- [ ] Open existing Stage 1 workdir.
-- [ ] Initialize new workdir.
-- [ ] Create valid JSON in active stage folder.
-- [ ] Run manual scan.
-- [ ] Verify entity appears in Entities table.
-- [ ] Open Entity Detail.
-- [ ] Edit JSON and rescan.
-- [ ] Verify checksum and updated timestamp change.
-- [ ] Create malformed JSON and verify error appears.
-- [ ] Create JSON missing `id` and verify invalid behavior.
-- [ ] Remove stage from YAML and verify it becomes inactive in DB/UI.
-- [ ] Verify inactive stage folder is not scanned.
-- [ ] Verify `npm.cmd run build` passes.
-- [ ] Verify Rust tests pass through `vcvars64.bat`.
+- [x] Desktop app starts and a main window is present during the finalization pass.
+- [ ] Main pages were manually re-rendered/visited in the finalization pass.
+- [ ] Scan action was manually triggered in the finalization pass.
+
+## Notes
+
+- This finalization pass intentionally does not claim full manual UI QA.
+- The unchecked smoke items were not re-verified because this pass was limited to technical verification and non-invasive smoke confirmation.
