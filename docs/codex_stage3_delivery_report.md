@@ -105,6 +105,7 @@ This report reflects the implemented Stage 3 file lifecycle foundation and the v
   - registers target `entity_files` and target `entity_stage_states` rows;
   - does not mutate the source file;
   - does not mark source stage `done` by default.
+- If a compatible target file already exists, the operation stays non-destructive and now registers DB metadata from the actual on-disk target bytes/checksum and parsed JSON rather than from regenerated in-memory bytes.
 - Target JSON is updated with:
   - `current_stage`
   - `status = pending`
@@ -165,6 +166,8 @@ This report reflects the implemented Stage 3 file lifecycle foundation and the v
   - source stage not marked `done`
   - target collision failure
   - repeated compatible copy returns `already_exists`
+  - compatible existing target keeps target bytes/mtime unchanged
+  - compatible existing target stores DB checksum/payload/meta/preview from the real existing file
   - no target stage returns blocked
 
 ## K. Technical verification results

@@ -282,8 +282,8 @@ pub fn create_next_stage_copy(
             entity_id,
             &target_path,
             &source_file.file_name,
-            &target_checksum,
-            &target_bytes,
+            &existing_checksum,
+            &existing_bytes,
             Some(source_file.id),
             &now,
         )?;
@@ -727,6 +727,14 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let workdir = tempdir.path().join("workdir");
         let database_path = workdir.join("app.db");
+        let source_path = workdir
+            .join("stages")
+            .join("incoming")
+            .join("entity-1.json");
+        let target_path = workdir
+            .join("stages")
+            .join("normalized")
+            .join("entity-1.json");
         bootstrap_database(
             &database_path,
             &test_config(vec![
@@ -747,20 +755,96 @@ mod tests {
         .expect("bootstrap");
 
         write_json(
-            &workdir
-                .join("stages")
-                .join("incoming")
-                .join("entity-1.json"),
+            &source_path,
             r#"{"id":"entity-1","current_stage":"incoming","next_stage":"normalized","status":"pending","payload":{"value":1},"meta":{"source":"manual"}}"#,
         );
         scan_workspace(&workdir, &database_path).expect("scan");
         create_next_stage_copy(&workdir, &database_path, "entity-1", "incoming")
             .expect("first copy");
 
+        let source_before = fs::read(&source_path).expect("read source before");
+        let mut target_json = serde_json::from_slice::<Value>(
+            &fs::read(&target_path).expect("read target after first copy"),
+        )
+        .expect("parse target after first copy");
+        let target_root = target_json
+            .as_object_mut()
+            .expect("target root should be object");
+        let meta = target_root
+            .entry("meta")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .expect("target meta should be object");
+        meta.insert(
+            "updated_at".to_string(),
+            Value::String("2030-01-02T03:04:05Z".to_string()),
+        );
+        meta.insert(
+            "operator_note".to_string(),
+            Value::String("existing-target-kept".to_string()),
+        );
+        let beehive = meta
+            .entry("beehive")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .expect("beehive meta should be object");
+        beehive.insert(
+            "copy_created_at".to_string(),
+            Value::String("2030-01-02T03:04:05Z".to_string()),
+        );
+        let target_bytes_before =
+            serde_json::to_vec_pretty(&target_json).expect("serialize mutated target");
+        fs::write(&target_path, &target_bytes_before).expect("write mutated target");
+        let target_checksum_before = format!("{:x}", Sha256::digest(&target_bytes_before));
+        let target_mtime_before = fs::metadata(&target_path)
+            .expect("target metadata before")
+            .modified()
+            .expect("target modified before");
+
         let second = create_next_stage_copy(&workdir, &database_path, "entity-1", "incoming")
             .expect("second copy");
+        let target_bytes_after = fs::read(&target_path).expect("read target after second copy");
+        let target_mtime_after = fs::metadata(&target_path)
+            .expect("target metadata after")
+            .modified()
+            .expect("target modified after");
+        let files = list_entity_files(&database_path, Some("entity-1")).expect("files");
+        let target_file = files
+            .iter()
+            .find(|file| file.stage_id == "normalized")
+            .expect("normalized target file exists");
+        let detail = get_entity_detail(&database_path, "entity-1")
+            .expect("detail result")
+            .expect("detail exists");
+        let expected_payload_json =
+            serde_json::to_string(&target_json.get("payload").cloned().expect("payload exists"))
+                .expect("serialize expected payload");
+        let expected_meta_json =
+            serde_json::to_string(&target_json.get("meta").cloned().expect("meta exists"))
+                .expect("serialize expected meta");
+        let expected_preview = json!({
+            "id": "entity-1",
+            "current_stage": "normalized",
+            "next_stage": Value::Null,
+            "status": "pending",
+            "payload": target_json.get("payload").cloned().expect("payload exists"),
+            "meta": target_json.get("meta").cloned().expect("meta exists"),
+        });
 
         assert_eq!(second.status, FileCopyStatus::AlreadyExists);
+        assert_eq!(target_bytes_after, target_bytes_before);
+        assert_eq!(target_mtime_after, target_mtime_before);
+        assert_eq!(
+            fs::read(&source_path).expect("read source after"),
+            source_before
+        );
+        assert_eq!(target_file.checksum, target_checksum_before);
+        assert_eq!(target_file.payload_json, expected_payload_json);
+        assert_eq!(target_file.meta_json, expected_meta_json);
+        assert_eq!(
+            serde_json::from_str::<Value>(&detail.latest_json_preview).expect("parse preview"),
+            expected_preview
+        );
     }
 
     #[test]

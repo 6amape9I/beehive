@@ -23,3 +23,9 @@
 - Re-ran the minimal smoke check after the app was closed.
 - Verified that `tauri dev` started `beehive`, `cargo`, and `node`, and UI Automation detected the expected `beehive` window plus `beehive — веб-содержимое`.
 - Kept the smoke claim minimal: app start verified, page-by-page crash check still not claimed.
+- Re-read `instructions/beehive_stage3_codex_task.md` and the Stage 3 mandatory polish instruction before the managed-copy consistency pass.
+- Fixed the `file_ops::create_next_stage_copy` `AlreadyExists` branch so DB registration now uses the actual existing target file bytes/checksum instead of regenerated in-memory bytes.
+- Strengthened the repeated compatible-copy test to prove non-destructive behavior: `already_exists`, unchanged target bytes and mtime, unchanged source file, and DB checksum/payload/meta/preview alignment with the real on-disk target file.
+- Re-ran `cargo fmt --manifest-path src-tauri/Cargo.toml`.
+- Re-ran `cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul && cargo test --manifest-path src-tauri\Cargo.toml'`; 35 Rust tests passed.
+- Re-ran `npm.cmd run build`; TypeScript compilation and Vite production build passed.

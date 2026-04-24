@@ -15,6 +15,7 @@ The authoritative checklist source is `instructions/beehive_stage3_codex_task.md
 - [x] Managed next-stage copy exists as a safe backend operation.
 - [x] Managed copy writes JSON atomically.
 - [x] Managed copy updates target JSON metadata correctly.
+- [x] Compatible existing managed-copy targets register DB metadata from the actual on-disk file without overwrite.
 - [x] Source file is not mutated by default.
 - [x] UI shows logical entities and physical file instances.
 - [x] Backend tests cover the required Stage 3 scenarios.
@@ -30,6 +31,8 @@ The authoritative checklist source is `instructions/beehive_stage3_codex_task.md
 
 ## Notes
 
+- Mandatory Stage 3 polish fixed the `AlreadyExists` metadata consistency bug in `file_ops::create_next_stage_copy`.
+- The repeated compatible-copy test now verifies DB checksum/payload/meta/preview against the real existing target file and verifies that the target file is not overwritten.
 - A fresh `tauri dev` smoke run was attempted again after the app was closed.
 - `beehive`, `cargo`, and `node` processes started successfully.
 - UI Automation detected the expected `beehive` window and `beehive — веб-содержимое`.
