@@ -7,10 +7,14 @@ import type {
   EntityFilters,
   EntityListResult,
   FileCopyResult,
+  ReconcileStuckTasksResult,
+  RunDueTasksResult,
+  RunEntityStageResult,
   RuntimeSummaryResult,
   ScanWorkspaceResult,
   StageDirectoryProvisionResult,
   StageListResult,
+  StageRunsResult,
   WorkspaceExplorerResult,
 } from "../types/domain";
 
@@ -58,6 +62,29 @@ export async function createNextStageCopy(
     entityId,
     sourceStageId,
   });
+}
+
+export async function runDueTasks(path: string): Promise<RunDueTasksResult> {
+  return invoke<RunDueTasksResult>("run_due_tasks", { path });
+}
+
+export async function runEntityStage(
+  path: string,
+  entityId: string,
+  stageId: string,
+): Promise<RunEntityStageResult> {
+  return invoke<RunEntityStageResult>("run_entity_stage", { path, entityId, stageId });
+}
+
+export async function listStageRuns(
+  path: string,
+  entityId?: string | null,
+): Promise<StageRunsResult> {
+  return invoke<StageRunsResult>("list_stage_runs", { path, entityId });
+}
+
+export async function reconcileStuckTasks(path: string): Promise<ReconcileStuckTasksResult> {
+  return invoke<ReconcileStuckTasksResult>("reconcile_stuck_tasks", { path });
 }
 
 export async function listAppEvents(path: string, limit = 50): Promise<AppEventsResult> {

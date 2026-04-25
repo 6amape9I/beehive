@@ -361,6 +361,236 @@ pub fn create_next_stage_copy(
     })
 }
 
+pub fn create_next_stage_copy_from_response(
+    workdir_path: &Path,
+    database_path: &Path,
+    entity_id: &str,
+    source_stage_id: &str,
+    response_payload: Value,
+    response_meta: Option<Value>,
+    stage_run_id: &str,
+) -> Result<FileCopyPayload, String> {
+    let connection = open_connection(database_path)?;
+    let source_stage = find_stage_by_id(&connection, source_stage_id)?
+        .ok_or_else(|| format!("Source stage '{source_stage_id}' was not found."))?;
+    let source_file = find_latest_entity_file_for_stage(&connection, entity_id, source_stage_id)?
+        .ok_or_else(|| {
+        format!(
+            "No file instance was found for entity '{}' on source stage '{}'.",
+            entity_id, source_stage_id
+        )
+    })?;
+
+    let Some(target_stage_id) = source_file
+        .next_stage
+        .clone()
+        .or_else(|| source_stage.next_stage.clone())
+    else {
+        return Ok(FileCopyPayload {
+            status: FileCopyStatus::Blocked,
+            entity_id: entity_id.to_string(),
+            source_stage_id: source_stage_id.to_string(),
+            target_stage_id: None,
+            source_file_path: Some(source_file.file_path),
+            target_file_path: None,
+            target_file: None,
+            message: "No next stage is configured for this source stage.".to_string(),
+        });
+    };
+
+    let Some(target_stage) = find_stage_by_id(&connection, &target_stage_id)? else {
+        return Ok(FileCopyPayload {
+            status: FileCopyStatus::Blocked,
+            entity_id: entity_id.to_string(),
+            source_stage_id: source_stage_id.to_string(),
+            target_stage_id: Some(target_stage_id),
+            source_file_path: Some(source_file.file_path),
+            target_file_path: None,
+            target_file: None,
+            message: "The resolved next stage does not exist.".to_string(),
+        });
+    };
+
+    if !target_stage.is_active {
+        return Ok(FileCopyPayload {
+            status: FileCopyStatus::Blocked,
+            entity_id: entity_id.to_string(),
+            source_stage_id: source_stage_id.to_string(),
+            target_stage_id: Some(target_stage.id),
+            source_file_path: Some(source_file.file_path),
+            target_file_path: None,
+            target_file: None,
+            message: "The resolved next stage is inactive.".to_string(),
+        });
+    }
+
+    ensure_stage_directories_for_stage_ids(
+        workdir_path,
+        database_path,
+        &[target_stage.id.clone()],
+    )?;
+
+    let source_path = PathBuf::from(&source_file.file_path);
+    let source_bytes = fs::read(&source_path).map_err(|error| {
+        format!(
+            "Failed to read source file '{}': {error}",
+            source_path.display()
+        )
+    })?;
+    let source_json = serde_json::from_slice::<Value>(&source_bytes).map_err(|error| {
+        format!(
+            "Failed to parse source file '{}' as JSON before response copy: {error}",
+            source_path.display()
+        )
+    })?;
+    let source_root = source_json
+        .as_object()
+        .ok_or_else(|| "Source JSON root must be an object before response copy.".to_string())?;
+
+    let now = Utc::now().to_rfc3339();
+    let updated_json = build_target_json_from_response(
+        source_root,
+        entity_id,
+        source_stage_id,
+        &target_stage.id,
+        target_stage.next_stage.as_deref(),
+        response_payload,
+        response_meta,
+        source_file.id,
+        stage_run_id,
+        &now,
+    )?;
+    let target_path = workdir_path
+        .join(&target_stage.input_folder)
+        .join(&source_file.file_name);
+    let target_path_string = path_string(&target_path);
+    let target_bytes = serde_json::to_vec_pretty(&updated_json).map_err(|error| {
+        format!("Failed to serialize target JSON for n8n response copy: {error}")
+    })?;
+    let target_checksum = format!("{:x}", Sha256::digest(&target_bytes));
+
+    if target_path.exists() {
+        let existing_bytes = fs::read(&target_path).map_err(|error| {
+            format!(
+                "Failed to read existing target file '{}' during response copy collision check: {error}",
+                target_path.display()
+            )
+        })?;
+        let existing_json = serde_json::from_slice::<Value>(&existing_bytes).map_err(|error| {
+            format!(
+                "Failed to parse existing target file '{}' during response copy collision check: {error}",
+                target_path.display()
+            )
+        })?;
+        let existing_checksum = format!("{:x}", Sha256::digest(&existing_bytes));
+        let existing_entity_id = existing_json
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        if existing_entity_id != entity_id {
+            return Ok(FileCopyPayload {
+                status: FileCopyStatus::Failed,
+                entity_id: entity_id.to_string(),
+                source_stage_id: source_stage_id.to_string(),
+                target_stage_id: Some(target_stage.id),
+                source_file_path: Some(source_file.file_path),
+                target_file_path: Some(path_string(&target_path)),
+                target_file: None,
+                message: "Target path already exists for another entity.".to_string(),
+            });
+        }
+
+        let is_compatible_existing_target = existing_checksum == target_checksum
+            || existing_json.as_object().is_some_and(|root| {
+                root.get("id").and_then(Value::as_str) == Some(entity_id)
+                    && root.get("current_stage").and_then(Value::as_str)
+                        == Some(target_stage.id.as_str())
+                    && root.get("status").and_then(Value::as_str) == Some("pending")
+                    && root.get("next_stage").and_then(Value::as_str)
+                        == target_stage.next_stage.as_deref()
+                    && root
+                        .get("meta")
+                        .and_then(Value::as_object)
+                        .and_then(|meta| meta.get("beehive"))
+                        .and_then(Value::as_object)
+                        .is_some_and(|beehive| {
+                            beehive
+                                .get("source_stage_id")
+                                .or_else(|| beehive.get("copy_source_stage"))
+                                .and_then(Value::as_str)
+                                == Some(source_stage_id)
+                                && beehive
+                                    .get("target_stage_id")
+                                    .or_else(|| beehive.get("copy_target_stage"))
+                                    .and_then(Value::as_str)
+                                    == Some(target_stage.id.as_str())
+                        })
+            });
+
+        if !is_compatible_existing_target {
+            return Ok(FileCopyPayload {
+                status: FileCopyStatus::Failed,
+                entity_id: entity_id.to_string(),
+                source_stage_id: source_stage_id.to_string(),
+                target_stage_id: Some(target_stage.id),
+                source_file_path: Some(source_file.file_path),
+                target_file_path: Some(target_path_string),
+                target_file: None,
+                message: "Target path already exists with different content.".to_string(),
+            });
+        }
+
+        let target_file = register_target_file(
+            database_path,
+            &target_stage.id,
+            &target_stage.next_stage,
+            entity_id,
+            &target_path,
+            &source_file.file_name,
+            &existing_checksum,
+            &existing_bytes,
+            Some(source_file.id),
+            &now,
+        )?;
+        return Ok(FileCopyPayload {
+            status: FileCopyStatus::AlreadyExists,
+            entity_id: entity_id.to_string(),
+            source_stage_id: source_stage_id.to_string(),
+            target_stage_id: Some(target_stage.id),
+            source_file_path: Some(source_file.file_path),
+            target_file_path: Some(path_string(&target_path)),
+            target_file: Some(target_file),
+            message: "Target file already exists with compatible content.".to_string(),
+        });
+    }
+
+    write_atomic_json(&target_path, &target_bytes)?;
+    let target_file = register_target_file(
+        database_path,
+        &target_stage.id,
+        &target_stage.next_stage,
+        entity_id,
+        &target_path,
+        &source_file.file_name,
+        &target_checksum,
+        &target_bytes,
+        Some(source_file.id),
+        &now,
+    )?;
+
+    Ok(FileCopyPayload {
+        status: FileCopyStatus::Created,
+        entity_id: entity_id.to_string(),
+        source_stage_id: source_stage_id.to_string(),
+        target_stage_id: Some(target_stage.id),
+        source_file_path: Some(source_file.file_path),
+        target_file_path: Some(path_string(&target_path)),
+        target_file: Some(target_file),
+        message: "Managed n8n response copy created successfully.".to_string(),
+    })
+}
+
 fn build_target_json(
     root: &Map<String, Value>,
     source_stage_id: &str,
@@ -407,6 +637,93 @@ fn build_target_json(
     next_root.insert("meta".to_string(), Value::Object(meta));
 
     Ok(Value::Object(next_root))
+}
+
+fn build_target_json_from_response(
+    source_root: &Map<String, Value>,
+    entity_id: &str,
+    source_stage_id: &str,
+    target_stage_id: &str,
+    next_stage: Option<&str>,
+    response_payload: Value,
+    response_meta: Option<Value>,
+    source_file_id: i64,
+    stage_run_id: &str,
+    now: &str,
+) -> Result<Value, String> {
+    if !response_payload.is_object() {
+        return Err("n8n response payload must be a JSON object for next-stage copy.".to_string());
+    }
+
+    let mut root = Map::new();
+    root.insert("id".to_string(), Value::String(entity_id.to_string()));
+    root.insert(
+        "current_stage".to_string(),
+        Value::String(target_stage_id.to_string()),
+    );
+    root.insert(
+        "next_stage".to_string(),
+        next_stage
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    root.insert("status".to_string(), Value::String("pending".to_string()));
+    root.insert("payload".to_string(), response_payload);
+
+    let mut meta = source_root
+        .get("meta")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(response_meta) = response_meta.and_then(|value| value.as_object().cloned()) {
+        for (key, value) in response_meta {
+            if key != "beehive" {
+                meta.insert(key, value);
+            }
+        }
+    }
+    meta.insert("updated_at".to_string(), Value::String(now.to_string()));
+
+    let mut beehive = meta
+        .remove("beehive")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    beehive.insert(
+        "created_by".to_string(),
+        Value::String("stage4_n8n_execution".to_string()),
+    );
+    beehive.insert(
+        "source_stage_id".to_string(),
+        Value::String(source_stage_id.to_string()),
+    );
+    beehive.insert(
+        "target_stage_id".to_string(),
+        Value::String(target_stage_id.to_string()),
+    );
+    beehive.insert(
+        "source_entity_file_id".to_string(),
+        Value::Number(source_file_id.into()),
+    );
+    beehive.insert(
+        "stage_run_id".to_string(),
+        Value::String(stage_run_id.to_string()),
+    );
+    beehive.insert(
+        "copy_source_stage".to_string(),
+        Value::String(source_stage_id.to_string()),
+    );
+    beehive.insert(
+        "copy_target_stage".to_string(),
+        Value::String(target_stage_id.to_string()),
+    );
+    beehive.insert(
+        "copy_created_at".to_string(),
+        Value::String(now.to_string()),
+    );
+    meta.insert("beehive".to_string(), Value::Object(beehive));
+    root.insert("meta".to_string(), Value::Object(meta));
+
+    Ok(Value::Object(root))
 }
 
 fn write_atomic_json(target_path: &Path, bytes: &[u8]) -> Result<(), String> {

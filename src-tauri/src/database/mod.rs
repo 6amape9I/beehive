@@ -10,11 +10,12 @@ use crate::domain::{
     AppEventLevel, AppEventRecord, ConfigValidationIssue, DatabaseState, EntityDetailPayload,
     EntityFileRecord, EntityFilters, EntityRecord, EntityStageStateRecord, EntityValidationStatus,
     InvalidDiscoveryRecord, PipelineConfig, RuntimeSummary, StageDefinition, StageRecord,
-    StageStatus, StatusCount, WorkspaceExplorerResult, WorkspaceFileRecord, WorkspaceStageGroup,
+    StageRunRecord, StageStatus, StatusCount, WorkspaceExplorerResult, WorkspaceFileRecord,
+    WorkspaceStageGroup,
 };
 use crate::workdir::path_string;
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 pub(crate) struct PersistEntityFileInput {
     pub entity_id: String,
@@ -57,6 +58,44 @@ pub(crate) enum EntityFileWriteOutcome {
     Updated,
     Unchanged,
     Restored,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeTaskRecord {
+    pub state_id: i64,
+    pub entity_id: String,
+    pub stage_id: String,
+    pub status: String,
+    pub attempts: u64,
+    pub max_attempts: u64,
+    pub file_path: String,
+    pub file_instance_id: i64,
+    pub file_exists: bool,
+    pub workflow_url: String,
+    pub retry_delay_sec: u64,
+    pub next_stage: Option<String>,
+}
+
+pub(crate) struct NewStageRunInput {
+    pub run_id: String,
+    pub entity_id: String,
+    pub entity_file_id: i64,
+    pub stage_id: String,
+    pub attempt_no: u64,
+    pub workflow_url: String,
+    pub request_json: String,
+    pub started_at: String,
+}
+
+pub(crate) struct FinishStageRunInput {
+    pub run_id: String,
+    pub response_json: Option<String>,
+    pub http_status: Option<i64>,
+    pub success: bool,
+    pub error_type: Option<String>,
+    pub error_message: Option<String>,
+    pub finished_at: String,
+    pub duration_ms: u64,
 }
 
 pub fn bootstrap_database(path: &Path, config: &PipelineConfig) -> Result<DatabaseState, String> {
@@ -135,6 +174,7 @@ pub fn get_runtime_summary(path: &Path) -> Result<RuntimeSummary, String> {
         .unwrap_or(0);
     let last_reconciliation_at = load_setting(&connection, "last_scan_completed_at")?;
     let entities_by_status = load_status_counts(&connection)?;
+    let execution_status_counts = load_execution_status_counts(&connection)?;
 
     Ok(RuntimeSummary {
         schema_version,
@@ -146,6 +186,7 @@ pub fn get_runtime_summary(path: &Path) -> Result<RuntimeSummary, String> {
         managed_copy_count,
         invalid_file_count,
         entities_by_status,
+        execution_status_counts,
         last_reconciliation_at,
     })
 }
@@ -225,6 +266,14 @@ pub fn get_entity_detail(
 pub fn list_app_events(path: &Path, limit: u32) -> Result<Vec<AppEventRecord>, String> {
     let connection = open_connection(path)?;
     load_app_events_from_connection(&connection, limit)
+}
+
+pub fn list_stage_runs(
+    path: &Path,
+    entity_id: Option<&str>,
+) -> Result<Vec<StageRunRecord>, String> {
+    let connection = open_connection(path)?;
+    load_stage_runs_from_connection(&connection, entity_id, 100)
 }
 
 pub fn get_workspace_explorer(path: &Path) -> Result<WorkspaceExplorerResult, String> {
@@ -402,6 +451,262 @@ pub(crate) fn find_latest_entity_file_for_stage(
     stage_id: &str,
 ) -> Result<Option<EntityFileRecord>, String> {
     find_entity_file_by_entity_stage(connection, entity_id, stage_id)
+}
+
+pub(crate) fn list_eligible_runtime_tasks(
+    connection: &Connection,
+    now: &str,
+    limit: u64,
+) -> Result<Vec<RuntimeTaskRecord>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT
+                state.id,
+                state.entity_id,
+                state.stage_id,
+                state.status,
+                state.attempts,
+                state.max_attempts,
+                state.file_path,
+                state.file_instance_id,
+                state.file_exists,
+                stage.workflow_url,
+                stage.retry_delay_sec,
+                stage.next_stage
+            FROM entity_stage_states state
+            JOIN stages stage ON stage.stage_id = state.stage_id
+            JOIN entity_files file ON file.id = state.file_instance_id
+            WHERE stage.is_active = 1
+              AND state.file_exists = 1
+              AND file.file_exists = 1
+              AND TRIM(stage.workflow_url) <> ''
+              AND state.attempts < state.max_attempts
+              AND (
+                    state.status = 'pending'
+                    OR (state.status = 'retry_wait' AND state.next_retry_at IS NOT NULL AND state.next_retry_at <= ?1)
+                  )
+            ORDER BY state.updated_at ASC, state.id ASC
+            LIMIT ?2
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare eligible task query: {error}"))?;
+    let rows = statement
+        .query_map(params![now, limit as i64], runtime_task_from_row)
+        .map_err(|error| format!("Failed to query eligible runtime tasks: {error}"))?;
+
+    let mut tasks = Vec::new();
+    for row in rows {
+        tasks.push(row.map_err(|error| format!("Failed to read eligible task row: {error}"))?);
+    }
+    Ok(tasks)
+}
+
+pub(crate) fn find_runtime_task(
+    connection: &Connection,
+    entity_id: &str,
+    stage_id: &str,
+) -> Result<Option<RuntimeTaskRecord>, String> {
+    connection
+        .query_row(
+            r#"
+            SELECT
+                state.id,
+                state.entity_id,
+                state.stage_id,
+                state.status,
+                state.attempts,
+                state.max_attempts,
+                state.file_path,
+                state.file_instance_id,
+                state.file_exists,
+                stage.workflow_url,
+                stage.retry_delay_sec,
+                stage.next_stage
+            FROM entity_stage_states state
+            JOIN stages stage ON stage.stage_id = state.stage_id
+            LEFT JOIN entity_files file ON file.id = state.file_instance_id
+            WHERE state.entity_id = ?1 AND state.stage_id = ?2
+            "#,
+            params![entity_id, stage_id],
+            runtime_task_from_row,
+        )
+        .optional()
+        .map_err(|error| {
+            format!("Failed to load runtime task for entity '{entity_id}' on stage '{stage_id}': {error}")
+        })
+}
+
+pub(crate) fn update_stage_state_for_run_start(
+    connection: &Connection,
+    state_id: i64,
+    attempt_no: u64,
+    started_at: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            r#"
+            UPDATE entity_stage_states
+            SET status = 'in_progress',
+                attempts = ?2,
+                last_started_at = ?3,
+                last_finished_at = NULL,
+                next_retry_at = NULL,
+                updated_at = ?3
+            WHERE id = ?1
+            "#,
+            params![state_id, attempt_no as i64, started_at],
+        )
+        .map_err(|error| format!("Failed to mark stage state '{state_id}' in_progress: {error}"))?;
+    Ok(())
+}
+
+pub(crate) fn update_stage_state_success(
+    connection: &Connection,
+    state_id: i64,
+    http_status: Option<i64>,
+    finished_at: &str,
+    created_child_path: Option<&str>,
+) -> Result<(), String> {
+    connection
+        .execute(
+            r#"
+            UPDATE entity_stage_states
+            SET status = 'done',
+                last_error = NULL,
+                last_http_status = ?2,
+                next_retry_at = NULL,
+                last_finished_at = ?3,
+                created_child_path = ?4,
+                updated_at = ?3
+            WHERE id = ?1
+            "#,
+            params![state_id, http_status, finished_at, created_child_path],
+        )
+        .map_err(|error| format!("Failed to mark stage state '{state_id}' done: {error}"))?;
+    update_entity_summary_from_state(connection, state_id, StageStatus::Done, finished_at)?;
+    Ok(())
+}
+
+pub(crate) fn update_stage_state_failure(
+    connection: &Connection,
+    state_id: i64,
+    status: StageStatus,
+    error_message: &str,
+    http_status: Option<i64>,
+    next_retry_at: Option<&str>,
+    finished_at: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            r#"
+            UPDATE entity_stage_states
+            SET status = ?2,
+                last_error = ?3,
+                last_http_status = ?4,
+                next_retry_at = ?5,
+                last_finished_at = ?6,
+                updated_at = ?6
+            WHERE id = ?1
+            "#,
+            params![
+                state_id,
+                stage_status_value(&status),
+                error_message,
+                http_status,
+                next_retry_at,
+                finished_at
+            ],
+        )
+        .map_err(|error| {
+            format!("Failed to mark stage state '{state_id}' failed/retry: {error}")
+        })?;
+    update_entity_summary_from_state(connection, state_id, status, finished_at)?;
+    Ok(())
+}
+
+pub(crate) fn block_stage_state(
+    connection: &Connection,
+    state_id: i64,
+    error_message: &str,
+    updated_at: &str,
+) -> Result<(), String> {
+    update_stage_state_failure(
+        connection,
+        state_id,
+        StageStatus::Blocked,
+        error_message,
+        None,
+        None,
+        updated_at,
+    )
+}
+
+pub(crate) fn insert_stage_run(
+    connection: &Connection,
+    input: &NewStageRunInput,
+) -> Result<(), String> {
+    connection
+        .execute(
+            r#"
+            INSERT INTO stage_runs (
+                run_id,
+                entity_id,
+                entity_file_id,
+                stage_id,
+                attempt_no,
+                workflow_url,
+                request_json,
+                success,
+                started_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)
+            "#,
+            params![
+                input.run_id,
+                input.entity_id,
+                input.entity_file_id,
+                input.stage_id,
+                input.attempt_no as i64,
+                input.workflow_url,
+                input.request_json,
+                input.started_at
+            ],
+        )
+        .map_err(|error| format!("Failed to insert stage run '{}': {error}", input.run_id))?;
+    Ok(())
+}
+
+pub(crate) fn finish_stage_run(
+    connection: &Connection,
+    input: &FinishStageRunInput,
+) -> Result<(), String> {
+    connection
+        .execute(
+            r#"
+            UPDATE stage_runs
+            SET response_json = ?2,
+                http_status = ?3,
+                success = ?4,
+                error_type = ?5,
+                error_message = ?6,
+                finished_at = ?7,
+                duration_ms = ?8
+            WHERE run_id = ?1
+            "#,
+            params![
+                input.run_id,
+                input.response_json,
+                input.http_status,
+                bool_to_i64(input.success),
+                input.error_type,
+                input.error_message,
+                input.finished_at,
+                input.duration_ms as i64
+            ],
+        )
+        .map_err(|error| format!("Failed to finish stage run '{}': {error}", input.run_id))?;
+    Ok(())
 }
 
 pub(crate) fn ensure_entity_stub(
@@ -884,16 +1189,21 @@ pub(crate) fn load_setting(connection: &Connection, key: &str) -> Result<Option<
 
 fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
     match current_schema_version(connection)? {
-        0 => create_schema_v3(connection)?,
+        0 => create_schema_v4(connection)?,
         1 => {
             migrate_v1_to_v2(connection)?;
             migrate_v2_to_v3(connection)?;
+            migrate_v3_to_v4(connection)?;
         }
-        2 => migrate_v2_to_v3(connection)?,
-        3 => {}
+        2 => {
+            migrate_v2_to_v3(connection)?;
+            migrate_v3_to_v4(connection)?;
+        }
+        3 => migrate_v3_to_v4(connection)?,
+        4 => {}
         version => {
             return Err(format!(
-                "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, or 3."
+                "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, or 4."
             ))
         }
     }
@@ -914,7 +1224,7 @@ fn current_schema_version(connection: &Connection) -> Result<u32, String> {
         .map_err(|error| format!("Failed to read PRAGMA user_version: {error}"))
 }
 
-fn create_schema_v3(connection: &Connection) -> Result<(), String> {
+fn create_schema_v4(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
             r#"
@@ -1011,13 +1321,23 @@ fn create_schema_v3(connection: &Connection) -> Result<(), String> {
 
             CREATE TABLE IF NOT EXISTS stage_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                entity_id TEXT,
+                run_id TEXT NOT NULL UNIQUE,
+                entity_id TEXT NOT NULL,
+                entity_file_id INTEGER,
                 stage_id TEXT NOT NULL,
-                status TEXT NOT NULL,
+                attempt_no INTEGER NOT NULL,
+                workflow_url TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                response_json TEXT,
+                http_status INTEGER,
+                success INTEGER NOT NULL DEFAULT 0,
+                error_type TEXT,
                 started_at TEXT NOT NULL,
                 finished_at TEXT,
+                duration_ms INTEGER,
                 error_message TEXT,
                 FOREIGN KEY (entity_id) REFERENCES entities(entity_id),
+                FOREIGN KEY (entity_file_id) REFERENCES entity_files(id),
                 FOREIGN KEY (stage_id) REFERENCES stages(stage_id)
             );
 
@@ -1030,10 +1350,14 @@ fn create_schema_v3(connection: &Connection) -> Result<(), String> {
                 created_at TEXT NOT NULL
             );
 
-            PRAGMA user_version = 3;
+            CREATE INDEX IF NOT EXISTS idx_stage_runs_entity_id ON stage_runs(entity_id);
+            CREATE INDEX IF NOT EXISTS idx_stage_runs_run_id ON stage_runs(run_id);
+            CREATE INDEX IF NOT EXISTS idx_entity_stage_states_status_retry ON entity_stage_states(status, next_retry_at);
+
+            PRAGMA user_version = 4;
             "#,
         )
-        .map_err(|error| format!("Failed to create SQLite schema v3: {error}"))?;
+        .map_err(|error| format!("Failed to create SQLite schema v4: {error}"))?;
     Ok(())
 }
 
@@ -1435,6 +1759,105 @@ fn migrate_v2_to_v3(connection: &mut Connection) -> Result<(), String> {
         .execute_batch("PRAGMA foreign_keys = ON;")
         .map_err(|error| {
             format!("Failed to re-enable foreign keys after v2->v3 migration: {error}")
+        })?;
+    Ok(())
+}
+
+fn migrate_v3_to_v4(connection: &mut Connection) -> Result<(), String> {
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(|error| format!("Failed to disable foreign keys for v3->v4 migration: {error}"))?;
+
+    connection
+        .execute_batch(
+            r#"
+            ALTER TABLE stage_runs RENAME TO stage_runs_v3_legacy;
+
+            CREATE TABLE stage_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL UNIQUE,
+                entity_id TEXT NOT NULL,
+                entity_file_id INTEGER,
+                stage_id TEXT NOT NULL,
+                attempt_no INTEGER NOT NULL,
+                workflow_url TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                response_json TEXT,
+                http_status INTEGER,
+                success INTEGER NOT NULL DEFAULT 0,
+                error_type TEXT,
+                error_message TEXT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                duration_ms INTEGER,
+                FOREIGN KEY (entity_id) REFERENCES entities(entity_id),
+                FOREIGN KEY (entity_file_id) REFERENCES entity_files(id),
+                FOREIGN KEY (stage_id) REFERENCES stages(stage_id)
+            );
+
+            INSERT INTO stage_runs (
+                id,
+                run_id,
+                entity_id,
+                entity_file_id,
+                stage_id,
+                attempt_no,
+                workflow_url,
+                request_json,
+                response_json,
+                http_status,
+                success,
+                error_type,
+                error_message,
+                started_at,
+                finished_at,
+                duration_ms
+            )
+            SELECT
+                legacy.id,
+                'legacy-' || legacy.id,
+                COALESCE(legacy.entity_id, ''),
+                NULL,
+                legacy.stage_id,
+                1,
+                COALESCE(stage.workflow_url, ''),
+                '{}',
+                NULL,
+                NULL,
+                CASE WHEN legacy.status = 'done' THEN 1 ELSE 0 END,
+                CASE WHEN legacy.error_message IS NULL THEN NULL ELSE 'legacy' END,
+                legacy.error_message,
+                legacy.started_at,
+                legacy.finished_at,
+                NULL
+            FROM stage_runs_v3_legacy legacy
+            LEFT JOIN stages stage ON stage.stage_id = legacy.stage_id;
+
+            DROP TABLE stage_runs_v3_legacy;
+
+            CREATE INDEX IF NOT EXISTS idx_stage_runs_entity_id ON stage_runs(entity_id);
+            CREATE INDEX IF NOT EXISTS idx_stage_runs_run_id ON stage_runs(run_id);
+            CREATE INDEX IF NOT EXISTS idx_entity_stage_states_status_retry ON entity_stage_states(status, next_retry_at);
+
+            PRAGMA user_version = 4;
+            "#,
+        )
+        .map_err(|error| format!("Failed to migrate schema from v3 to v4: {error}"))?;
+
+    let now = Utc::now().to_rfc3339();
+    insert_app_event(
+        connection,
+        AppEventLevel::Info,
+        "schema_migrated_to_v4",
+        "SQLite schema migrated from version 3 to version 4.",
+        None,
+        &now,
+    )?;
+    set_setting(connection, "schema_version", "4", &now)?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|error| {
+            format!("Failed to re-enable foreign keys after v3->v4 migration: {error}")
         })?;
     Ok(())
 }
@@ -1990,6 +2413,35 @@ fn load_status_counts(connection: &Connection) -> Result<Vec<StatusCount>, Strin
     Ok(counts)
 }
 
+fn load_execution_status_counts(connection: &Connection) -> Result<Vec<StatusCount>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT status, COUNT(*)
+            FROM entity_stage_states
+            GROUP BY status
+            ORDER BY status
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare execution status count query: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(StatusCount {
+                status: row.get(0)?,
+                count: row.get::<_, i64>(1)? as u64,
+            })
+        })
+        .map_err(|error| format!("Failed to query execution status counts: {error}"))?;
+
+    let mut counts = Vec::new();
+    for row in rows {
+        counts.push(
+            row.map_err(|error| format!("Failed to read execution status count row: {error}"))?,
+        );
+    }
+    Ok(counts)
+}
+
 fn load_entity_ids(connection: &Connection) -> Result<Vec<String>, String> {
     let mut statement = connection
         .prepare("SELECT entity_id FROM entities ORDER BY entity_id")
@@ -2019,6 +2471,119 @@ fn build_json_preview(file: Option<&EntityFileRecord>) -> Result<String, String>
         "payload": payload,
         "meta": meta,
     }))
+}
+
+fn update_entity_summary_from_state(
+    connection: &Connection,
+    state_id: i64,
+    status: StageStatus,
+    updated_at: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            r#"
+            UPDATE entities
+            SET current_stage_id = (
+                    SELECT stage_id FROM entity_stage_states WHERE id = ?1
+                ),
+                current_status = ?2,
+                last_seen_at = ?3,
+                updated_at = ?3
+            WHERE entity_id = (
+                SELECT entity_id FROM entity_stage_states WHERE id = ?1
+            )
+            "#,
+            params![state_id, stage_status_value(&status), updated_at],
+        )
+        .map_err(|error| {
+            format!("Failed to update logical entity summary from state '{state_id}': {error}")
+        })?;
+    Ok(())
+}
+
+fn runtime_task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeTaskRecord> {
+    Ok(RuntimeTaskRecord {
+        state_id: row.get(0)?,
+        entity_id: row.get(1)?,
+        stage_id: row.get(2)?,
+        status: row.get(3)?,
+        attempts: row.get::<_, i64>(4)? as u64,
+        max_attempts: row.get::<_, i64>(5)? as u64,
+        file_path: row.get(6)?,
+        file_instance_id: row.get::<_, Option<i64>>(7)?.unwrap_or_default(),
+        file_exists: row.get::<_, i64>(8)? == 1,
+        workflow_url: row.get(9)?,
+        retry_delay_sec: row.get::<_, i64>(10)? as u64,
+        next_stage: row.get(11)?,
+    })
+}
+
+fn load_stage_runs_from_connection(
+    connection: &Connection,
+    entity_id: Option<&str>,
+    limit: u32,
+) -> Result<Vec<StageRunRecord>, String> {
+    let sql = match entity_id {
+        Some(_) => {
+            r#"
+            SELECT id, run_id, entity_id, entity_file_id, stage_id, attempt_no, workflow_url,
+                   request_json, response_json, http_status, success, error_type, error_message,
+                   started_at, finished_at, duration_ms
+            FROM stage_runs
+            WHERE entity_id = ?1
+            ORDER BY started_at DESC, id DESC
+            LIMIT ?2
+            "#
+        }
+        None => {
+            r#"
+            SELECT id, run_id, entity_id, entity_file_id, stage_id, attempt_no, workflow_url,
+                   request_json, response_json, http_status, success, error_type, error_message,
+                   started_at, finished_at, duration_ms
+            FROM stage_runs
+            ORDER BY started_at DESC, id DESC
+            LIMIT ?1
+            "#
+        }
+    };
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| format!("Failed to prepare stage runs query: {error}"))?;
+    let rows = match entity_id {
+        Some(entity_id) => statement
+            .query_map(params![entity_id, limit as i64], stage_run_from_row)
+            .map_err(|error| format!("Failed to query stage runs for '{entity_id}': {error}"))?,
+        None => statement
+            .query_map(params![limit as i64], stage_run_from_row)
+            .map_err(|error| format!("Failed to query stage runs: {error}"))?,
+    };
+
+    let mut runs = Vec::new();
+    for row in rows {
+        runs.push(row.map_err(|error| format!("Failed to read stage run row: {error}"))?);
+    }
+    Ok(runs)
+}
+
+fn stage_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageRunRecord> {
+    Ok(StageRunRecord {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        entity_id: row.get(2)?,
+        entity_file_id: row.get(3)?,
+        stage_id: row.get(4)?,
+        attempt_no: row.get::<_, i64>(5)? as u64,
+        workflow_url: row.get(6)?,
+        request_json: row.get(7)?,
+        response_json: row.get(8)?,
+        http_status: row.get(9)?,
+        success: row.get::<_, i64>(10)? == 1,
+        error_type: row.get(11)?,
+        error_message: row.get(12)?,
+        started_at: row.get(13)?,
+        finished_at: row.get(14)?,
+        duration_ms: row.get::<_, Option<i64>>(15)?.map(|value| value as u64),
+    })
 }
 
 fn compare_file_records(left: &EntityFileRecord, right: &EntityFileRecord) -> std::cmp::Ordering {
@@ -2423,7 +2988,7 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_creates_database_file_and_required_tables_at_v3() {
+    fn bootstrap_creates_database_file_and_required_tables_at_v4() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let database_path = tempdir.path().join("app.db");
         let config = test_config(vec![stage("ingest", Some("normalize"))]);
@@ -2433,14 +2998,14 @@ mod tests {
         let table_names = load_table_names(&connection).expect("table names");
 
         assert!(database_path.exists());
-        assert_eq!(result.schema_version, 3);
+        assert_eq!(result.schema_version, 4);
         assert!(table_names.contains(&"entity_files".to_string()));
         assert!(table_names.contains(&"entities".to_string()));
         assert!(table_names.contains(&"entity_stage_states".to_string()));
     }
 
     #[test]
-    fn existing_v2_database_is_migrated_to_v3() {
+    fn existing_v2_database_is_migrated_to_v4() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let database_path = tempdir.path().join("app.db");
         let connection = Connection::open(&database_path).expect("open db");
@@ -2499,16 +3064,19 @@ mod tests {
             load_entity_files_from_connection(&connection, Some("entity-1")).expect("load files");
         let events = load_app_events_from_connection(&connection, 20).expect("events");
 
-        assert_eq!(result.schema_version, 3);
+        assert_eq!(result.schema_version, 4);
         assert_eq!(entity.file_count, 1);
         assert_eq!(files.len(), 1);
         assert!(events
             .iter()
             .any(|event| event.code == "schema_migrated_to_v3"));
+        assert!(events
+            .iter()
+            .any(|event| event.code == "schema_migrated_to_v4"));
     }
 
     #[test]
-    fn v1_database_can_bootstrap_through_v3() {
+    fn v1_database_can_bootstrap_through_v4() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let database_path = tempdir.path().join("app.db");
         let connection = Connection::open(&database_path).expect("open db");
@@ -2518,7 +3086,7 @@ mod tests {
         let result = bootstrap_database(&database_path, &test_config(vec![stage("ingest", None)]))
             .expect("bootstrap");
 
-        assert_eq!(result.schema_version, 3);
+        assert_eq!(result.schema_version, 4);
     }
 
     #[test]

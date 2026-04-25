@@ -27,6 +27,7 @@ struct RawRuntimeConfig {
     scan_interval_sec: Option<u64>,
     max_parallel_tasks: Option<u64>,
     stuck_task_timeout_sec: Option<u64>,
+    request_timeout_sec: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,6 +57,7 @@ runtime:
   scan_interval_sec: 5
   max_parallel_tasks: 3
   stuck_task_timeout_sec: 900
+  request_timeout_sec: 30
 
 stages:
   - id: ingest
@@ -156,11 +158,23 @@ fn validate_and_build(raw: RawPipelineConfig) -> (Option<PipelineConfig>, Config
     };
 
     let runtime = match raw.runtime {
-        Some(runtime) => RuntimeConfig {
-            scan_interval_sec: runtime.scan_interval_sec.unwrap_or(5),
-            max_parallel_tasks: runtime.max_parallel_tasks.unwrap_or(3),
-            stuck_task_timeout_sec: runtime.stuck_task_timeout_sec.unwrap_or(900),
-        },
+        Some(runtime) => {
+            let request_timeout_sec = runtime.request_timeout_sec.unwrap_or(30);
+            if request_timeout_sec == 0 {
+                issues.push(issue(
+                    ValidationSeverity::Error,
+                    "invalid_runtime_request_timeout_sec",
+                    "runtime.request_timeout_sec",
+                    "request_timeout_sec must be greater than 0.",
+                ));
+            }
+            RuntimeConfig {
+                scan_interval_sec: runtime.scan_interval_sec.unwrap_or(5),
+                max_parallel_tasks: runtime.max_parallel_tasks.unwrap_or(3),
+                stuck_task_timeout_sec: runtime.stuck_task_timeout_sec.unwrap_or(900),
+                request_timeout_sec: request_timeout_sec.max(1),
+            }
+        }
         None => {
             issues.push(issue(
                 ValidationSeverity::Warning,
@@ -184,6 +198,7 @@ fn validate_and_build(raw: RawPipelineConfig) -> (Option<PipelineConfig>, Config
             Vec::new()
         }
     };
+    validate_stage_links(&stages, &mut issues);
 
     let validation = ConfigValidationResult::from_issues(issues);
     if validation.is_valid {
@@ -235,6 +250,16 @@ fn build_stages(
             &format!("{prefix}.workflow_url"),
             issues,
         );
+        if let Some(workflow_url) = workflow_url.as_ref() {
+            if !is_allowed_workflow_url(workflow_url) {
+                issues.push(issue(
+                    ValidationSeverity::Error,
+                    "invalid_stage_workflow_url",
+                    format!("{prefix}.workflow_url"),
+                    "workflow_url must be an http:// or https:// URL.",
+                ));
+            }
+        }
 
         if let Some(id) = &id {
             if !stage_ids.insert(id.clone()) {
@@ -283,6 +308,26 @@ fn build_stages(
     }
 
     stages
+}
+
+fn validate_stage_links(stages: &[StageDefinition], issues: &mut Vec<ConfigValidationIssue>) {
+    let stage_ids: HashSet<&str> = stages.iter().map(|stage| stage.id.as_str()).collect();
+    for (index, stage) in stages.iter().enumerate() {
+        if let Some(next_stage) = stage.next_stage.as_deref() {
+            if !stage_ids.contains(next_stage) {
+                issues.push(issue(
+                    ValidationSeverity::Error,
+                    "unknown_stage_next_stage",
+                    format!("stages[{index}].next_stage"),
+                    format!("next_stage '{next_stage}' does not reference a declared stage."),
+                ));
+            }
+        }
+    }
+}
+
+fn is_allowed_workflow_url(value: &str) -> bool {
+    value.starts_with("https://") || value.starts_with("http://")
 }
 
 fn required_string(

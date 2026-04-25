@@ -6,9 +6,11 @@ use crate::database;
 use crate::discovery;
 use crate::domain::{
     AppEventsResult, BootstrapResult, CommandErrorInfo, EntityDetailResult, EntityFilesResult,
-    EntityFilters, EntityListResult, FileCopyResult, RuntimeSummaryResult, ScanWorkspaceResult,
-    StageDirectoryProvisionResult, StageListResult, WorkspaceExplorerResult,
+    EntityFilters, EntityListResult, FileCopyResult, ReconcileStuckTasksResult, RunDueTasksResult,
+    RunEntityStageResult, RuntimeSummaryResult, ScanWorkspaceResult, StageDirectoryProvisionResult,
+    StageListResult, StageRunsResult, WorkspaceExplorerResult,
 };
+use crate::executor;
 use crate::file_ops;
 use crate::workdir;
 
@@ -229,6 +231,104 @@ pub fn create_next_stage_copy(
 }
 
 #[tauri::command]
+pub fn run_due_tasks(path: String) -> RunDueTasksResult {
+    match load_runtime_context(&path) {
+        Ok(context) => match executor::run_due_tasks(
+            &context.workdir_path,
+            &context.database_path,
+            context.config.runtime.max_parallel_tasks,
+            context.config.runtime.request_timeout_sec,
+            context.config.runtime.stuck_task_timeout_sec,
+        ) {
+            Ok(summary) => RunDueTasksResult {
+                summary: Some(summary),
+                errors: Vec::new(),
+            },
+            Err(message) => RunDueTasksResult {
+                summary: None,
+                errors: vec![command_error("run_due_tasks_failed", message, None)],
+            },
+        },
+        Err(error) => RunDueTasksResult {
+            summary: None,
+            errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn run_entity_stage(path: String, entity_id: String, stage_id: String) -> RunEntityStageResult {
+    match load_runtime_context(&path) {
+        Ok(context) => match executor::run_entity_stage(
+            &context.workdir_path,
+            &context.database_path,
+            &entity_id,
+            &stage_id,
+            context.config.runtime.request_timeout_sec,
+            context.config.runtime.stuck_task_timeout_sec,
+        ) {
+            Ok(summary) => RunEntityStageResult {
+                summary: Some(summary),
+                errors: Vec::new(),
+            },
+            Err(message) => RunEntityStageResult {
+                summary: None,
+                errors: vec![command_error("run_entity_stage_failed", message, None)],
+            },
+        },
+        Err(error) => RunEntityStageResult {
+            summary: None,
+            errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn list_stage_runs(path: String, entity_id: Option<String>) -> StageRunsResult {
+    match load_runtime_context(&path) {
+        Ok(context) => {
+            match database::list_stage_runs(&context.database_path, entity_id.as_deref()) {
+                Ok(runs) => StageRunsResult {
+                    runs,
+                    errors: Vec::new(),
+                },
+                Err(message) => StageRunsResult {
+                    runs: Vec::new(),
+                    errors: vec![command_error("list_stage_runs_failed", message, None)],
+                },
+            }
+        }
+        Err(error) => StageRunsResult {
+            runs: Vec::new(),
+            errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn reconcile_stuck_tasks(path: String) -> ReconcileStuckTasksResult {
+    match load_runtime_context(&path) {
+        Ok(context) => match executor::reconcile_stuck_tasks(
+            &context.database_path,
+            context.config.runtime.stuck_task_timeout_sec,
+        ) {
+            Ok(reconciled) => ReconcileStuckTasksResult {
+                reconciled,
+                errors: Vec::new(),
+            },
+            Err(message) => ReconcileStuckTasksResult {
+                reconciled: 0,
+                errors: vec![command_error("reconcile_stuck_tasks_failed", message, None)],
+            },
+        },
+        Err(error) => ReconcileStuckTasksResult {
+            reconciled: 0,
+            errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
 pub fn list_app_events(path: String, limit: Option<u32>) -> AppEventsResult {
     match load_runtime_context(&path) {
         Ok(context) => match database::list_app_events(&context.database_path, limit.unwrap_or(50))
@@ -269,6 +369,7 @@ pub fn get_workspace_explorer(path: String) -> WorkspaceExplorerResult {
 struct RuntimeContext {
     workdir_path: PathBuf,
     database_path: PathBuf,
+    config: crate::domain::PipelineConfig,
 }
 
 fn load_runtime_context(path: &str) -> Result<RuntimeContext, CommandErrorInfo> {
@@ -328,6 +429,7 @@ fn load_runtime_context(path: &str) -> Result<RuntimeContext, CommandErrorInfo> 
     Ok(RuntimeContext {
         workdir_path,
         database_path,
+        config,
     })
 }
 

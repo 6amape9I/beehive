@@ -64,6 +64,7 @@ pub struct RuntimeConfig {
     pub scan_interval_sec: u64,
     pub max_parallel_tasks: u64,
     pub stuck_task_timeout_sec: u64,
+    pub request_timeout_sec: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -72,6 +73,7 @@ impl Default for RuntimeConfig {
             scan_interval_sec: 5,
             max_parallel_tasks: 3,
             stuck_task_timeout_sec: 900,
+            request_timeout_sec: 30,
         }
     }
 }
@@ -302,6 +304,7 @@ pub struct RuntimeSummary {
     pub managed_copy_count: u64,
     pub invalid_file_count: u64,
     pub entities_by_status: Vec<StatusCount>,
+    pub execution_status_counts: Vec<StatusCount>,
     pub last_reconciliation_at: Option<String>,
 }
 
@@ -456,5 +459,61 @@ pub struct FileCopyResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StageDirectoryProvisionResult {
     pub summary: Option<StageDirectoryProvisionSummary>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageRunRecord {
+    pub id: i64,
+    pub run_id: String,
+    pub entity_id: String,
+    pub entity_file_id: Option<i64>,
+    pub stage_id: String,
+    pub attempt_no: u64,
+    pub workflow_url: String,
+    pub request_json: String,
+    pub response_json: Option<String>,
+    pub http_status: Option<i64>,
+    pub success: bool,
+    pub error_type: Option<String>,
+    pub error_message: Option<String>,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RunDueTasksSummary {
+    pub claimed: u64,
+    pub succeeded: u64,
+    pub retry_scheduled: u64,
+    pub failed: u64,
+    pub blocked: u64,
+    pub skipped: u64,
+    pub stuck_reconciled: u64,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunDueTasksResult {
+    pub summary: Option<RunDueTasksSummary>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunEntityStageResult {
+    pub summary: Option<RunDueTasksSummary>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageRunsResult {
+    pub runs: Vec<StageRunRecord>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconcileStuckTasksResult {
+    pub reconciled: u64,
     pub errors: Vec<CommandErrorInfo>,
 }

@@ -7,8 +7,14 @@ import { InfoGrid } from "../components/InfoGrid";
 import { StatusBadge } from "../components/StatusBadge";
 import { ValidationIssues } from "../components/ValidationIssues";
 import { formatDateTime, shortChecksum } from "../lib/formatters";
-import { createNextStageCopy, getEntity } from "../lib/runtimeApi";
-import type { CommandErrorInfo, EntityDetailPayload, FileCopyPayload } from "../types/domain";
+import { createNextStageCopy, getEntity, listStageRuns, runEntityStage } from "../lib/runtimeApi";
+import type {
+  CommandErrorInfo,
+  EntityDetailPayload,
+  FileCopyPayload,
+  RunDueTasksSummary,
+  StageRunRecord,
+} from "../types/domain";
 
 export function EntityDetailPage() {
   const { entityId } = useParams();
@@ -16,8 +22,11 @@ export function EntityDetailPage() {
   const [detail, setDetail] = useState<EntityDetailPayload | null>(null);
   const [errors, setErrors] = useState<CommandErrorInfo[]>([]);
   const [copyResult, setCopyResult] = useState<FileCopyPayload | null>(null);
+  const [runResult, setRunResult] = useState<RunDueTasksSummary | null>(null);
+  const [stageRuns, setStageRuns] = useState<StageRunRecord[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isCopyingStageId, setIsCopyingStageId] = useState<string | null>(null);
+  const [isRunningStageId, setIsRunningStageId] = useState<string | null>(null);
 
   const workdirPath = state.selected_workdir_path;
   const canQueryRuntime = state.phase === "fully_initialized" && !!workdirPath && !!entityId;
@@ -33,8 +42,10 @@ export function EntityDetailPage() {
       setIsLoading(true);
       try {
         const result = await getEntity(workdirPath, entityId);
+        const runsResult = await listStageRuns(workdirPath, entityId);
         setDetail(result.detail);
-        setErrors(result.errors);
+        setStageRuns(runsResult.runs);
+        setErrors([...result.errors, ...runsResult.errors]);
       } finally {
         setIsLoading(false);
       }
@@ -59,6 +70,29 @@ export function EntityDetailPage() {
       setErrors((current) => [...current, ...refreshed.errors]);
     } finally {
       setIsCopyingStageId(null);
+    }
+  }
+
+  async function handleRunStage(stageId: string) {
+    if (!workdirPath || !entityId) {
+      return;
+    }
+
+    setIsRunningStageId(stageId);
+    try {
+      const result = await runEntityStage(workdirPath, entityId, stageId);
+      setRunResult(result.summary);
+      setErrors([...result.errors, ...(result.summary?.errors ?? [])]);
+
+      const [refreshed, runsResult] = await Promise.all([
+        getEntity(workdirPath, entityId),
+        listStageRuns(workdirPath, entityId),
+      ]);
+      setDetail(refreshed.detail);
+      setStageRuns(runsResult.runs);
+      setErrors((current) => [...current, ...refreshed.errors, ...runsResult.errors]);
+    } finally {
+      setIsRunningStageId(null);
     }
   }
 
@@ -117,6 +151,25 @@ export function EntityDetailPage() {
                   { label: "Source file", value: copyResult.source_file_path },
                   { label: "Target file", value: copyResult.target_file_path },
                   { label: "Message", value: copyResult.message },
+                ]}
+              />
+            </section>
+          ) : null}
+          {runResult ? (
+            <section className="panel">
+              <div className="panel-heading">
+                <h2>Last Execution</h2>
+                <span className="muted">Manual stage run</span>
+              </div>
+              <InfoGrid
+                items={[
+                  { label: "Claimed", value: runResult.claimed },
+                  { label: "Succeeded", value: runResult.succeeded },
+                  { label: "Retry scheduled", value: runResult.retry_scheduled },
+                  { label: "Failed", value: runResult.failed },
+                  { label: "Blocked", value: runResult.blocked },
+                  { label: "Skipped", value: runResult.skipped },
+                  { label: "Stuck reconciled", value: runResult.stuck_reconciled },
                 ]}
               />
             </section>
@@ -211,7 +264,10 @@ export function EntityDetailPage() {
                       <th>File path</th>
                       <th>Presence</th>
                       <th>Last error</th>
+                      <th>Last HTTP</th>
+                      <th>Next retry</th>
                       <th>Updated</th>
+                      <th>Run</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -228,7 +284,65 @@ export function EntityDetailPage() {
                         </td>
                         <td>{stageState.file_exists ? "Present" : "Missing"}</td>
                         <td>{stageState.last_error ?? "Not available"}</td>
+                        <td>{stageState.last_http_status ?? "Not available"}</td>
+                        <td>{formatDateTime(stageState.next_retry_at)}</td>
                         <td>{formatDateTime(stageState.updated_at)}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="button secondary"
+                            disabled={
+                              !stageState.file_exists ||
+                              isRunningStageId === stageState.stage_id ||
+                              !["pending", "retry_wait"].includes(stageState.status)
+                            }
+                            onClick={() => void handleRunStage(stageState.stage_id)}
+                          >
+                            {isRunningStageId === stageState.stage_id ? "Running..." : "Run this stage"}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+          <section className="panel">
+            <div className="panel-heading">
+              <h2>Stage Runs</h2>
+              <span className="muted">{stageRuns.length} audit row(s)</span>
+            </div>
+            {stageRuns.length === 0 ? (
+              <p className="empty-text">No execution attempts have been recorded for this entity.</p>
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Run</th>
+                      <th>Stage</th>
+                      <th>Attempt</th>
+                      <th>Success</th>
+                      <th>HTTP</th>
+                      <th>Error</th>
+                      <th>Started</th>
+                      <th>Duration</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stageRuns.map((run) => (
+                      <tr key={run.id}>
+                        <td>
+                          <code>{run.run_id}</code>
+                        </td>
+                        <td>{run.stage_id}</td>
+                        <td>{run.attempt_no}</td>
+                        <td>{run.success ? "Yes" : "No"}</td>
+                        <td>{run.http_status ?? "Not available"}</td>
+                        <td>{run.error_message ?? run.error_type ?? "None"}</td>
+                        <td>{formatDateTime(run.started_at)}</td>
+                        <td>{run.duration_ms ?? "Not available"}</td>
                       </tr>
                     ))}
                   </tbody>

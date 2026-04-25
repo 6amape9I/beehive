@@ -4,6 +4,7 @@ mod config;
 mod database;
 mod discovery;
 mod domain;
+mod executor;
 mod file_ops;
 mod workdir;
 
@@ -23,6 +24,10 @@ pub fn run() {
             commands::list_entity_files,
             commands::get_entity,
             commands::create_next_stage_copy,
+            commands::run_due_tasks,
+            commands::run_entity_stage,
+            commands::list_stage_runs,
+            commands::reconcile_stuck_tasks,
             commands::list_app_events,
             commands::get_workspace_explorer
         ])

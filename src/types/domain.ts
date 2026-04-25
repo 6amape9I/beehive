@@ -35,6 +35,7 @@ export interface RuntimeConfig {
   scan_interval_sec: number;
   max_parallel_tasks: number;
   stuck_task_timeout_sec: number;
+  request_timeout_sec: number;
 }
 
 export interface StageDefinition {
@@ -219,6 +220,7 @@ export interface RuntimeSummary {
   managed_copy_count: number;
   invalid_file_count: number;
   entities_by_status: StatusCount[];
+  execution_status_counts: StatusCount[];
   last_reconciliation_at: string | null;
 }
 
@@ -346,6 +348,56 @@ export interface WorkspaceStageGroup {
 
 export interface WorkspaceExplorerResult {
   groups: WorkspaceStageGroup[];
+  errors: CommandErrorInfo[];
+}
+
+export interface StageRunRecord {
+  id: number;
+  run_id: string;
+  entity_id: string;
+  entity_file_id: number | null;
+  stage_id: string;
+  attempt_no: number;
+  workflow_url: string;
+  request_json: string;
+  response_json: string | null;
+  http_status: number | null;
+  success: boolean;
+  error_type: string | null;
+  error_message: string | null;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+}
+
+export interface RunDueTasksSummary {
+  claimed: number;
+  succeeded: number;
+  retry_scheduled: number;
+  failed: number;
+  blocked: number;
+  skipped: number;
+  stuck_reconciled: number;
+  errors: CommandErrorInfo[];
+}
+
+export interface RunDueTasksResult {
+  summary: RunDueTasksSummary | null;
+  errors: CommandErrorInfo[];
+}
+
+export interface RunEntityStageResult {
+  summary: RunDueTasksSummary | null;
+  errors: CommandErrorInfo[];
+}
+
+export interface StageRunsResult {
+  runs: StageRunRecord[];
+  errors: CommandErrorInfo[];
+}
+
+export interface ReconcileStuckTasksResult {
+  reconciled: number;
   errors: CommandErrorInfo[];
 }
 

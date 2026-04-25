@@ -89,6 +89,12 @@ export function SettingsDiagnosticsPage() {
             { label: "Managed copies", value: summary?.managed_copy_count },
             { label: "Invalid files", value: summary?.invalid_file_count },
             { label: "Last reconciliation", value: formatDateTime(summary?.last_reconciliation_at) },
+            {
+              label: "Execution states",
+              value: summary?.execution_status_counts
+                .map((entry) => `${entry.status}: ${entry.count}`)
+                .join(", "),
+            },
           ]}
         />
       </section>
@@ -106,6 +112,7 @@ export function SettingsDiagnosticsPage() {
             stages.map((stage) => (
               <span className="stage-chip" key={stage.id}>
                 {stage.id} ({stage.is_active ? "active" : "inactive"})
+                {stage.workflow_url ? ` - ${stage.workflow_url}` : ""}
               </span>
             ))
           )}

@@ -7,16 +7,18 @@ import { ValidationIssues } from "../components/ValidationIssues";
 import { BootstrapSummary } from "../features/bootstrap/BootstrapSummary";
 import { WorkdirSetupPanel } from "../features/workdir/WorkdirSetupPanel";
 import { formatDateTime } from "../lib/formatters";
-import { getRuntimeSummary, scanWorkspace } from "../lib/runtimeApi";
-import type { CommandErrorInfo, RuntimeSummary, ScanSummary } from "../types/domain";
+import { getRuntimeSummary, runDueTasks, scanWorkspace } from "../lib/runtimeApi";
+import type { CommandErrorInfo, RunDueTasksSummary, RuntimeSummary, ScanSummary } from "../types/domain";
 
 export function DashboardPage() {
   const { state } = useBootstrap();
   const [runtimeSummary, setRuntimeSummary] = useState<RuntimeSummary | null>(null);
   const [lastScan, setLastScan] = useState<ScanSummary | null>(null);
+  const [lastRun, setLastRun] = useState<RunDueTasksSummary | null>(null);
   const [runtimeErrors, setRuntimeErrors] = useState<CommandErrorInfo[]>([]);
   const [isLoadingSummary, setIsLoadingSummary] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
 
   const workdirPath = state.selected_workdir_path;
   const canQueryRuntime = state.phase === "fully_initialized" && !!workdirPath;
@@ -58,6 +60,22 @@ export function DashboardPage() {
     }
   }
 
+  async function handleRunDueTasks() {
+    if (!workdirPath) {
+      return;
+    }
+
+    setIsRunning(true);
+    try {
+      const result = await runDueTasks(workdirPath);
+      setLastRun(result.summary);
+      setRuntimeErrors([...result.errors, ...(result.summary?.errors ?? [])]);
+      await loadRuntimeSummary();
+    } finally {
+      setIsRunning(false);
+    }
+  }
+
   return (
     <div className="page-stack">
       <div className="page-heading">
@@ -65,14 +83,24 @@ export function DashboardPage() {
           <span className="eyebrow">Overview</span>
           <h1>Dashboard</h1>
         </div>
-        <button
-          type="button"
-          className="button primary"
-          disabled={!canQueryRuntime || isScanning}
-          onClick={() => void handleScanWorkspace()}
-        >
-          {isScanning ? "Scanning..." : "Scan workspace"}
-        </button>
+        <div className="button-row">
+          <button
+            type="button"
+            className="button secondary"
+            disabled={!canQueryRuntime || isRunning}
+            onClick={() => void handleRunDueTasks()}
+          >
+            {isRunning ? "Running..." : "Run due tasks"}
+          </button>
+          <button
+            type="button"
+            className="button primary"
+            disabled={!canQueryRuntime || isScanning}
+            onClick={() => void handleScanWorkspace()}
+          >
+            {isScanning ? "Scanning..." : "Scan workspace"}
+          </button>
+        </div>
       </div>
       <WorkdirSetupPanel />
       <BootstrapSummary state={state} />
@@ -80,7 +108,7 @@ export function DashboardPage() {
         <div className="panel-heading">
           <h2>Runtime Summary</h2>
           <span className="muted">
-            {isLoadingSummary ? "Loading..." : runtimeSummary ? "Live Stage 3 data" : "No runtime data"}
+            {isLoadingSummary ? "Loading..." : runtimeSummary ? "Live Stage 4 data" : "No runtime data"}
           </span>
         </div>
         <InfoGrid
@@ -100,17 +128,36 @@ export function DashboardPage() {
           ]}
         />
         <div className="stage-chip-row">
-          {runtimeSummary?.entities_by_status.length ? (
-            runtimeSummary.entities_by_status.map((entry) => (
+          {runtimeSummary?.execution_status_counts.length ? (
+            runtimeSummary.execution_status_counts.map((entry) => (
               <span className="stage-chip" key={entry.status}>
                 {entry.status}: {entry.count}
               </span>
             ))
           ) : (
-            <span className="muted">No registered entity statuses yet.</span>
+            <span className="muted">No execution statuses yet.</span>
           )}
         </div>
       </section>
+      {lastRun ? (
+        <section className="panel">
+          <div className="panel-heading">
+            <h2>Last Task Run</h2>
+            <span className="muted">Manual execution batch</span>
+          </div>
+          <InfoGrid
+            items={[
+              { label: "Claimed", value: lastRun.claimed },
+              { label: "Succeeded", value: lastRun.succeeded },
+              { label: "Retry scheduled", value: lastRun.retry_scheduled },
+              { label: "Failed", value: lastRun.failed },
+              { label: "Blocked", value: lastRun.blocked },
+              { label: "Skipped", value: lastRun.skipped },
+              { label: "Stuck reconciled", value: lastRun.stuck_reconciled },
+            ]}
+          />
+        </section>
+      ) : null}
       {lastScan ? (
         <section className="panel">
           <div className="panel-heading">

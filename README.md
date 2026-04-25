@@ -2,9 +2,9 @@
 
 beehive is a local desktop operator tool for JSON stage pipelines.
 
-Stage 3 turns the Stage 2 runtime foundation into a file lifecycle foundation:
+Stage 4 turns the Stage 3 file lifecycle foundation into a manually triggered execution foundation:
 
-`workdir -> active stages -> stage folders -> JSON file instances -> logical entities -> entity_files -> stage states -> managed next-stage copy`
+`eligible stage state -> queued -> in_progress -> n8n webhook -> stage_runs -> done/retry_wait/failed -> next-stage file`
 
 ## Stack
 
@@ -14,6 +14,7 @@ Stage 3 turns the Stage 2 runtime foundation into a file lifecycle foundation:
 - Rust
 - SQLite through `rusqlite`
 - YAML through `serde_yaml`
+- HTTP execution through `reqwest`
 
 ## Install
 
@@ -58,13 +59,14 @@ stages/
 logs/
 ```
 
-## Stage 3 Runtime Model
+## Stage 4 Runtime Model
 
-Stage 3 separates logical entities from physical file instances:
+The app keeps the Stage 3 logical entity/file-instance model:
 
 - `entities` = logical aggregate by `entity_id`
 - `entity_files` = physical JSON file instances in stage folders
 - `entity_stage_states` = logical per-stage runtime state linked to the latest relevant file instance
+- `stage_runs` = audit history for n8n execution attempts
 
 This allows one logical entity to exist in multiple stage folders at once:
 
@@ -97,6 +99,12 @@ Each stage should define:
 - `max_attempts`
 - `retry_delay_sec`
 - optional `next_stage`
+
+Runtime also supports:
+
+- `runtime.request_timeout_sec` with default `30`
+
+`workflow_url` must come from `pipeline.yaml`. Do not hardcode real n8n webhook URLs into application code. The known development n8n production webhook may be used manually or in docs as an example, but automated tests use local mock HTTP servers.
 
 ## JSON File Requirements
 
@@ -166,26 +174,59 @@ Managed copy updates target JSON fields:
 - `meta.beehive.copy_target_stage`
 - `meta.beehive.copy_created_at`
 
+## n8n Execution
+
+`Run due tasks` processes a bounded batch of eligible states. For Stage 4, `runtime.max_parallel_tasks` means the maximum number of tasks processed per manual run, not true parallel execution.
+
+Execution sends:
+
+- `POST`
+- `Content-Type: application/json`
+- `Accept: application/json`
+- source payload and meta
+- beehive execution metadata with `entity_id`, `stage_id`, `entity_file_id`, `attempt`, and `run_id`
+
+Success requires:
+
+- HTTP 2xx;
+- valid JSON object response;
+- response `success` is not `false`;
+- response `payload` is an object when a next stage exists.
+
+On success:
+
+- source stage state becomes `done`;
+- source JSON file is not mutated;
+- target file is created from response `payload`;
+- target stage state is `pending`.
+
+On failure:
+
+- attempts are recorded in `stage_runs`;
+- state becomes `retry_wait` if attempts remain;
+- state becomes `failed` when max attempts are exhausted.
+
+Stuck `in_progress` states older than `runtime.stuck_task_timeout_sec` are reconciled before each manual run.
+
 ## UI
 
-Stage 3 surfaces:
+Stage 4 surfaces:
 
-- Dashboard: reconciliation summary, present/missing files, managed copy count
+- Dashboard: reconciliation summary, present/missing files, managed copy count, execution status counts, Run due tasks
 - Entities: logical entity rows
-- Entity Detail: all file instances plus stage states and managed copy action
+- Entity Detail: all file instances plus stage states, managed copy action, stage run history, Run this stage
 - Workspace Explorer: present/missing/invalid/managed-copy file visibility
-- Settings / Diagnostics: schema v3, reconciliation summary, file lifecycle events
+- Settings / Diagnostics: schema v4, reconciliation summary, file lifecycle and execution events
 
 ## Intentionally Deferred
 
-Stage 3 does not implement:
+Stage 4 does not implement:
 
-- n8n workflow execution
-- HTTP workflow calls
-- retry runtime
-- task queue worker
+- background daemon
+- n8n workflow management through the n8n REST API
+- credential manager or authentication UI
 - background watcher
-- file moves between stages
-- automatic source-stage completion
+- complex branch routing
+- n8n execution polling
 - full JSON editor
 - advanced UI polish
