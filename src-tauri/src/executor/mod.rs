@@ -90,6 +90,8 @@ pub fn run_entity_stage(
     };
     drop(connection);
 
+    // Manual debug execution intentionally allows retry_wait even when next_retry_at is in the future.
+    // The production-like run_due_tasks path remains strict and only selects due retry_wait states.
     if !is_debug_runnable(&task) {
         return Ok(RunDueTasksSummary {
             skipped: 1,
@@ -253,17 +255,13 @@ fn execute_task(
                         created_child_path = copy.target_file_path.clone();
                     }
                     crate::domain::FileCopyStatus::Blocked => {
-                        finish_failure(
+                        finish_copy_blocked(
                             &connection,
                             &task,
                             &run_id,
-                            attempt_no,
-                            AttemptFailure {
-                                error_type: "copy_failed".to_string(),
-                                message: copy.message,
-                                http_status: Some(success.http_status),
-                                response_json: Some(success.response_json),
-                            },
+                            copy.message,
+                            success.http_status,
+                            success.response_json,
                             finished_at,
                             duration_ms,
                         )?;
@@ -334,6 +332,54 @@ fn execute_task(
             duration_ms,
         ),
     }
+}
+
+fn finish_copy_blocked(
+    connection: &rusqlite::Connection,
+    task: &RuntimeTaskRecord,
+    run_id: &str,
+    message: String,
+    http_status: i64,
+    response_json: String,
+    finished_at: DateTime<Utc>,
+    duration_ms: u64,
+) -> Result<(), String> {
+    finish_stage_run(
+        connection,
+        &FinishStageRunInput {
+            run_id: run_id.to_string(),
+            response_json: Some(response_json),
+            http_status: Some(http_status),
+            success: false,
+            error_type: Some("copy_blocked".to_string()),
+            error_message: Some(message.clone()),
+            finished_at: finished_at.to_rfc3339(),
+            duration_ms,
+        },
+    )?;
+    block_stage_state(
+        connection,
+        task.state_id,
+        &message,
+        &finished_at.to_rfc3339(),
+    )?;
+    insert_app_event(
+        connection,
+        AppEventLevel::Error,
+        "task_blocked",
+        &format!(
+            "Entity '{}' on stage '{}' was blocked after HTTP success: {}",
+            task.entity_id, task.stage_id, message
+        ),
+        Some(json!({
+            "entity_id": task.entity_id,
+            "stage_id": task.stage_id,
+            "run_id": run_id,
+            "error_type": "copy_blocked",
+        })),
+        &finished_at.to_rfc3339(),
+    )?;
+    Ok(())
 }
 
 fn finish_failure(
@@ -615,13 +661,18 @@ fn reconcile_stuck_tasks_with_connection(
         } else {
             StageStatus::Failed
         };
+        let next_retry_at = if matches!(next_status, StageStatus::RetryWait) {
+            Some(now)
+        } else {
+            None
+        };
         update_stage_state_failure(
             connection,
             *state_id,
             next_status,
             "Task was reconciled after being stuck in progress.",
             None,
-            None,
+            next_retry_at,
             now,
         )?;
         insert_app_event(
@@ -738,6 +789,23 @@ mod tests {
         }
     }
 
+    fn stage(
+        id: &str,
+        workflow_url: &str,
+        next_stage: Option<&str>,
+        active_input: &str,
+    ) -> StageDefinition {
+        StageDefinition {
+            id: id.to_string(),
+            input_folder: active_input.to_string(),
+            output_folder: format!("{active_input}-out"),
+            workflow_url: workflow_url.to_string(),
+            max_attempts: 3,
+            retry_delay_sec: 0,
+            next_stage: next_stage.map(ToOwned::to_owned),
+        }
+    }
+
     fn prepare_workdir(
         workflow_url: &str,
         max_attempts: u64,
@@ -781,6 +849,20 @@ mod tests {
             .find(|state| state.stage_id == stage_id)
             .expect("state exists")
             .status
+    }
+
+    fn stage_state(
+        database_path: &std::path::Path,
+        stage_id: &str,
+    ) -> crate::domain::EntityStageStateRecord {
+        let detail = get_entity_detail(database_path, "entity-1")
+            .expect("detail result")
+            .expect("detail exists");
+        detail
+            .stage_states
+            .into_iter()
+            .find(|state| state.stage_id == stage_id)
+            .expect("state exists")
     }
 
     #[test]
@@ -849,6 +931,46 @@ mod tests {
     }
 
     #[test]
+    fn success_then_scan_does_not_regress_done_or_send_second_http_request() {
+        let server = mock_server(vec![(200, r#"{"success":true,"meta":{}}"#)]);
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        let source_path = workdir
+            .join("stages")
+            .join("incoming")
+            .join("entity-1.json");
+        bootstrap_database(
+            &database_path,
+            &PipelineConfig {
+                project: ProjectConfig {
+                    name: "beehive".to_string(),
+                    workdir: ".".to_string(),
+                },
+                runtime: RuntimeConfig::default(),
+                stages: vec![stage("incoming", &server.url, None, "stages/incoming")],
+            },
+        )
+        .expect("bootstrap");
+        std::fs::create_dir_all(source_path.parent().expect("source parent")).expect("parent");
+        std::fs::write(
+            &source_path,
+            r#"{"id":"entity-1","current_stage":"incoming","status":"pending","payload":{"title":"hello"},"meta":{}}"#,
+        )
+        .expect("source");
+        scan_workspace(&workdir, &database_path).expect("initial scan");
+
+        let first = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("first run");
+        scan_workspace(&workdir, &database_path).expect("scan after success");
+        let second = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("second run");
+
+        assert_eq!(first.succeeded, 1);
+        assert_eq!(stage_status(&database_path, "incoming"), "done");
+        assert_eq!(second.claimed, 0);
+        assert_eq!(server.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[test]
     fn http_non_2xx_retries_then_fails_after_max_attempts() {
         let server = mock_server(vec![
             (500, r#"{"success":false}"#),
@@ -909,8 +1031,11 @@ mod tests {
     }
 
     #[test]
-    fn stuck_in_progress_is_reconciled_before_running() {
-        let server = mock_server(Vec::new());
+    fn stuck_retry_wait_gets_due_next_retry_at_and_can_execute() {
+        let server = mock_server(vec![(
+            200,
+            r#"{"success":true,"payload":{"title":"recovered"},"meta":{}}"#,
+        )]);
         let (_tempdir, workdir, database_path, _source_path) = prepare_workdir(&server.url, 3, 0);
         let connection = crate::database::open_connection(&database_path).expect("open db");
         connection
@@ -920,10 +1045,22 @@ mod tests {
             )
             .expect("stuck state");
 
+        let reconciled = reconcile_stuck_tasks(&database_path, 1).expect("reconcile stuck");
+        let state_after_reconcile = stage_state(&database_path, "incoming");
+        let next_retry_at = state_after_reconcile
+            .next_retry_at
+            .as_deref()
+            .expect("next_retry_at should be set");
+        let due_at = chrono::DateTime::parse_from_rfc3339(next_retry_at)
+            .expect("parse next_retry_at")
+            .with_timezone(&Utc);
         let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("run tasks");
 
-        assert_eq!(summary.stuck_reconciled, 1);
-        assert_eq!(stage_status(&database_path, "incoming"), "retry_wait");
+        assert_eq!(reconciled, 1);
+        assert_eq!(state_after_reconcile.status, "retry_wait");
+        assert!(due_at <= Utc::now());
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(server.requests.lock().expect("requests").len(), 1);
     }
 
     #[test]
@@ -942,5 +1079,138 @@ mod tests {
 
         assert_eq!(summary.claimed, 0);
         assert_eq!(server.requests.lock().expect("requests").len(), 0);
+    }
+
+    #[test]
+    fn blocked_missing_next_stage_after_http_does_not_retry() {
+        let server = mock_server(vec![(
+            200,
+            r#"{"success":true,"payload":{"title":"blocked"},"meta":{}}"#,
+        )]);
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        let source_path = workdir
+            .join("stages")
+            .join("incoming")
+            .join("entity-1.json");
+        let config = PipelineConfig {
+            project: ProjectConfig {
+                name: "beehive".to_string(),
+                workdir: ".".to_string(),
+            },
+            runtime: RuntimeConfig::default(),
+            stages: vec![stage(
+                "incoming",
+                &server.url,
+                Some("missing"),
+                "stages/incoming",
+            )],
+        };
+        bootstrap_database(&database_path, &config).expect("bootstrap");
+        std::fs::create_dir_all(source_path.parent().expect("source parent")).expect("parent");
+        std::fs::write(
+            &source_path,
+            r#"{"id":"entity-1","current_stage":"incoming","next_stage":"missing","status":"pending","payload":{"title":"hello"},"meta":{}}"#,
+        )
+        .expect("source");
+        scan_workspace(&workdir, &database_path).expect("scan");
+
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("run");
+        let state = stage_state(&database_path, "incoming");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+
+        assert_eq!(summary.blocked, 1);
+        assert_eq!(state.status, "blocked");
+        assert!(state.next_retry_at.is_none());
+        assert!(!runs[0].success);
+        assert_eq!(runs[0].error_type.as_deref(), Some("copy_blocked"));
+    }
+
+    #[test]
+    fn blocked_inactive_next_stage_after_http_does_not_retry() {
+        let server = mock_server(vec![(
+            200,
+            r#"{"success":true,"payload":{"title":"blocked"},"meta":{}}"#,
+        )]);
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        let source_path = workdir
+            .join("stages")
+            .join("incoming")
+            .join("entity-1.json");
+        let config = PipelineConfig {
+            project: ProjectConfig {
+                name: "beehive".to_string(),
+                workdir: ".".to_string(),
+            },
+            runtime: RuntimeConfig::default(),
+            stages: vec![
+                stage(
+                    "incoming",
+                    &server.url,
+                    Some("normalized"),
+                    "stages/incoming",
+                ),
+                stage("normalized", &server.url, None, "stages/normalized"),
+            ],
+        };
+        bootstrap_database(&database_path, &config).expect("bootstrap");
+        bootstrap_database(
+            &database_path,
+            &PipelineConfig {
+                stages: vec![stage(
+                    "incoming",
+                    &server.url,
+                    Some("normalized"),
+                    "stages/incoming",
+                )],
+                ..config.clone()
+            },
+        )
+        .expect("archive normalized");
+        std::fs::create_dir_all(source_path.parent().expect("source parent")).expect("parent");
+        std::fs::write(
+            &source_path,
+            r#"{"id":"entity-1","current_stage":"incoming","next_stage":"normalized","status":"pending","payload":{"title":"hello"},"meta":{}}"#,
+        )
+        .expect("source");
+        scan_workspace(&workdir, &database_path).expect("scan");
+
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("run");
+        let state = stage_state(&database_path, "incoming");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+
+        assert_eq!(summary.blocked, 1);
+        assert_eq!(state.status, "blocked");
+        assert!(state.next_retry_at.is_none());
+        assert!(!runs[0].success);
+        assert_eq!(runs[0].error_type.as_deref(), Some("copy_blocked"));
+    }
+
+    #[test]
+    fn run_entity_stage_can_bypass_retry_delay_for_debugging() {
+        let server = mock_server(vec![(
+            200,
+            r#"{"success":true,"payload":{"title":"debug run"},"meta":{}}"#,
+        )]);
+        let (_tempdir, workdir, database_path, _source_path) = prepare_workdir(&server.url, 3, 0);
+        let connection = crate::database::open_connection(&database_path).expect("open db");
+        connection
+            .execute(
+                "UPDATE entity_stage_states SET status = 'retry_wait', attempts = 1, next_retry_at = ?1 WHERE entity_id = 'entity-1' AND stage_id = 'incoming'",
+                rusqlite::params![(Utc::now() + Duration::hours(1)).to_rfc3339()],
+            )
+            .expect("future retry");
+
+        let due_summary = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("due run");
+        let debug_summary =
+            run_entity_stage(&workdir, &database_path, "entity-1", "incoming", 5, 1)
+                .expect("debug run");
+
+        assert_eq!(due_summary.claimed, 0);
+        assert_eq!(debug_summary.succeeded, 1);
+        assert_eq!(server.requests.lock().expect("requests").len(), 1);
     }
 }

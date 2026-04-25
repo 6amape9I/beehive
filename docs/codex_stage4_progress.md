@@ -16,3 +16,15 @@
 - Ran `cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul && cargo test --manifest-path src-tauri\Cargo.toml'`; 41 Rust tests passed.
 - Ran `npm.cmd run build`; TypeScript compilation and Vite production build passed.
 - Re-read `instructions/beehive_stage4_codex_task.md` after implementation and updated Stage 4 checklist/delivery docs to match actual verification.
+
+## 2026-04-25 Polishing Patch
+
+- Re-read `instructions/beehive_stage4_codex_task.md` plus the Stage 4 checklist/delivery docs before applying the mandatory polishing patch.
+- Fixed scanner reconciliation so re-seeing a JSON file does not overwrite `entity_stage_states` execution state from file JSON. SQLite stage state remains the execution source of truth; file-level status can still reflect observed JSON.
+- Fixed stuck `in_progress` reconciliation so retryable stuck tasks move to `retry_wait` with a due `next_retry_at` instead of a null retry timestamp.
+- Fixed successful-HTTP / blocked-next-stage handling so structural copy blocks become `blocked` with an unsuccessful `stage_runs` row using `error_type = copy_blocked`, without retry scheduling.
+- Documented and code-commented that `run_entity_stage` is a manual debug path that may bypass future retry delay, while `run_due_tasks` continues to respect `next_retry_at`.
+- Added Rust tests for success-then-rescan state preservation, due stuck retry execution, missing/inactive next-stage structural blocking, and debug retry-delay bypass.
+- Ran `cargo fmt --manifest-path src-tauri/Cargo.toml`; passed.
+- Ran `cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul && cargo test --manifest-path src-tauri\Cargo.toml'`; 45 Rust tests passed.
+- Ran `npm.cmd run build`; TypeScript compilation and Vite production build passed.

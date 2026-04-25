@@ -178,6 +178,8 @@ Managed copy updates target JSON fields:
 
 `Run due tasks` processes a bounded batch of eligible states. For Stage 4, `runtime.max_parallel_tasks` means the maximum number of tasks processed per manual run, not true parallel execution.
 
+`Run this stage` / `run_entity_stage` is a manual debug path. It may execute a `retry_wait` state even when `next_retry_at` is still in the future. The production-like `Run due tasks` path stays strict and only executes `pending` or due `retry_wait` states.
+
 Execution sends:
 
 - `POST`
@@ -200,13 +202,17 @@ On success:
 - target file is created from response `payload`;
 - target stage state is `pending`.
 
+Reconciliation scans do not overwrite SQLite execution state from source JSON. For example, if a successful run leaves the source JSON with `"status": "pending"`, the SQLite stage state remains `done` after the next scan.
+
 On failure:
 
 - attempts are recorded in `stage_runs`;
 - state becomes `retry_wait` if attempts remain;
 - state becomes `failed` when max attempts are exhausted.
 
-Stuck `in_progress` states older than `runtime.stuck_task_timeout_sec` are reconciled before each manual run.
+If HTTP succeeds but next-stage copy is structurally impossible, such as a missing or inactive target stage, the source state becomes `blocked`; the stage run is recorded as unsuccessful with `error_type = copy_blocked`; no retry is scheduled.
+
+Stuck `in_progress` states older than `runtime.stuck_task_timeout_sec` are reconciled before each manual run. Retryable stuck tasks become `retry_wait` with an immediately due `next_retry_at`; exhausted stuck tasks become `failed`.
 
 ## UI
 

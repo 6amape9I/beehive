@@ -934,7 +934,6 @@ pub(crate) fn upsert_entity_stage_state(
                 file_path = excluded.file_path,
                 file_instance_id = excluded.file_instance_id,
                 file_exists = excluded.file_exists,
-                status = excluded.status,
                 max_attempts = excluded.max_attempts,
                 last_seen_at = excluded.last_seen_at,
                 updated_at = excluded.updated_at
