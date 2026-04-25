@@ -408,13 +408,14 @@ fn load_active_tasks(
                 file_path,
                 last_error
             FROM entity_stage_states
-            WHERE status IN ('in_progress', 'retry_wait', 'pending')
+            WHERE status IN ('in_progress', 'queued', 'retry_wait', 'pending')
             ORDER BY
                 CASE
                     WHEN status = 'in_progress' THEN 0
-                    WHEN status = 'retry_wait' AND next_retry_at IS NOT NULL AND next_retry_at <= ?1 THEN 1
-                    WHEN status = 'retry_wait' THEN 2
-                    WHEN status = 'pending' THEN 3
+                    WHEN status = 'queued' THEN 1
+                    WHEN status = 'retry_wait' AND next_retry_at IS NOT NULL AND next_retry_at <= ?1 THEN 2
+                    WHEN status = 'retry_wait' THEN 3
+                    WHEN status = 'pending' THEN 4
                     ELSE 4
                 END,
                 COALESCE(last_started_at, updated_at) ASC,
@@ -592,6 +593,7 @@ fn max_optional_text(left: Option<String>, right: Option<String>) -> Option<Stri
 fn task_reason(status: &str, next_retry_at: Option<&str>, now: &str) -> Option<String> {
     match status {
         "in_progress" => Some("Task is currently in progress.".to_string()),
+        "queued" => Some("Task is queued for execution.".to_string()),
         "pending" => Some("Task is pending execution.".to_string()),
         "retry_wait" => match next_retry_at {
             Some(value) if value <= now => Some("Retry is due now.".to_string()),
@@ -808,6 +810,30 @@ mod tests {
     }
 
     #[test]
+    fn stage_graph_edges_follow_next_stage_not_node_order() {
+        let (_tempdir, database_path) = setup_database(vec![
+            stage("a", Some("c")),
+            stage("b", Some("d")),
+            stage("c", None),
+            stage("d", None),
+        ]);
+
+        let overview = overview(&database_path);
+        let edges: HashSet<(String, String)> = overview
+            .stage_graph
+            .edges
+            .iter()
+            .map(|edge| (edge.from_stage_id.clone(), edge.to_stage_id.clone()))
+            .collect();
+
+        assert!(edges.contains(&("a".to_string(), "c".to_string())));
+        assert!(edges.contains(&("b".to_string(), "d".to_string())));
+        assert!(!edges.contains(&("a".to_string(), "b".to_string())));
+        assert!(!edges.contains(&("b".to_string(), "c".to_string())));
+        assert_eq!(overview.stage_graph.edges.len(), 2);
+    }
+
+    #[test]
     fn status_counters_and_active_tasks_are_aggregated_from_stage_states() {
         let (_tempdir, database_path) = setup_database(vec![
             stage("incoming", Some("normalized")),
@@ -816,9 +842,19 @@ mod tests {
         let connection = open_connection(&database_path).expect("open");
         let future_retry = (Utc::now() + Duration::minutes(10)).to_rfc3339();
         seed_state(&connection, "pending-1", "incoming", "pending", true, None);
+        seed_state(&connection, "queued-1", "incoming", "queued", true, None);
         seed_state(&connection, "done-1", "incoming", "done", true, None);
         seed_state(&connection, "failed-1", "incoming", "failed", true, None);
         seed_state(&connection, "blocked-1", "incoming", "blocked", false, None);
+        seed_state(&connection, "skipped-1", "incoming", "skipped", true, None);
+        seed_state(
+            &connection,
+            "unknown-1",
+            "incoming",
+            "custom_hold",
+            true,
+            None,
+        );
         seed_state(
             &connection,
             "retry-1",
@@ -845,15 +881,25 @@ mod tests {
             .expect("incoming counters");
 
         assert_eq!(incoming.pending, 1);
+        assert_eq!(incoming.queued, 1);
         assert_eq!(incoming.done, 1);
         assert_eq!(incoming.failed, 1);
         assert_eq!(incoming.blocked, 1);
+        assert_eq!(incoming.skipped, 1);
+        assert_eq!(incoming.unknown, 1);
+        assert_eq!(incoming.total, 8);
+        assert_eq!(incoming.existing_files, 7);
         assert_eq!(incoming.retry_wait, 1);
         assert_eq!(incoming.missing_files, 1);
+        assert_eq!(overview.totals.active_tasks_total, 4);
         assert!(overview
             .active_tasks
             .iter()
             .any(|task| task.status == "in_progress"));
+        assert!(overview
+            .active_tasks
+            .iter()
+            .any(|task| task.status == "queued"));
         assert!(overview
             .active_tasks
             .iter()

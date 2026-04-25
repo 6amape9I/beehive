@@ -6,7 +6,8 @@ function countersFor(stageId: string, counters: DashboardStageCounters[]) {
 }
 
 export function StageGraph({ overview }: { overview: DashboardOverview }) {
-  const invalidEdges = overview.stage_graph.edges.filter((edge) => !edge.is_valid);
+  const edgeSources = new Set(overview.stage_graph.edges.map((edge) => edge.from_stage_id));
+  const terminalNodes = overview.stage_graph.nodes.filter((node) => !edgeSources.has(node.id));
 
   return (
     <section className="panel">
@@ -19,7 +20,7 @@ export function StageGraph({ overview }: { overview: DashboardOverview }) {
       ) : (
         <>
           <div className="stage-graph">
-            {overview.stage_graph.nodes.map((node, index) => {
+            {overview.stage_graph.nodes.map((node) => {
               const counter = countersFor(node.id, overview.stage_counters);
               return (
                 <article className={`stage-node stage-node-${node.health}`} key={node.id}>
@@ -38,33 +39,34 @@ export function StageGraph({ overview }: { overview: DashboardOverview }) {
                     <span>failed {counter?.failed ?? 0}</span>
                     <span>blocked {counter?.blocked ?? 0}</span>
                   </div>
-                  {index < overview.stage_graph.nodes.length - 1 ? (
-                    <span className="stage-arrow" aria-hidden="true">
-                      -&gt;
-                    </span>
-                  ) : null}
                 </article>
               );
             })}
           </div>
-          {invalidEdges.length > 0 ? (
-            <div className="edge-problems">
-              <h3>Link Problems</h3>
-              <div className="issue-list">
-                {invalidEdges.map((edge) => (
-                  <article className="issue-row" key={`${edge.from_stage_id}-${edge.to_stage_id}`}>
-                    <StatusBadge status="warning" />
-                    <div>
-                      <strong>
-                        {edge.from_stage_id} -&gt; {edge.to_stage_id}
-                      </strong>
-                      <p>{edge.problem}</p>
-                    </div>
-                  </article>
-                ))}
-              </div>
+          <div className="stage-links">
+            <h3>Stage Links</h3>
+            <div className="stage-link-list">
+              {overview.stage_graph.edges.map((edge) => (
+                <article
+                  className={`stage-link-row ${edge.is_valid ? "stage-link-valid" : "stage-link-invalid"}`}
+                  key={`${edge.from_stage_id}-${edge.to_stage_id}`}
+                >
+                  <StatusBadge status={edge.is_valid ? "valid" : "invalid"} />
+                  <strong>
+                    {edge.from_stage_id} -&gt; {edge.to_stage_id}
+                  </strong>
+                  <span>{edge.problem ?? "Link target is active."}</span>
+                </article>
+              ))}
+              {terminalNodes.map((node) => (
+                <article className="stage-link-row stage-link-terminal" key={`${node.id}-terminal`}>
+                  <StatusBadge status="terminal" />
+                  <strong>{node.id} -&gt; terminal</strong>
+                  <span>No next stage configured.</span>
+                </article>
+              ))}
             </div>
-          ) : null}
+          </div>
         </>
       )}
     </section>

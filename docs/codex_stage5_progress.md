@@ -23,3 +23,16 @@
 - Ran `npm.cmd run build`; TypeScript compilation and Vite production build passed.
 - Updated README and Stage 5 delivery/checklist docs with actual implementation and verification status.
 - No mouse-driven UI walkthrough was performed.
+
+## 2026-04-25 Polish Patch
+
+- Re-read `instructions/beehive_stage5_codex_polish_task.md`.
+- Fixed StageGraph visual semantics: removed order-based fake arrows between neighboring stage cards and added an explicit Stage Links list from real `overview.stage_graph.edges`, plus terminal rows for stages without `next_stage`.
+- Expanded StageCountersTable to show Total, Queued, Skipped, Unknown, Existing files, and Missing files in addition to the previously visible counters.
+- Synchronized active task semantics by including `queued` states in the backend active task list while keeping `active_tasks_total` counted across `pending`, `queued`, `in_progress`, and `retry_wait`.
+- Added/updated dashboard tests for non-order graph edges, queued task visibility, and queued/skipped/unknown counter aggregation.
+- Ran targeted dashboard Rust tests through `vcvars64.bat`; 6 dashboard tests passed.
+- Ran `cargo fmt --manifest-path src-tauri/Cargo.toml`; passed.
+- Ran `cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul && cargo test --manifest-path src-tauri\Cargo.toml'`; 51 Rust tests passed.
+- Ran `npm.cmd run build`; TypeScript compilation and Vite production build passed.
+- No mouse-driven UI walkthrough was performed.

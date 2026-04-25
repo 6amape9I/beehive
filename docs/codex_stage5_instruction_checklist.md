@@ -7,9 +7,13 @@ The authoritative checklist source is `instructions/beehive_stage5_codex_task.md
 - [x] Dashboard overview command implemented.
 - [x] Dashboard frontend wired to real data.
 - [x] Stage graph displays stages and edges.
+- [x] Stage graph does not draw fake order-based arrows.
+- [x] Stage graph shows real edges explicitly.
 - [x] Invalid/missing/inactive edges are visible.
 - [x] Stage counters are aggregated from SQLite.
+- [x] Stage counters table exposes total, queued, skipped, unknown, existing files, and missing files.
 - [x] Active tasks block is shown.
+- [x] Queued tasks are included consistently in active tasks.
 - [x] Last errors block is shown.
 - [x] Recent runs/activity block is shown.
 - [x] Operational buttons refresh data.
@@ -29,6 +33,6 @@ The authoritative checklist source is `instructions/beehive_stage5_codex_task.md
 ## Verification notes
 
 - `cargo fmt --manifest-path src-tauri/Cargo.toml`: passed.
-- `cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul && cargo test --manifest-path src-tauri\Cargo.toml'`: passed, 50 Rust tests.
+- `cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul && cargo test --manifest-path src-tauri\Cargo.toml'`: passed, 51 Rust tests.
 - `npm.cmd run build`: passed.
 - UI smoke/manual walkthrough was not run; no manual UI QA is claimed.

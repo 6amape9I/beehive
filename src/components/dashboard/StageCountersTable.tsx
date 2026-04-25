@@ -18,13 +18,18 @@ export function StageCountersTable({ counters }: { counters: DashboardStageCount
               <tr>
                 <th>Stage</th>
                 <th>Active</th>
+                <th>Total</th>
                 <th>Pending</th>
+                <th>Queued</th>
                 <th>In progress</th>
                 <th>Retry</th>
                 <th>Done</th>
                 <th>Failed</th>
                 <th>Blocked</th>
-                <th>Missing files</th>
+                <th>Skipped</th>
+                <th>Unknown</th>
+                <th>Existing files</th>
+                <th>Missing</th>
                 <th>Last activity</th>
               </tr>
             </thead>
@@ -35,12 +40,17 @@ export function StageCountersTable({ counters }: { counters: DashboardStageCount
                   <td>
                     <StatusBadge status={counter.is_active ? "active" : "inactive"} />
                   </td>
+                  <td>{counter.total}</td>
                   <td>{counter.pending}</td>
+                  <td>{counter.queued}</td>
                   <td>{counter.in_progress}</td>
                   <td>{counter.retry_wait}</td>
                   <td>{counter.done}</td>
                   <td>{counter.failed}</td>
                   <td>{counter.blocked}</td>
+                  <td>{counter.skipped}</td>
+                  <td>{counter.unknown}</td>
+                  <td>{counter.existing_files}</td>
                   <td>{counter.missing_files}</td>
                   <td>
                     {formatDateTime(counter.last_finished_at ?? counter.last_started_at)}
