@@ -1,6 +1,7 @@
 mod bootstrap;
 mod commands;
 mod config;
+mod dashboard;
 mod database;
 mod discovery;
 mod domain;
@@ -16,6 +17,7 @@ pub fn run() {
             commands::initialize_workdir,
             commands::open_workdir,
             commands::reload_workdir,
+            commands::get_dashboard_overview,
             commands::scan_workspace,
             commands::ensure_stage_directories,
             commands::get_runtime_summary,

@@ -224,6 +224,130 @@ export interface RuntimeSummary {
   last_reconciliation_at: string | null;
 }
 
+export type DashboardStageHealth = "ok" | "warning" | "error" | "inactive";
+
+export interface DashboardProjectContext {
+  name: string;
+  workdir_path: string;
+}
+
+export interface DashboardTotals {
+  entities_total: number;
+  entity_files_total: number;
+  stages_total: number;
+  active_stages_total: number;
+  inactive_stages_total: number;
+  active_tasks_total: number;
+  errors_total: number;
+  warnings_total: number;
+}
+
+export interface DashboardRuntimeOverview {
+  last_scan_at: string | null;
+  last_run_at: string | null;
+  last_successful_run_at: string | null;
+  last_error_at: string | null;
+  due_tasks_count: number;
+  in_progress_count: number;
+  retry_wait_count: number;
+  failed_count: number;
+  blocked_count: number;
+}
+
+export interface DashboardStageNode {
+  id: string;
+  label: string;
+  input_folder: string;
+  output_folder: string | null;
+  workflow_url: string | null;
+  is_active: boolean;
+  archived_at: string | null;
+  next_stage: string | null;
+  position_index: number;
+  health: DashboardStageHealth;
+}
+
+export interface DashboardStageEdge {
+  from_stage_id: string;
+  to_stage_id: string;
+  is_valid: boolean;
+  problem: string | null;
+}
+
+export interface DashboardStageGraph {
+  nodes: DashboardStageNode[];
+  edges: DashboardStageEdge[];
+}
+
+export interface DashboardStageCounters {
+  stage_id: string;
+  stage_label: string;
+  is_active: boolean;
+  total: number;
+  pending: number;
+  queued: number;
+  in_progress: number;
+  retry_wait: number;
+  done: number;
+  failed: number;
+  blocked: number;
+  skipped: number;
+  unknown: number;
+  missing_files: number;
+  existing_files: number;
+  last_started_at: string | null;
+  last_finished_at: string | null;
+}
+
+export interface DashboardActiveTask {
+  entity_id: string;
+  stage_id: string;
+  status: string;
+  attempts: number;
+  max_attempts: number;
+  next_retry_at: string | null;
+  last_started_at: string | null;
+  updated_at: string | null;
+  file_path: string | null;
+  reason: string | null;
+}
+
+export interface DashboardErrorItem {
+  id: number;
+  level: string;
+  event_type: string;
+  message: string;
+  entity_id: string | null;
+  stage_id: string | null;
+  run_id: string | null;
+  created_at: string;
+}
+
+export interface DashboardRunItem {
+  run_id: string;
+  entity_id: string;
+  stage_id: string;
+  success: boolean;
+  http_status: number | null;
+  error_type: string | null;
+  error_message: string | null;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+}
+
+export interface DashboardOverview {
+  generated_at: string;
+  project: DashboardProjectContext;
+  totals: DashboardTotals;
+  runtime: DashboardRuntimeOverview;
+  stage_graph: DashboardStageGraph;
+  stage_counters: DashboardStageCounters[];
+  active_tasks: DashboardActiveTask[];
+  last_errors: DashboardErrorItem[];
+  recent_runs: DashboardRunItem[];
+}
+
 export interface EntityFilters {
   stage_id?: string | null;
   status?: string | null;
@@ -265,6 +389,11 @@ export interface StageDirectoryProvisionResult {
 
 export interface RuntimeSummaryResult {
   summary: RuntimeSummary | null;
+  errors: CommandErrorInfo[];
+}
+
+export interface DashboardOverviewResult {
+  overview: DashboardOverview | null;
   errors: CommandErrorInfo[];
 }
 

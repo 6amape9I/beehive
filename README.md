@@ -214,11 +214,32 @@ If HTTP succeeds but next-stage copy is structurally impossible, such as a missi
 
 Stuck `in_progress` states older than `runtime.stuck_task_timeout_sec` are reconciled before each manual run. Retryable stuck tasks become `retry_wait` with an immediately due `next_retry_at`; exhausted stuck tasks become `failed`.
 
+## Dashboard Overview
+
+Stage 5 adds a read-only operator dashboard backed by a single SQLite read model.
+
+The Dashboard shows:
+
+- project/workdir context and last scan/run timestamps;
+- summary cards for entities, stages, due tasks, in-progress, retry, failed, blocked, and errors;
+- a static stage graph with active/inactive stages and invalid missing/inactive links;
+- per-stage counters from `entity_stage_states`;
+- active tasks, recent warning/error events, and recent stage runs.
+
+Dashboard refresh is read-only. It does not scan files, run n8n tasks, or mutate execution state automatically.
+
+Operator actions remain manual:
+
+- `Refresh` reloads the overview only;
+- `Scan workspace` runs reconciliation and then reloads the overview;
+- `Run due tasks` runs eligible tasks and then reloads the overview;
+- `Reconcile stuck` reconciles stale in-progress tasks and then reloads the overview.
+
 ## UI
 
-Stage 4 surfaces:
+The app surfaces:
 
-- Dashboard: reconciliation summary, present/missing files, managed copy count, execution status counts, Run due tasks
+- Dashboard: Stage 5 overview, stage graph, counters, active tasks, recent errors/runs, and manual operational actions
 - Entities: logical entity rows
 - Entity Detail: all file instances plus stage states, managed copy action, stage run history, Run this stage
 - Workspace Explorer: present/missing/invalid/managed-copy file visibility

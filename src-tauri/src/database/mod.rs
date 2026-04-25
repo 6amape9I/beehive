@@ -1207,6 +1207,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
         }
     }
 
+    ensure_query_indexes(connection)?;
     let now = Utc::now().to_rfc3339();
     set_setting(
         connection,
@@ -1214,6 +1215,21 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
         &SCHEMA_VERSION.to_string(),
         &now,
     )?;
+    Ok(())
+}
+
+fn ensure_query_indexes(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_entity_stage_states_stage_status ON entity_stage_states(stage_id, status);
+            CREATE INDEX IF NOT EXISTS idx_entity_stage_states_status_retry ON entity_stage_states(status, next_retry_at);
+            CREATE INDEX IF NOT EXISTS idx_stage_runs_started_at ON stage_runs(started_at);
+            CREATE INDEX IF NOT EXISTS idx_stage_runs_entity_stage ON stage_runs(entity_id, stage_id);
+            CREATE INDEX IF NOT EXISTS idx_app_events_level_created_at ON app_events(level, created_at);
+            "#,
+        )
+        .map_err(|error| format!("Failed to ensure dashboard query indexes: {error}"))?;
     Ok(())
 }
 

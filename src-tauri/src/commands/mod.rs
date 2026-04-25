@@ -2,13 +2,15 @@ use std::path::{Path, PathBuf};
 
 use crate::bootstrap;
 use crate::config;
+use crate::dashboard;
 use crate::database;
 use crate::discovery;
 use crate::domain::{
-    AppEventsResult, BootstrapResult, CommandErrorInfo, EntityDetailResult, EntityFilesResult,
-    EntityFilters, EntityListResult, FileCopyResult, ReconcileStuckTasksResult, RunDueTasksResult,
-    RunEntityStageResult, RuntimeSummaryResult, ScanWorkspaceResult, StageDirectoryProvisionResult,
-    StageListResult, StageRunsResult, WorkspaceExplorerResult,
+    AppEventsResult, BootstrapResult, CommandErrorInfo, DashboardOverviewResult,
+    EntityDetailResult, EntityFilesResult, EntityFilters, EntityListResult, FileCopyResult,
+    ReconcileStuckTasksResult, RunDueTasksResult, RunEntityStageResult, RuntimeSummaryResult,
+    ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult, StageRunsResult,
+    WorkspaceExplorerResult,
 };
 use crate::executor;
 use crate::file_ops;
@@ -27,6 +29,30 @@ pub fn open_workdir(path: String) -> BootstrapResult {
 #[tauri::command]
 pub fn reload_workdir(path: String) -> BootstrapResult {
     bootstrap::reload_workdir(&path)
+}
+
+#[tauri::command]
+pub fn get_dashboard_overview(path: String) -> DashboardOverviewResult {
+    match load_runtime_context(&path) {
+        Ok(context) => match dashboard::get_dashboard_overview(
+            &context.database_path,
+            &context.config.project.name,
+            &context.workdir_path,
+        ) {
+            Ok(overview) => DashboardOverviewResult {
+                overview: Some(overview),
+                errors: Vec::new(),
+            },
+            Err(message) => DashboardOverviewResult {
+                overview: None,
+                errors: vec![command_error("dashboard_overview_failed", message, None)],
+            },
+        },
+        Err(error) => DashboardOverviewResult {
+            overview: None,
+            errors: vec![error],
+        },
+    }
 }
 
 #[tauri::command]

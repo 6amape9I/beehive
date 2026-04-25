@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   AppEventsResult,
+  DashboardOverviewResult,
   EntityDetailResult,
   EntityFilesResult,
   EntityFilters,
@@ -17,6 +18,10 @@ import type {
   StageRunsResult,
   WorkspaceExplorerResult,
 } from "../types/domain";
+
+export async function getDashboardOverview(path: string): Promise<DashboardOverviewResult> {
+  return invoke<DashboardOverviewResult>("get_dashboard_overview", { path });
+}
 
 export async function scanWorkspace(path: string): Promise<ScanWorkspaceResult> {
   return invoke<ScanWorkspaceResult>("scan_workspace", { path });

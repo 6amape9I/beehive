@@ -308,6 +308,148 @@ pub struct RuntimeSummary {
     pub last_reconciliation_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardStageHealth {
+    Ok,
+    Warning,
+    Error,
+    Inactive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardProjectContext {
+    pub name: String,
+    pub workdir_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardTotals {
+    pub entities_total: u64,
+    pub entity_files_total: u64,
+    pub stages_total: u64,
+    pub active_stages_total: u64,
+    pub inactive_stages_total: u64,
+    pub active_tasks_total: u64,
+    pub errors_total: u64,
+    pub warnings_total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardRuntimeOverview {
+    pub last_scan_at: Option<String>,
+    pub last_run_at: Option<String>,
+    pub last_successful_run_at: Option<String>,
+    pub last_error_at: Option<String>,
+    pub due_tasks_count: u64,
+    pub in_progress_count: u64,
+    pub retry_wait_count: u64,
+    pub failed_count: u64,
+    pub blocked_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardStageNode {
+    pub id: String,
+    pub label: String,
+    pub input_folder: String,
+    pub output_folder: Option<String>,
+    pub workflow_url: Option<String>,
+    pub is_active: bool,
+    pub archived_at: Option<String>,
+    pub next_stage: Option<String>,
+    pub position_index: u64,
+    pub health: DashboardStageHealth,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardStageEdge {
+    pub from_stage_id: String,
+    pub to_stage_id: String,
+    pub is_valid: bool,
+    pub problem: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardStageGraph {
+    pub nodes: Vec<DashboardStageNode>,
+    pub edges: Vec<DashboardStageEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardStageCounters {
+    pub stage_id: String,
+    pub stage_label: String,
+    pub is_active: bool,
+    pub total: u64,
+    pub pending: u64,
+    pub queued: u64,
+    pub in_progress: u64,
+    pub retry_wait: u64,
+    pub done: u64,
+    pub failed: u64,
+    pub blocked: u64,
+    pub skipped: u64,
+    pub unknown: u64,
+    pub missing_files: u64,
+    pub existing_files: u64,
+    pub last_started_at: Option<String>,
+    pub last_finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardActiveTask {
+    pub entity_id: String,
+    pub stage_id: String,
+    pub status: String,
+    pub attempts: u64,
+    pub max_attempts: u64,
+    pub next_retry_at: Option<String>,
+    pub last_started_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub file_path: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardErrorItem {
+    pub id: i64,
+    pub level: String,
+    pub event_type: String,
+    pub message: String,
+    pub entity_id: Option<String>,
+    pub stage_id: Option<String>,
+    pub run_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardRunItem {
+    pub run_id: String,
+    pub entity_id: String,
+    pub stage_id: String,
+    pub success: bool,
+    pub http_status: Option<i64>,
+    pub error_type: Option<String>,
+    pub error_message: Option<String>,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardOverview {
+    pub generated_at: String,
+    pub project: DashboardProjectContext,
+    pub totals: DashboardTotals,
+    pub runtime: DashboardRuntimeOverview,
+    pub stage_graph: DashboardStageGraph,
+    pub stage_counters: Vec<DashboardStageCounters>,
+    pub active_tasks: Vec<DashboardActiveTask>,
+    pub last_errors: Vec<DashboardErrorItem>,
+    pub recent_runs: Vec<DashboardRunItem>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct EntityFilters {
     pub stage_id: Option<String>,
@@ -349,6 +491,12 @@ pub struct ScanWorkspaceResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeSummaryResult {
     pub summary: Option<RuntimeSummary>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardOverviewResult {
+    pub overview: Option<DashboardOverview>,
     pub errors: Vec<CommandErrorInfo>,
 }
 
