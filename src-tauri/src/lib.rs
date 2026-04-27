@@ -6,6 +6,7 @@ mod database;
 mod discovery;
 mod domain;
 mod executor;
+mod file_open;
 mod file_ops;
 mod file_safety;
 mod state_machine;
@@ -33,7 +34,13 @@ pub fn run() {
             commands::list_stage_runs,
             commands::reconcile_stuck_tasks,
             commands::list_app_events,
-            commands::get_workspace_explorer
+            commands::get_workspace_explorer,
+            commands::retry_entity_stage_now,
+            commands::reset_entity_stage_to_pending,
+            commands::skip_entity_stage,
+            commands::open_entity_file,
+            commands::open_entity_folder,
+            commands::save_entity_file_business_json,
         ])
         .run(tauri::generate_context!())
         .expect("error while running beehive");

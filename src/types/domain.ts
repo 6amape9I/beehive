@@ -151,6 +151,47 @@ export interface EntityRecord {
   updated_at: string;
 }
 
+export type EntityListSortBy =
+  | "entity_id"
+  | "current_stage"
+  | "status"
+  | "updated_at"
+  | "last_seen_at"
+  | "attempts"
+  | "last_error";
+
+export type SortDirection = "asc" | "desc";
+
+export interface EntityListQuery {
+  search?: string | null;
+  stage_id?: string | null;
+  status?: string | null;
+  validation_status?: EntityValidationStatus | null;
+  sort_by?: EntityListSortBy | null;
+  sort_direction?: SortDirection | null;
+  page?: number;
+  page_size?: number;
+}
+
+export interface EntityTableRow {
+  entity_id: string;
+  current_stage_id: string | null;
+  current_status: string;
+  latest_file_path: string | null;
+  latest_file_id: number | null;
+  file_count: number;
+  attempts: number | null;
+  max_attempts: number | null;
+  last_error: string | null;
+  last_http_status: number | null;
+  next_retry_at: string | null;
+  last_started_at: string | null;
+  last_finished_at: string | null;
+  validation_status: EntityValidationStatus;
+  updated_at: string;
+  last_seen_at: string;
+}
+
 export interface EntityFileRecord {
   id: number;
   entity_id: string;
@@ -195,6 +236,31 @@ export interface EntityStageStateRecord {
   discovered_at: string;
   last_seen_at: string | null;
   updated_at: string;
+}
+
+export interface EntityTimelineItem {
+  stage_id: string;
+  status: string;
+  attempts: number;
+  max_attempts: number;
+  file_path: string | null;
+  file_exists: boolean;
+  last_error: string | null;
+  last_http_status: number | null;
+  next_retry_at: string | null;
+  last_started_at: string | null;
+  last_finished_at: string | null;
+  created_child_path: string | null;
+  updated_at: string;
+}
+
+export interface EntityStageAllowedActions {
+  stage_id: string;
+  can_retry_now: boolean;
+  can_reset_to_pending: boolean;
+  can_skip: boolean;
+  can_run_this_stage: boolean;
+  reasons: string[];
 }
 
 export interface AppEventRecord {
@@ -404,9 +470,12 @@ export interface StageListResult {
 }
 
 export interface EntityListResult {
-  entities: EntityRecord[];
+  entities: EntityTableRow[];
   total: number;
+  page: number;
+  page_size: number;
   available_stages: string[];
+  available_statuses: string[];
   errors: CommandErrorInfo[];
 }
 
@@ -419,7 +488,11 @@ export interface EntityDetailPayload {
   entity: EntityRecord;
   files: EntityFileRecord[];
   stage_states: EntityStageStateRecord[];
+  stage_runs: StageRunRecord[];
+  timeline: EntityTimelineItem[];
   latest_json_preview: string;
+  selected_file_json: string | null;
+  allowed_actions: EntityStageAllowedActions[];
 }
 
 export interface EntityDetailResult {
@@ -528,6 +601,26 @@ export interface StageRunsResult {
 
 export interface ReconcileStuckTasksResult {
   reconciled: number;
+  errors: CommandErrorInfo[];
+}
+
+export interface ManualEntityStageActionResult {
+  detail: EntityDetailPayload | null;
+  summary: RunDueTasksSummary | null;
+  errors: CommandErrorInfo[];
+}
+
+export interface OpenEntityPathPayload {
+  opened_path: string;
+}
+
+export interface OpenEntityPathResult {
+  payload: OpenEntityPathPayload | null;
+  errors: CommandErrorInfo[];
+}
+
+export interface SaveEntityFileJsonResult {
+  detail: EntityDetailPayload | null;
   errors: CommandErrorInfo[];
 }
 

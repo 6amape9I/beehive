@@ -3,12 +3,14 @@ use std::fs;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
 use crate::domain::{
     AppEventLevel, AppEventRecord, ConfigValidationIssue, DatabaseState, EntityDetailPayload,
-    EntityFileRecord, EntityFilters, EntityRecord, EntityStageStateRecord, EntityValidationStatus,
+    EntityFileRecord, EntityFilters, EntityListQuery, EntityRecord, EntityStageAllowedActions,
+    EntityStageStateRecord, EntityTableRow, EntityTimelineItem, EntityValidationStatus,
     InvalidDiscoveryRecord, PipelineConfig, RuntimeSummary, StageDefinition, StageRecord,
     StageRunRecord, StageStatus, StatusCount, WorkspaceExplorerResult, WorkspaceFileRecord,
     WorkspaceStageGroup,
@@ -80,6 +82,14 @@ pub(crate) struct RuntimeTaskRecord {
     pub next_stage: Option<String>,
 }
 
+pub struct EntityTablePage {
+    pub entities: Vec<EntityTableRow>,
+    pub total: u64,
+    pub page: u64,
+    pub page_size: u64,
+    pub available_statuses: Vec<String>,
+}
+
 pub(crate) struct NewStageRunInput {
     pub run_id: String,
     pub entity_id: String,
@@ -106,6 +116,11 @@ struct StageStateTransitionContext {
     status: String,
     entity_id: String,
     stage_id: String,
+}
+
+struct StageStateIdentity {
+    id: i64,
+    status: String,
 }
 
 pub fn bootstrap_database(path: &Path, config: &PipelineConfig) -> Result<DatabaseState, String> {
@@ -206,6 +221,7 @@ pub fn list_stages(path: &Path) -> Result<Vec<StageRecord>, String> {
     load_stage_records_from_connection(&connection)
 }
 
+#[allow(dead_code)]
 pub fn list_entities(path: &Path, filters: &EntityFilters) -> Result<Vec<EntityRecord>, String> {
     let connection = open_connection(path)?;
     let mut entities = load_entities_from_connection(&connection)?;
@@ -240,6 +256,140 @@ pub fn list_entities(path: &Path, filters: &EntityFilters) -> Result<Vec<EntityR
     Ok(entities)
 }
 
+pub fn list_entity_table_page(
+    path: &Path,
+    query: &EntityListQuery,
+) -> Result<EntityTablePage, String> {
+    let connection = open_connection(path)?;
+    let page = query.page.unwrap_or(1).max(1);
+    let page_size = query.page_size.unwrap_or(50).clamp(1, 200);
+    let offset = (page - 1) * page_size;
+
+    let mut where_clauses = Vec::new();
+    let mut values: Vec<SqlValue> = Vec::new();
+
+    if let Some(search) = query
+        .search
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        where_clauses.push(
+            "(LOWER(entity.entity_id) LIKE ? OR LOWER(COALESCE(entity.latest_file_path, '')) LIKE ?)"
+                .to_string(),
+        );
+        let pattern = format!("%{}%", search.to_lowercase());
+        values.push(SqlValue::Text(pattern.clone()));
+        values.push(SqlValue::Text(pattern));
+    }
+    if let Some(stage_id) = query
+        .stage_id
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        where_clauses.push("entity.current_stage_id = ?".to_string());
+        values.push(SqlValue::Text(stage_id.to_string()));
+    }
+    if let Some(status) = query
+        .status
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        where_clauses.push("COALESCE(state.status, entity.current_status) = ?".to_string());
+        values.push(SqlValue::Text(status.to_string()));
+    }
+    if let Some(validation_status) = query.validation_status.as_ref() {
+        where_clauses.push("entity.validation_status = ?".to_string());
+        values.push(SqlValue::Text(
+            validation_status_value(validation_status).to_string(),
+        ));
+    }
+
+    let where_sql = if where_clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", where_clauses.join(" AND "))
+    };
+    let order_by = entity_table_sort_expression(query.sort_by.as_deref());
+    let direction = match query.sort_direction.as_deref() {
+        Some("asc") => "ASC",
+        _ => "DESC",
+    };
+
+    let count_sql = format!(
+        r#"
+        SELECT COUNT(*)
+        FROM entities entity
+        LEFT JOIN entity_stage_states state
+          ON state.entity_id = entity.entity_id
+         AND state.stage_id = entity.current_stage_id
+        {where_sql}
+        "#
+    );
+    let total = connection
+        .query_row(&count_sql, params_from_iter(values.iter()), |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|value| value as u64)
+        .map_err(|error| format!("Failed to count entity table rows: {error}"))?;
+
+    let mut page_values = values.clone();
+    page_values.push(SqlValue::Integer(page_size as i64));
+    page_values.push(SqlValue::Integer(offset as i64));
+    let sql = format!(
+        r#"
+        SELECT
+            entity.entity_id,
+            entity.current_stage_id,
+            COALESCE(state.status, entity.current_status) AS runtime_status,
+            entity.latest_file_path,
+            entity.latest_file_id,
+            entity.file_count,
+            state.attempts,
+            state.max_attempts,
+            state.last_error,
+            state.last_http_status,
+            state.next_retry_at,
+            state.last_started_at,
+            state.last_finished_at,
+            entity.validation_status,
+            entity.updated_at,
+            entity.last_seen_at
+        FROM entities entity
+        LEFT JOIN entity_stage_states state
+          ON state.entity_id = entity.entity_id
+         AND state.stage_id = entity.current_stage_id
+        {where_sql}
+        ORDER BY {order_by} {direction}, entity.entity_id ASC
+        LIMIT ? OFFSET ?
+        "#
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| format!("Failed to prepare entity table query: {error}"))?;
+    let rows = statement
+        .query_map(
+            params_from_iter(page_values.iter()),
+            entity_table_row_from_row,
+        )
+        .map_err(|error| format!("Failed to query entity table rows: {error}"))?;
+    let mut entities = Vec::new();
+    for row in rows {
+        entities.push(row.map_err(|error| format!("Failed to read entity table row: {error}"))?);
+    }
+
+    let available_statuses = load_available_entity_statuses(&connection)?;
+    Ok(EntityTablePage {
+        entities,
+        total,
+        page,
+        page_size,
+        available_statuses,
+    })
+}
+
 pub fn list_entity_files(
     path: &Path,
     entity_id: Option<&str>,
@@ -248,9 +398,18 @@ pub fn list_entity_files(
     load_entity_files_from_connection(&connection, entity_id)
 }
 
+#[allow(dead_code)]
 pub fn get_entity_detail(
     path: &Path,
     entity_id: &str,
+) -> Result<Option<EntityDetailPayload>, String> {
+    get_entity_detail_with_selection(path, entity_id, None)
+}
+
+pub fn get_entity_detail_with_selection(
+    path: &Path,
+    entity_id: &str,
+    selected_file_id: Option<i64>,
 ) -> Result<Option<EntityDetailPayload>, String> {
     let connection = open_connection(path)?;
     let Some(entity) = find_entity_by_id(&connection, entity_id)? else {
@@ -258,18 +417,34 @@ pub fn get_entity_detail(
     };
     let files = load_entity_files_from_connection(&connection, Some(entity_id))?;
     let stage_states = load_stage_states_for_entity(&connection, entity_id)?;
+    let stage_runs = load_stage_runs_from_connection(&connection, Some(entity_id), 100)?;
+    let timeline = build_entity_timeline(&connection, &stage_states)?;
     let json_preview = build_json_preview(
         files
             .iter()
             .find(|file| Some(file.id) == entity.latest_file_id)
             .or_else(|| files.first()),
     )?;
+    let selected_file = selected_file_id
+        .and_then(|id| files.iter().find(|file| file.id == id))
+        .or_else(|| {
+            files
+                .iter()
+                .find(|file| Some(file.id) == entity.latest_file_id)
+        })
+        .or_else(|| files.first());
+    let selected_file_json = selected_file.map(build_full_file_json).transpose()?;
+    let allowed_actions = build_allowed_actions(&stage_states);
 
     Ok(Some(EntityDetailPayload {
         entity,
         files,
         stage_states,
+        stage_runs,
+        timeline,
         latest_json_preview: json_preview,
+        selected_file_json,
+        allowed_actions,
     }))
 }
 
@@ -284,6 +459,170 @@ pub fn list_stage_runs(
 ) -> Result<Vec<StageRunRecord>, String> {
     let connection = open_connection(path)?;
     load_stage_runs_from_connection(&connection, entity_id, 100)
+}
+
+pub fn get_stage_state_status(
+    path: &Path,
+    entity_id: &str,
+    stage_id: &str,
+) -> Result<Option<String>, String> {
+    let connection = open_connection(path)?;
+    find_stage_state_identity(&connection, entity_id, stage_id).map(|state| state.map(|s| s.status))
+}
+
+pub fn record_manual_retry_event(
+    path: &Path,
+    entity_id: &str,
+    stage_id: &str,
+    previous_status: Option<&str>,
+    new_status: Option<&str>,
+    operator_comment: Option<&str>,
+) -> Result<(), String> {
+    let connection = open_connection(path)?;
+    let now = Utc::now().to_rfc3339();
+    insert_app_event(
+        &connection,
+        AppEventLevel::Info,
+        "manual_retry_now",
+        &format!("Manual retry requested for entity '{entity_id}' on stage '{stage_id}'."),
+        Some(json!({
+            "action": "retry_now",
+            "entity_id": entity_id,
+            "stage_id": stage_id,
+            "operator_comment": operator_comment,
+            "previous_status": previous_status,
+            "new_status": new_status,
+        })),
+        &now,
+    )
+}
+
+pub fn reset_entity_stage_to_pending(
+    path: &Path,
+    entity_id: &str,
+    stage_id: &str,
+    operator_comment: Option<&str>,
+) -> Result<(), String> {
+    let connection = open_connection(path)?;
+    let now = Utc::now().to_rfc3339();
+    let state = find_stage_state_identity(&connection, entity_id, stage_id)?.ok_or_else(|| {
+        format!("No stage state exists for entity '{entity_id}' on stage '{stage_id}'.")
+    })?;
+
+    if state.status == "pending" {
+        insert_app_event(
+            &connection,
+            AppEventLevel::Info,
+            "manual_reset_noop",
+            &format!("Manual reset requested for already-pending entity '{entity_id}' on stage '{stage_id}'."),
+            Some(json!({
+                "action": "reset_to_pending",
+                "entity_id": entity_id,
+                "stage_id": stage_id,
+                "operator_comment": operator_comment,
+                "previous_status": state.status,
+                "new_status": "pending",
+            })),
+            &now,
+        )?;
+        return Ok(());
+    }
+
+    ensure_runtime_transition(
+        &state.status,
+        &StageStatus::Pending,
+        RuntimeTransitionReason::ManualReset,
+        Some(state.id),
+        Some(entity_id),
+        Some(stage_id),
+    )?;
+    connection
+        .execute(
+            r#"
+            UPDATE entity_stage_states
+            SET status = 'pending',
+                attempts = 0,
+                last_error = NULL,
+                last_http_status = NULL,
+                next_retry_at = NULL,
+                updated_at = ?2
+            WHERE id = ?1
+            "#,
+            params![state.id, now],
+        )
+        .map_err(|error| {
+            format!(
+                "Failed to reset entity '{entity_id}' on stage '{stage_id}' to pending: {error}"
+            )
+        })?;
+    update_entity_summary_from_state(&connection, state.id, StageStatus::Pending, &now)?;
+    insert_app_event(
+        &connection,
+        AppEventLevel::Info,
+        "manual_reset_to_pending",
+        &format!("Manual reset moved entity '{entity_id}' on stage '{stage_id}' to pending."),
+        Some(json!({
+            "action": "reset_to_pending",
+            "entity_id": entity_id,
+            "stage_id": stage_id,
+            "operator_comment": operator_comment,
+            "previous_status": state.status,
+            "new_status": "pending",
+        })),
+        &now,
+    )
+}
+
+pub fn skip_entity_stage(
+    path: &Path,
+    entity_id: &str,
+    stage_id: &str,
+    operator_comment: Option<&str>,
+) -> Result<(), String> {
+    let connection = open_connection(path)?;
+    let now = Utc::now().to_rfc3339();
+    let state = find_stage_state_identity(&connection, entity_id, stage_id)?.ok_or_else(|| {
+        format!("No stage state exists for entity '{entity_id}' on stage '{stage_id}'.")
+    })?;
+
+    ensure_runtime_transition(
+        &state.status,
+        &StageStatus::Skipped,
+        RuntimeTransitionReason::ManualSkip,
+        Some(state.id),
+        Some(entity_id),
+        Some(stage_id),
+    )?;
+    connection
+        .execute(
+            r#"
+            UPDATE entity_stage_states
+            SET status = 'skipped',
+                next_retry_at = NULL,
+                updated_at = ?2
+            WHERE id = ?1
+            "#,
+            params![state.id, now],
+        )
+        .map_err(|error| {
+            format!("Failed to skip entity '{entity_id}' on stage '{stage_id}': {error}")
+        })?;
+    update_entity_summary_from_state(&connection, state.id, StageStatus::Skipped, &now)?;
+    insert_app_event(
+        &connection,
+        AppEventLevel::Info,
+        "manual_skip",
+        &format!("Manual skip marked entity '{entity_id}' on stage '{stage_id}' as skipped."),
+        Some(json!({
+            "action": "skip",
+            "entity_id": entity_id,
+            "stage_id": stage_id,
+            "operator_comment": operator_comment,
+            "previous_status": state.status,
+            "new_status": "skipped",
+        })),
+        &now,
+    )
 }
 
 pub fn get_workspace_explorer(path: &Path) -> Result<WorkspaceExplorerResult, String> {
@@ -434,6 +773,20 @@ pub(crate) fn find_entity_file_by_path(
         )
         .optional()
         .map_err(|error| format!("Failed to load entity file '{file_path}': {error}"))
+}
+
+pub(crate) fn find_entity_file_by_id(
+    connection: &Connection,
+    file_id: i64,
+) -> Result<Option<EntityFileRecord>, String> {
+    connection
+        .query_row(
+            entity_files_select_sql(Some("WHERE id = ?1")),
+            params![file_id],
+            entity_file_from_row,
+        )
+        .optional()
+        .map_err(|error| format!("Failed to load entity file id '{file_id}': {error}"))
 }
 
 pub(crate) fn find_entity_file_by_entity_stage(
@@ -754,34 +1107,55 @@ pub(crate) fn release_queued_claim(
     Ok(())
 }
 
-pub(crate) fn update_stage_state_for_run_start(
+pub(crate) fn reconcile_orphan_stage_runs_for_queued_state(
     connection: &Connection,
     state_id: i64,
-    attempt_no: u64,
-    started_at: &str,
-) -> Result<(), String> {
-    ensure_state_transition(
-        connection,
-        state_id,
-        &StageStatus::InProgress,
-        RuntimeTransitionReason::RuntimeStart,
-    )?;
-    connection
-        .execute(
+    updated_at: &str,
+) -> Result<u64, String> {
+    let mut statement = connection
+        .prepare(
             r#"
-            UPDATE entity_stage_states
-            SET status = 'in_progress',
-                attempts = ?2,
-                last_started_at = ?3,
-                last_finished_at = NULL,
-                next_retry_at = NULL,
-                updated_at = ?3
-            WHERE id = ?1
+            SELECT run.run_id
+            FROM stage_runs run
+            JOIN entity_stage_states state
+              ON state.entity_id = run.entity_id
+             AND state.stage_id = run.stage_id
+             AND state.file_instance_id = run.entity_file_id
+            WHERE state.id = ?1
+              AND state.status = 'queued'
+              AND run.finished_at IS NULL
+            ORDER BY run.started_at ASC, run.id ASC
             "#,
-            params![state_id, attempt_no as i64, started_at],
         )
-        .map_err(|error| format!("Failed to mark stage state '{state_id}' in_progress: {error}"))?;
-    Ok(())
+        .map_err(|error| format!("Failed to prepare orphan stage-run query: {error}"))?;
+    let rows = statement
+        .query_map(params![state_id], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("Failed to query orphan stage-runs: {error}"))?;
+    let mut run_ids = Vec::new();
+    for row in rows {
+        run_ids.push(row.map_err(|error| format!("Failed to read orphan stage-run row: {error}"))?);
+    }
+    drop(statement);
+
+    for run_id in &run_ids {
+        finish_stage_run(
+            connection,
+            &FinishStageRunInput {
+                run_id: run_id.clone(),
+                response_json: None,
+                http_status: None,
+                success: false,
+                error_type: Some("claim_recovered_before_start".to_string()),
+                error_message: Some(
+                    "Queued claim was recovered before workflow request was sent.".to_string(),
+                ),
+                finished_at: updated_at.to_string(),
+                duration_ms: 0,
+            },
+        )?;
+    }
+
+    Ok(run_ids.len() as u64)
 }
 
 pub(crate) fn update_stage_state_success(
@@ -932,6 +1306,42 @@ pub(crate) fn insert_stage_run(
             ],
         )
         .map_err(|error| format!("Failed to insert stage run '{}': {error}", input.run_id))?;
+    Ok(())
+}
+
+pub(crate) fn start_claimed_stage_run(
+    connection: &mut Connection,
+    state_id: i64,
+    input: &NewStageRunInput,
+) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("Failed to start stage-run transaction: {error}"))?;
+    ensure_state_transition(
+        &transaction,
+        state_id,
+        &StageStatus::InProgress,
+        RuntimeTransitionReason::RuntimeStart,
+    )?;
+    insert_stage_run(&transaction, input)?;
+    transaction
+        .execute(
+            r#"
+            UPDATE entity_stage_states
+            SET status = 'in_progress',
+                attempts = ?2,
+                last_started_at = ?3,
+                last_finished_at = NULL,
+                next_retry_at = NULL,
+                updated_at = ?3
+            WHERE id = ?1 AND status = 'queued'
+            "#,
+            params![state_id, input.attempt_no as i64, input.started_at],
+        )
+        .map_err(|error| format!("Failed to mark stage state '{state_id}' in_progress: {error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("Failed to commit stage-run start transaction: {error}"))?;
     Ok(())
 }
 
@@ -1339,6 +1749,23 @@ pub(crate) fn recompute_entity_summaries(transaction: &Transaction<'_>) -> Resul
             .max()
             .unwrap_or(latest.updated_at.as_str())
             .to_string();
+        let runtime_status = transaction
+            .query_row(
+                r#"
+                SELECT status FROM entity_stage_states
+                WHERE entity_id = ?1 AND stage_id = ?2
+                "#,
+                params![entity_id, latest.stage_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| {
+                format!(
+                    "Failed to load runtime status for entity '{}' on stage '{}': {error}",
+                    entity_id, latest.stage_id
+                )
+            })?
+            .unwrap_or_else(|| latest.status.clone());
 
         transaction
             .execute(
@@ -1360,7 +1787,7 @@ pub(crate) fn recompute_entity_summaries(transaction: &Transaction<'_>) -> Resul
                 params![
                     entity_id,
                     latest.stage_id,
-                    latest.status,
+                    runtime_status,
                     latest.file_path,
                     latest.id,
                     file_count as i64,
@@ -1482,6 +1909,9 @@ fn ensure_query_indexes(connection: &Connection) -> Result<(), String> {
             r#"
             CREATE INDEX IF NOT EXISTS idx_entity_stage_states_stage_status ON entity_stage_states(stage_id, status);
             CREATE INDEX IF NOT EXISTS idx_entity_stage_states_status_retry ON entity_stage_states(status, next_retry_at);
+            CREATE INDEX IF NOT EXISTS idx_entity_stage_states_entity_stage ON entity_stage_states(entity_id, stage_id);
+            CREATE INDEX IF NOT EXISTS idx_entities_updated_at ON entities(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_entities_current_stage_status ON entities(current_stage_id, current_status);
             CREATE INDEX IF NOT EXISTS idx_stage_runs_started_at ON stage_runs(started_at);
             CREATE INDEX IF NOT EXISTS idx_stage_runs_entity_stage ON stage_runs(entity_id, stage_id);
             CREATE INDEX IF NOT EXISTS idx_app_events_level_created_at ON app_events(level, created_at);
@@ -2324,6 +2754,7 @@ fn load_stage_records_from_connection(connection: &Connection) -> Result<Vec<Sta
     Ok(stages)
 }
 
+#[allow(dead_code)]
 fn load_entities_from_connection(connection: &Connection) -> Result<Vec<EntityRecord>, String> {
     let mut statement = connection
         .prepare(
@@ -2420,6 +2851,37 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 updated_at
             FROM entity_files
             WHERE file_path = ?1
+            "#
+        }
+        Some(
+            "WHERE id = ?1",
+        ) => {
+            r#"
+            SELECT
+                id,
+                entity_id,
+                stage_id,
+                file_path,
+                file_name,
+                checksum,
+                file_mtime,
+                file_size,
+                payload_json,
+                meta_json,
+                current_stage,
+                next_stage,
+                status,
+                validation_status,
+                validation_errors_json,
+                is_managed_copy,
+                copy_source_file_id,
+                file_exists,
+                missing_since,
+                first_seen_at,
+                last_seen_at,
+                updated_at
+            FROM entity_files
+            WHERE id = ?1
             "#
         }
         Some(
@@ -2746,6 +3208,160 @@ fn build_json_preview(file: Option<&EntityFileRecord>) -> Result<String, String>
     }))
 }
 
+fn build_full_file_json(file: &EntityFileRecord) -> Result<String, String> {
+    build_json_preview(Some(file))
+}
+
+fn build_entity_timeline(
+    connection: &Connection,
+    stage_states: &[EntityStageStateRecord],
+) -> Result<Vec<EntityTimelineItem>, String> {
+    let stages = load_stage_records_from_connection(connection)?;
+    let ordered_stage_ids = order_stage_ids_for_timeline(&stages);
+    let mut states_by_stage = HashMap::<String, &EntityStageStateRecord>::new();
+    for state in stage_states {
+        states_by_stage.insert(state.stage_id.clone(), state);
+    }
+
+    let mut timeline = Vec::new();
+    let mut emitted = HashSet::new();
+    for stage_id in ordered_stage_ids {
+        if let Some(state) = states_by_stage.get(&stage_id) {
+            timeline.push(timeline_item_from_state(state));
+            emitted.insert(stage_id);
+        }
+    }
+    let mut historical = stage_states
+        .iter()
+        .filter(|state| !emitted.contains(&state.stage_id))
+        .collect::<Vec<_>>();
+    historical.sort_by(|left, right| {
+        left.stage_id
+            .cmp(&right.stage_id)
+            .then_with(|| left.updated_at.cmp(&right.updated_at))
+    });
+    for state in historical {
+        timeline.push(timeline_item_from_state(state));
+    }
+    Ok(timeline)
+}
+
+fn order_stage_ids_for_timeline(stages: &[StageRecord]) -> Vec<String> {
+    let stage_ids = stages
+        .iter()
+        .map(|stage| stage.id.clone())
+        .collect::<HashSet<_>>();
+    let targeted = stages
+        .iter()
+        .filter_map(|stage| stage.next_stage.clone())
+        .collect::<HashSet<_>>();
+    let mut roots = stages
+        .iter()
+        .filter(|stage| !targeted.contains(&stage.id))
+        .map(|stage| stage.id.clone())
+        .collect::<Vec<_>>();
+    roots.sort();
+
+    let next_by_stage = stages
+        .iter()
+        .filter_map(|stage| {
+            stage
+                .next_stage
+                .as_ref()
+                .map(|next| (stage.id.clone(), next.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut ordered = Vec::new();
+    let mut seen = HashSet::new();
+
+    for root in roots {
+        let mut current = Some(root);
+        while let Some(stage_id) = current {
+            if !seen.insert(stage_id.clone()) {
+                break;
+            }
+            ordered.push(stage_id.clone());
+            current = next_by_stage
+                .get(&stage_id)
+                .filter(|next| stage_ids.contains(*next))
+                .cloned();
+        }
+    }
+
+    let mut remaining = stages
+        .iter()
+        .map(|stage| stage.id.clone())
+        .filter(|stage_id| !seen.contains(stage_id))
+        .collect::<Vec<_>>();
+    remaining.sort();
+    ordered.extend(remaining);
+    ordered
+}
+
+fn timeline_item_from_state(state: &EntityStageStateRecord) -> EntityTimelineItem {
+    EntityTimelineItem {
+        stage_id: state.stage_id.clone(),
+        status: state.status.clone(),
+        attempts: state.attempts,
+        max_attempts: state.max_attempts,
+        file_path: Some(state.file_path.clone()),
+        file_exists: state.file_exists,
+        last_error: state.last_error.clone(),
+        last_http_status: state.last_http_status,
+        next_retry_at: state.next_retry_at.clone(),
+        last_started_at: state.last_started_at.clone(),
+        last_finished_at: state.last_finished_at.clone(),
+        created_child_path: state.created_child_path.clone(),
+        updated_at: state.updated_at.clone(),
+    }
+}
+
+fn build_allowed_actions(
+    stage_states: &[EntityStageStateRecord],
+) -> Vec<EntityStageAllowedActions> {
+    stage_states
+        .iter()
+        .map(|state| {
+            let mut reasons = Vec::new();
+            let status = state.status.as_str();
+            let active = !matches!(status, "queued" | "in_progress" | "done");
+            if !active {
+                reasons.push(format!("Status '{}' is not manually actionable.", status));
+            }
+            let can_retry_now = matches!(status, "pending" | "retry_wait");
+            let can_reset_to_pending =
+                matches!(status, "failed" | "blocked" | "skipped" | "retry_wait");
+            let can_skip = matches!(status, "pending" | "retry_wait");
+            let can_run_this_stage = can_retry_now;
+
+            if can_retry_now && status == "retry_wait" {
+                reasons.push(
+                    "Manual retry may bypass next_retry_at for operator debugging.".to_string(),
+                );
+            }
+            if can_reset_to_pending {
+                reasons.push(
+                    "Reset keeps stage_runs history and clears retry/error fields.".to_string(),
+                );
+            }
+            if can_skip {
+                reasons.push(
+                    "Skip does not create a copy, advance the entity, or call n8n.".to_string(),
+                );
+            }
+
+            EntityStageAllowedActions {
+                stage_id: state.stage_id.clone(),
+                can_retry_now,
+                can_reset_to_pending,
+                can_skip,
+                can_run_this_stage,
+                reasons,
+            }
+        })
+        .collect()
+}
+
 fn ensure_state_transition(
     connection: &Connection,
     state_id: i64,
@@ -2777,6 +3393,28 @@ fn ensure_state_transition(
         Some(&context.stage_id),
     )?;
     Ok(context)
+}
+
+fn find_stage_state_identity(
+    connection: &Connection,
+    entity_id: &str,
+    stage_id: &str,
+) -> Result<Option<StageStateIdentity>, String> {
+    connection
+        .query_row(
+            "SELECT id, status FROM entity_stage_states WHERE entity_id = ?1 AND stage_id = ?2",
+            params![entity_id, stage_id],
+            |row| {
+                Ok(StageStateIdentity {
+                    id: row.get(0)?,
+                    status: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| {
+            format!("Failed to load stage state for entity '{entity_id}' on stage '{stage_id}': {error}")
+        })
 }
 
 fn ensure_runtime_transition(
@@ -2953,6 +3591,64 @@ where
         .query_row(sql, params, |row| row.get::<_, i64>(0))
         .map(|value| value as u64)
         .map_err(|error| format!("Failed to execute count query '{sql}': {error}"))
+}
+
+fn entity_table_sort_expression(sort_by: Option<&str>) -> &'static str {
+    match sort_by {
+        Some("entity_id") => "entity.entity_id",
+        Some("current_stage") => "entity.current_stage_id",
+        Some("status") => "COALESCE(state.status, entity.current_status)",
+        Some("last_seen_at") => "entity.last_seen_at",
+        Some("attempts") => "COALESCE(state.attempts, 0)",
+        Some("last_error") => "COALESCE(state.last_error, '')",
+        Some("updated_at") | None => "entity.updated_at",
+        Some(_) => "entity.updated_at",
+    }
+}
+
+fn entity_table_row_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityTableRow> {
+    Ok(EntityTableRow {
+        entity_id: row.get(0)?,
+        current_stage_id: row.get(1)?,
+        current_status: row.get(2)?,
+        latest_file_path: row.get(3)?,
+        latest_file_id: row.get(4)?,
+        file_count: row.get::<_, i64>(5)? as u64,
+        attempts: row.get::<_, Option<i64>>(6)?.map(|value| value as u64),
+        max_attempts: row.get::<_, Option<i64>>(7)?.map(|value| value as u64),
+        last_error: row.get(8)?,
+        last_http_status: row.get(9)?,
+        next_retry_at: row.get(10)?,
+        last_started_at: row.get(11)?,
+        last_finished_at: row.get(12)?,
+        validation_status: parse_validation_status(&row.get::<_, String>(13)?)?,
+        updated_at: row.get(14)?,
+        last_seen_at: row.get(15)?,
+    })
+}
+
+fn load_available_entity_statuses(connection: &Connection) -> Result<Vec<String>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT status FROM (
+                SELECT DISTINCT status FROM entity_stage_states
+                UNION
+                SELECT DISTINCT current_status AS status FROM entities
+            )
+            WHERE status IS NOT NULL AND TRIM(status) <> ''
+            ORDER BY status ASC
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare available-status query: {error}"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("Failed to query available statuses: {error}"))?;
+    let mut statuses = Vec::new();
+    for row in rows {
+        statuses.push(row.map_err(|error| format!("Failed to read status row: {error}"))?);
+    }
+    Ok(statuses)
 }
 
 fn entity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityRecord> {
@@ -3490,5 +4186,229 @@ mod tests {
             .expect("error")
             .contains("Invalid runtime transition"));
         assert_eq!(after.status, "pending");
+    }
+
+    #[test]
+    fn entity_table_query_filters_sorts_and_paginates_in_sql() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(
+            &database_path,
+            &test_config(vec![
+                stage("incoming", Some("normalize")),
+                stage("normalize", None),
+            ]),
+        )
+        .expect("bootstrap");
+        let incoming = workdir.join("stages/incoming");
+        fs::create_dir_all(&incoming).expect("incoming");
+        fs::write(
+            incoming.join("entity-a.json"),
+            r#"{"id":"entity-a","payload":{"value":1},"status":"pending"}"#,
+        )
+        .expect("entity a");
+        fs::write(
+            incoming.join("entity-b.json"),
+            r#"{"id":"entity-b","payload":{"value":2},"status":"pending"}"#,
+        )
+        .expect("entity b");
+        scan_workspace(&workdir, &database_path).expect("scan");
+        let connection = Connection::open(&database_path).expect("open db");
+        connection
+            .execute(
+                r#"
+                UPDATE entity_stage_states
+                SET status = 'failed', attempts = 2, last_error = 'network failed', last_http_status = 500
+                WHERE entity_id = 'entity-b'
+                "#,
+                [],
+            )
+            .expect("update state");
+        connection
+            .execute(
+                "UPDATE entities SET current_status = 'failed' WHERE entity_id = 'entity-b'",
+                [],
+            )
+            .expect("update entity");
+        drop(connection);
+
+        let filtered = list_entity_table_page(
+            &database_path,
+            &EntityListQuery {
+                search: Some("entity-b".to_string()),
+                status: Some("failed".to_string()),
+                sort_by: Some("attempts".to_string()),
+                sort_direction: Some("desc".to_string()),
+                page: Some(1),
+                page_size: Some(10),
+                ..EntityListQuery::default()
+            },
+        )
+        .expect("filtered page");
+        let paged = list_entity_table_page(
+            &database_path,
+            &EntityListQuery {
+                sort_by: Some("entity_id".to_string()),
+                sort_direction: Some("asc".to_string()),
+                page: Some(2),
+                page_size: Some(1),
+                ..EntityListQuery::default()
+            },
+        )
+        .expect("paged");
+
+        assert_eq!(filtered.total, 1);
+        assert_eq!(filtered.entities[0].entity_id, "entity-b");
+        assert_eq!(filtered.entities[0].attempts, Some(2));
+        assert_eq!(
+            filtered.entities[0].last_error.as_deref(),
+            Some("network failed")
+        );
+        assert_eq!(paged.total, 2);
+        assert_eq!(paged.page, 2);
+        assert_eq!(paged.entities.len(), 1);
+        assert_eq!(paged.entities[0].entity_id, "entity-b");
+    }
+
+    #[test]
+    fn entity_detail_includes_runs_timeline_selected_json_and_allowed_actions() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(
+            &database_path,
+            &test_config(vec![
+                stage("incoming", Some("normalize")),
+                stage("normalize", None),
+            ]),
+        )
+        .expect("bootstrap");
+        let source_path = workdir.join("stages/incoming/entity-1.json");
+        fs::create_dir_all(source_path.parent().expect("parent")).expect("parent");
+        fs::write(
+            &source_path,
+            r#"{"id":"entity-1","payload":{"value":1},"meta":{"source":"test"},"status":"pending"}"#,
+        )
+        .expect("source");
+        scan_workspace(&workdir, &database_path).expect("scan");
+        let connection = Connection::open(&database_path).expect("open db");
+        let file = load_entity_files_from_connection(&connection, Some("entity-1"))
+            .expect("files")
+            .remove(0);
+        connection
+            .execute(
+                r#"
+                INSERT INTO stage_runs (
+                    run_id, entity_id, entity_file_id, stage_id, attempt_no, workflow_url,
+                    request_json, response_json, http_status, success, error_type, error_message,
+                    started_at, finished_at, duration_ms
+                )
+                VALUES ('run-1', 'entity-1', ?1, 'incoming', 1, 'http://localhost',
+                        '{"request":true}', '{"response":true}', 200, 1, NULL, NULL, ?2, ?2, 4)
+                "#,
+                params![file.id, Utc::now().to_rfc3339()],
+            )
+            .expect("run");
+        drop(connection);
+
+        let detail = get_entity_detail_with_selection(&database_path, "entity-1", Some(file.id))
+            .expect("detail")
+            .expect("exists");
+
+        assert_eq!(detail.files.len(), 1);
+        assert_eq!(detail.stage_states.len(), 1);
+        assert_eq!(detail.stage_runs.len(), 1);
+        assert_eq!(detail.timeline[0].stage_id, "incoming");
+        assert!(detail
+            .selected_file_json
+            .as_deref()
+            .expect("selected json")
+            .contains("\"payload\""));
+        let actions = detail
+            .allowed_actions
+            .iter()
+            .find(|action| action.stage_id == "incoming")
+            .expect("actions");
+        assert!(actions.can_retry_now);
+        assert!(actions.can_skip);
+    }
+
+    #[test]
+    fn manual_reset_and_skip_use_state_machine_and_write_events() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(&database_path, &test_config(vec![stage("incoming", None)]))
+            .expect("bootstrap");
+        let source_path = workdir.join("stages/incoming/entity-1.json");
+        fs::create_dir_all(source_path.parent().expect("parent")).expect("parent");
+        fs::write(&source_path, r#"{"id":"entity-1","payload":{"ok":true}}"#).expect("source");
+        scan_workspace(&workdir, &database_path).expect("scan");
+        let connection = Connection::open(&database_path).expect("open db");
+        connection
+            .execute(
+                r#"
+                UPDATE entity_stage_states
+                SET status = 'failed', attempts = 2, last_error = 'bad', last_http_status = 500
+                WHERE entity_id = 'entity-1' AND stage_id = 'incoming'
+                "#,
+                [],
+            )
+            .expect("failed state");
+        drop(connection);
+
+        reset_entity_stage_to_pending(&database_path, "entity-1", "incoming", Some("retry later"))
+            .expect("reset");
+        let after_reset = get_entity_detail(&database_path, "entity-1")
+            .expect("detail")
+            .expect("exists")
+            .stage_states
+            .remove(0);
+        assert_eq!(after_reset.status, "pending");
+        assert_eq!(after_reset.attempts, 0);
+        assert!(after_reset.last_error.is_none());
+        assert!(after_reset.last_http_status.is_none());
+
+        skip_entity_stage(&database_path, "entity-1", "incoming", Some("not needed"))
+            .expect("skip");
+        let after_skip = get_entity_detail(&database_path, "entity-1")
+            .expect("detail")
+            .expect("exists")
+            .stage_states
+            .remove(0);
+        let events = list_app_events(&database_path, 20).expect("events");
+
+        assert_eq!(after_skip.status, "skipped");
+        assert!(events
+            .iter()
+            .any(|event| event.code == "manual_reset_to_pending"));
+        assert!(events.iter().any(|event| event.code == "manual_skip"));
+    }
+
+    #[test]
+    fn skip_rejects_active_in_progress_state() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(&database_path, &test_config(vec![stage("incoming", None)]))
+            .expect("bootstrap");
+        let source_path = workdir.join("stages/incoming/entity-1.json");
+        fs::create_dir_all(source_path.parent().expect("parent")).expect("parent");
+        fs::write(&source_path, r#"{"id":"entity-1","payload":{"ok":true}}"#).expect("source");
+        scan_workspace(&workdir, &database_path).expect("scan");
+        let connection = Connection::open(&database_path).expect("open db");
+        connection
+            .execute(
+                "UPDATE entity_stage_states SET status = 'in_progress' WHERE entity_id = 'entity-1'",
+                [],
+            )
+            .expect("in progress");
+        drop(connection);
+
+        let error = skip_entity_stage(&database_path, "entity-1", "incoming", None)
+            .expect_err("skip should reject in_progress");
+
+        assert!(error.contains("Invalid runtime transition"));
     }
 }

@@ -3,6 +3,7 @@
 beehive is a local desktop operator tool for JSON stage pipelines.
 
 Stage 5.5 stabilizes the Stage 1-5 foundation with a formal runtime state machine, atomic task claiming, file-stability guards, and terminal-stage handling.
+Stage 6 adds the operator entity table and entity detail workflow on top of that foundation.
 
 `eligible stage state -> queued -> in_progress -> n8n webhook -> stage_runs -> done/retry_wait/failed -> next-stage file`
 
@@ -187,7 +188,7 @@ Managed copy updates target JSON fields:
 
 Stage 5.5 routes runtime state changes through a formal state machine. SQLite `entity_stage_states` is the runtime source of truth; source JSON remains business input and is not mutated to mirror execution state.
 
-Before execution, a task is atomically claimed in SQLite by moving from `pending` or due `retry_wait` to `queued`. Only successfully claimed rows can run. Stale `queued` claims are released back to `pending` without incrementing attempts or creating `stage_runs`.
+Before execution, a task is atomically claimed in SQLite by moving from `pending` or due `retry_wait` to `queued`. Only successfully claimed rows can run. Stage-run audit creation and `queued -> in_progress` are committed together in one SQLite transaction before HTTP is sent. Stale `queued` claims are released back to `pending` without incrementing attempts; any legacy unfinished run created before start is marked reconciled with `error_type = claim_recovered_before_start`.
 
 Before HTTP is sent, the registered source file is checked again. If it is missing, too fresh, changed during read, or no longer matches the DB snapshot, no HTTP request is sent, no `stage_runs` row is created, and attempts are not incremented. Run `Scan workspace` after the file is stable.
 
@@ -248,13 +249,38 @@ Operator actions remain manual:
 - `Run due tasks` runs eligible tasks and then reloads the overview;
 - `Reconcile stuck` reconciles stale in-progress tasks and then reloads the overview.
 
+## Entity Operations
+
+Stage 6 provides an operator-oriented Entities table and Entity Detail page.
+
+The Entities table is backed by SQLite pagination, filtering, search, and sorting. It does not load JSON payloads for table rows and it does not scan files, run n8n, or mutate runtime state.
+
+Entity Detail shows:
+
+- the logical entity summary;
+- all physical file instances;
+- stage timeline and state rows;
+- stage run history with request/response snapshots;
+- selected file JSON;
+- backend-computed allowed manual actions.
+
+Manual entity actions are backend mediated:
+
+- `Retry now` is available for `pending` and `retry_wait`; it may bypass future `next_retry_at` only through the manual/debug path.
+- `Reset to pending` is available for `failed`, `blocked`, `skipped`, and `retry_wait`; it clears retry/error fields and keeps `stage_runs`.
+- `Skip` is available for `pending` and `retry_wait`; it does not call n8n, create a next-stage file, or advance the entity.
+
+All manual runtime changes pass through the state machine and write `app_events`.
+
+Open file/folder actions resolve registered entity file ids through the backend and reject unsafe paths. JSON editing is intentionally scoped to business `payload` and `meta`; `id`, runtime status, attempts, retry fields, and SQLite execution state are not editable through the JSON editor. Saves verify that the on-disk file still matches the DB snapshot before using an atomic temp-file rename.
+
 ## UI
 
 The app surfaces:
 
 - Dashboard: Stage 5 overview, stage graph, counters, active tasks, recent errors/runs, and manual operational actions
-- Entities: logical entity rows
-- Entity Detail: all file instances plus stage states, managed copy action, stage run history, Run this stage
+- Entities: server-side paginated/sorted/filterable logical entity rows with attempts and last-error context
+- Entity Detail: all file instances, stage timeline, allowed manual actions, safe payload/meta JSON editor, open file/folder actions, and stage run history
 - Workspace Explorer: present/missing/invalid/managed-copy file visibility
 - Settings / Diagnostics: schema v4, reconciliation summary, file lifecycle and execution events
 
@@ -268,5 +294,5 @@ Stage 4 does not implement:
 - background watcher
 - complex branch routing
 - n8n execution polling
-- full JSON editor
+- rich JSON diff/version history or low-code editor
 - advanced UI polish

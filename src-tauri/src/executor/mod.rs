@@ -10,10 +10,10 @@ use uuid::Uuid;
 
 use crate::database::{
     block_stage_state, claim_eligible_runtime_tasks, claim_specific_runtime_task,
-    find_latest_entity_file_for_stage, finish_stage_run, insert_app_event, insert_stage_run,
-    open_connection, release_queued_claim, update_stage_state_failure,
-    update_stage_state_failure_with_reason, update_stage_state_for_run_start,
-    update_stage_state_success, FinishStageRunInput, NewStageRunInput, RuntimeTaskRecord,
+    find_latest_entity_file_for_stage, finish_stage_run, insert_app_event, open_connection,
+    reconcile_orphan_stage_runs_for_queued_state, release_queued_claim, start_claimed_stage_run,
+    update_stage_state_failure, update_stage_state_failure_with_reason, update_stage_state_success,
+    FinishStageRunInput, NewStageRunInput, RuntimeTaskRecord,
 };
 use crate::domain::{AppEventLevel, CommandErrorInfo, RunDueTasksSummary, StageStatus};
 use crate::file_ops;
@@ -177,7 +177,7 @@ fn execute_task(
         return block_task(database_path, &task, "Stage workflow_url is empty.");
     }
 
-    let connection = open_connection(database_path)?;
+    let mut connection = open_connection(database_path)?;
     insert_app_event(
         &connection,
         AppEventLevel::Info,
@@ -227,21 +227,18 @@ fn execute_task(
     let started_at = Utc::now();
     let started_at_text = started_at.to_rfc3339();
     let request_json = build_request_json(&task, &source_file, attempt_no, &run_id)?;
-    insert_stage_run(
-        &connection,
-        &NewStageRunInput {
-            run_id: run_id.clone(),
-            entity_id: task.entity_id.clone(),
-            entity_file_id: source_file.id,
-            stage_id: task.stage_id.clone(),
-            attempt_no,
-            workflow_url: task.workflow_url.clone(),
-            request_json: serde_json::to_string(&request_json)
-                .map_err(|error| format!("Failed to serialize n8n request JSON: {error}"))?,
-            started_at: started_at_text.clone(),
-        },
-    )?;
-    update_stage_state_for_run_start(&connection, task.state_id, attempt_no, &started_at_text)?;
+    let stage_run_input = NewStageRunInput {
+        run_id: run_id.clone(),
+        entity_id: task.entity_id.clone(),
+        entity_file_id: source_file.id,
+        stage_id: task.stage_id.clone(),
+        attempt_no,
+        workflow_url: task.workflow_url.clone(),
+        request_json: serde_json::to_string(&request_json)
+            .map_err(|error| format!("Failed to serialize n8n request JSON: {error}"))?,
+        started_at: started_at_text.clone(),
+    };
+    start_claimed_stage_run(&mut connection, task.state_id, &stage_run_input)?;
     insert_app_event(
         &connection,
         AppEventLevel::Info,
@@ -681,7 +678,19 @@ fn reconcile_stuck_tasks_with_connection(
     let cutoff = (Utc::now() - Duration::seconds(stuck_task_timeout_sec as i64)).to_rfc3339();
     let stale_queued = load_stale_queued_state_ids(connection, &cutoff)?;
     for state_id in &stale_queued {
+        let orphan_count =
+            reconcile_orphan_stage_runs_for_queued_state(connection, *state_id, now)?;
         release_queued_claim(connection, *state_id, now)?;
+        if orphan_count > 0 {
+            insert_app_event(
+                connection,
+                AppEventLevel::Warning,
+                "orphan_stage_run_reconciled",
+                "An unfinished stage_run created before workflow start was marked reconciled.",
+                Some(json!({"state_id": state_id, "orphan_stage_run_count": orphan_count})),
+                now,
+            )?;
+        }
         insert_app_event(
             connection,
             AppEventLevel::Warning,
@@ -787,7 +796,7 @@ mod tests {
 
     use crate::database::{
         bootstrap_database, claim_eligible_runtime_tasks, get_entity_detail, list_stage_runs,
-        open_connection,
+        open_connection, start_claimed_stage_run, NewStageRunInput,
     };
     use crate::discovery::scan_workspace;
     use crate::domain::{PipelineConfig, ProjectConfig, RuntimeConfig, StageDefinition};
@@ -956,6 +965,56 @@ mod tests {
             .into_iter()
             .find(|state| state.stage_id == stage_id)
             .expect("state exists")
+    }
+
+    fn stage_run_input(run_id: &str, attempt_no: u64) -> NewStageRunInput {
+        NewStageRunInput {
+            run_id: run_id.to_string(),
+            entity_id: "entity-1".to_string(),
+            entity_file_id: 1,
+            stage_id: "incoming".to_string(),
+            attempt_no,
+            workflow_url: "http://localhost/webhook".to_string(),
+            request_json: "{}".to_string(),
+            started_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[test]
+    fn atomic_start_creates_run_and_moves_queued_to_in_progress() {
+        let server = mock_server(Vec::new());
+        let (_tempdir, _workdir, database_path, _source_path) = prepare_workdir(&server.url, 3, 0);
+        let mut connection = open_connection(&database_path).expect("open db");
+        let claimed = claim_eligible_runtime_tasks(&mut connection, &Utc::now().to_rfc3339(), 1)
+            .expect("claim");
+        let task = claimed.first().expect("claimed task");
+        let input = stage_run_input("run-atomic-start", 1);
+
+        start_claimed_stage_run(&mut connection, task.state_id, &input).expect("atomic start");
+        let state = stage_state(&database_path, "incoming");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+
+        assert_eq!(state.status, "in_progress");
+        assert_eq!(state.attempts, 1);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, "run-atomic-start");
+    }
+
+    #[test]
+    fn atomic_start_failure_does_not_insert_partial_stage_run() {
+        let server = mock_server(Vec::new());
+        let (_tempdir, _workdir, database_path, _source_path) = prepare_workdir(&server.url, 3, 0);
+        let mut connection = open_connection(&database_path).expect("open db");
+        let state = stage_state(&database_path, "incoming");
+        let input = stage_run_input("run-should-not-exist", 1);
+
+        let result = start_claimed_stage_run(&mut connection, state.id, &input);
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+        let after = stage_state(&database_path, "incoming");
+
+        assert!(result.is_err());
+        assert!(runs.is_empty());
+        assert_eq!(after.status, "pending");
     }
 
     #[test]
@@ -1165,6 +1224,76 @@ mod tests {
         assert_eq!(state.status, "pending");
         assert_eq!(state.attempts, 0);
         assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn legacy_orphan_stage_run_is_reconciled_with_stale_queued_claim() {
+        let server = mock_server(Vec::new());
+        let (_tempdir, _workdir, database_path, _source_path) = prepare_workdir(&server.url, 3, 0);
+        let connection = open_connection(&database_path).expect("open db");
+        let state = stage_state(&database_path, "incoming");
+        connection
+            .execute(
+                "UPDATE entity_stage_states SET status = 'queued', updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![(Utc::now() - Duration::hours(1)).to_rfc3339(), state.id],
+            )
+            .expect("stale queued");
+        let input = stage_run_input("orphan-before-start", 1);
+        crate::database::insert_stage_run(&connection, &input).expect("seed orphan run");
+
+        let reconciled = reconcile_stuck_tasks(&database_path, 1).expect("reconcile");
+        let after = stage_state(&database_path, "incoming");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+        let events = crate::database::list_app_events(&database_path, 50).expect("events");
+
+        assert_eq!(reconciled, 1);
+        assert_eq!(after.status, "pending");
+        assert_eq!(after.attempts, 0);
+        assert_eq!(runs.len(), 1);
+        assert!(!runs[0].success);
+        assert_eq!(
+            runs[0].error_type.as_deref(),
+            Some("claim_recovered_before_start")
+        );
+        assert!(runs[0].finished_at.is_some());
+        assert_eq!(runs[0].duration_ms, Some(0));
+        assert!(events
+            .iter()
+            .any(|event| event.code == "orphan_stage_run_reconciled"));
+    }
+
+    #[test]
+    fn next_run_after_orphan_recovery_sends_one_http_request_and_keeps_clear_audit_history() {
+        let server = mock_server(vec![(
+            200,
+            r#"{"success":true,"payload":{"title":"actual run"},"meta":{}}"#,
+        )]);
+        let (_tempdir, workdir, database_path, _source_path) = prepare_workdir(&server.url, 3, 0);
+        let connection = open_connection(&database_path).expect("open db");
+        let state = stage_state(&database_path, "incoming");
+        connection
+            .execute(
+                "UPDATE entity_stage_states SET status = 'queued', updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![(Utc::now() - Duration::hours(1)).to_rfc3339(), state.id],
+            )
+            .expect("stale queued");
+        let input = stage_run_input("orphan-before-start", 1);
+        crate::database::insert_stage_run(&connection, &input).expect("seed orphan run");
+
+        reconcile_stuck_tasks(&database_path, 1).expect("reconcile");
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run due");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(server.requests.lock().expect("requests").len(), 1);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(
+            runs.iter()
+                .filter(|run| run.error_type.as_deref() == Some("claim_recovered_before_start"))
+                .count(),
+            1
+        );
+        assert_eq!(runs.iter().filter(|run| run.success).count(), 1);
     }
 
     #[test]

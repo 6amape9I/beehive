@@ -1,67 +1,104 @@
-import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { useBootstrap } from "../app/BootstrapContext";
 import { CommandErrorsPanel } from "../components/CommandErrorsPanel";
-import { StatusBadge } from "../components/StatusBadge";
-import { formatDateTime } from "../lib/formatters";
+import { EntitiesTable } from "../components/entities/EntitiesTable";
+import { EntityFilters } from "../components/entities/EntityFilters";
+import { PaginationControls } from "../components/entities/PaginationControls";
 import { listEntities } from "../lib/runtimeApi";
 import type {
   CommandErrorInfo,
-  EntityFilters,
-  EntityRecord,
+  EntityListQuery,
+  EntityListSortBy,
+  EntityTableRow,
   EntityValidationStatus,
-  StageStatus,
+  SortDirection,
 } from "../types/domain";
 
-const stageStatuses: StageStatus[] = [
-  "pending",
-  "queued",
-  "in_progress",
-  "retry_wait",
-  "done",
-  "failed",
-  "blocked",
-  "skipped",
-];
+const defaultSortBy: EntityListSortBy = "updated_at";
+const defaultSortDirection: SortDirection = "desc";
+const defaultPageSize = 50;
 
-const validationStatuses: EntityValidationStatus[] = ["valid", "warning", "invalid"];
+function queryFromSearchParams(params: URLSearchParams): EntityListQuery {
+  return {
+    search: params.get("search") ?? "",
+    stage_id: params.get("stage") ?? "",
+    status: params.get("status") ?? "",
+    validation_status: (params.get("validation") || null) as EntityValidationStatus | null,
+    sort_by: (params.get("sort") || defaultSortBy) as EntityListSortBy,
+    sort_direction: (params.get("dir") || defaultSortDirection) as SortDirection,
+    page: Math.max(1, Number(params.get("page") ?? "1") || 1),
+    page_size: Math.min(200, Math.max(1, Number(params.get("page_size") ?? defaultPageSize))),
+  };
+}
+
+function writeQueryToParams(query: EntityListQuery) {
+  const params = new URLSearchParams();
+  if (query.search) params.set("search", query.search);
+  if (query.stage_id) params.set("stage", query.stage_id);
+  if (query.status) params.set("status", query.status);
+  if (query.validation_status) params.set("validation", query.validation_status);
+  if (query.sort_by && query.sort_by !== defaultSortBy) params.set("sort", query.sort_by);
+  if (query.sort_direction && query.sort_direction !== defaultSortDirection) {
+    params.set("dir", query.sort_direction);
+  }
+  if (query.page && query.page > 1) params.set("page", String(query.page));
+  if (query.page_size && query.page_size !== defaultPageSize) {
+    params.set("page_size", String(query.page_size));
+  }
+  return params;
+}
 
 export function EntitiesPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { state } = useBootstrap();
-  const [entities, setEntities] = useState<EntityRecord[]>([]);
+  const [entities, setEntities] = useState<EntityTableRow[]>([]);
   const [availableStages, setAvailableStages] = useState<string[]>([]);
+  const [availableStatuses, setAvailableStatuses] = useState<string[]>([]);
+  const [total, setTotal] = useState(0);
   const [errors, setErrors] = useState<CommandErrorInfo[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [filters, setFilters] = useState<EntityFilters>({
-    stage_id: "",
-    status: "",
-    validation_status: null,
-    search: "",
-  });
 
+  const query = useMemo(() => queryFromSearchParams(searchParams), [searchParams]);
   const workdirPath = state.selected_workdir_path;
   const canQueryRuntime = state.phase === "fully_initialized" && !!workdirPath;
+
+  const setQuery = useCallback(
+    (patch: Partial<EntityListQuery>) => {
+      const next = { ...query, ...patch };
+      setSearchParams(writeQueryToParams(next), { replace: true });
+    },
+    [query, setSearchParams],
+  );
+
+  const clearFilters = useCallback(() => {
+    setSearchParams(new URLSearchParams(), { replace: true });
+  }, [setSearchParams]);
 
   const loadEntities = useCallback(async () => {
     if (!canQueryRuntime || !workdirPath) {
       setEntities([]);
       setAvailableStages([]);
+      setAvailableStatuses([]);
+      setTotal(0);
       setErrors([]);
       return;
     }
 
     setIsLoading(true);
     try {
-      const result = await listEntities(workdirPath, filters);
+      const result = await listEntities(workdirPath, query);
       setEntities(result.entities);
       setAvailableStages(result.available_stages);
+      setAvailableStatuses(result.available_statuses);
+      setTotal(result.total);
       setErrors(result.errors);
     } finally {
       setIsLoading(false);
     }
-  }, [canQueryRuntime, filters, workdirPath]);
+  }, [canQueryRuntime, query, workdirPath]);
 
   useEffect(() => {
     void loadEntities();
@@ -83,85 +120,27 @@ export function EntitiesPage() {
           Refresh
         </button>
       </div>
-      <section className="panel">
-        <div className="panel-heading">
-          <h2>Filters</h2>
-          <span className="muted">{entities.length} entity(s)</span>
-        </div>
-        <div className="filter-grid">
-          <div className="form-row">
-            <label htmlFor="entity-search">Search</label>
-            <input
-              id="entity-search"
-              value={filters.search ?? ""}
-              onChange={(event) =>
-                setFilters((current) => ({ ...current, search: event.target.value }))
-              }
-              placeholder="Entity ID or filename"
-            />
-          </div>
-          <div className="form-row">
-            <label htmlFor="entity-stage-filter">Stage</label>
-            <select
-              id="entity-stage-filter"
-              value={filters.stage_id ?? ""}
-              onChange={(event) =>
-                setFilters((current) => ({ ...current, stage_id: event.target.value }))
-              }
-            >
-              <option value="">All stages</option>
-              {availableStages.map((stageId) => (
-                <option key={stageId} value={stageId}>
-                  {stageId}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="form-row">
-            <label htmlFor="entity-status-filter">Status</label>
-            <select
-              id="entity-status-filter"
-              value={filters.status ?? ""}
-              onChange={(event) =>
-                setFilters((current) => ({ ...current, status: event.target.value }))
-              }
-            >
-              <option value="">All statuses</option>
-              {stageStatuses.map((status) => (
-                <option key={status} value={status}>
-                  {status}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="form-row">
-            <label htmlFor="entity-validation-filter">Validation</label>
-            <select
-              id="entity-validation-filter"
-              value={filters.validation_status ?? ""}
-              onChange={(event) =>
-                setFilters((current) => ({
-                  ...current,
-                  validation_status: (event.target.value || null) as EntityValidationStatus | null,
-                }))
-              }
-            >
-              <option value="">All validation states</option>
-              {validationStatuses.map((status) => (
-                <option key={status} value={status}>
-                  {status}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-      </section>
+
+      <EntityFilters
+        query={query}
+        availableStages={availableStages}
+        availableStatuses={availableStatuses}
+        disabled={!canQueryRuntime || isLoading}
+        onChange={setQuery}
+        onClear={clearFilters}
+      />
+
       <CommandErrorsPanel title="Entity Query Errors" errors={errors} />
+
       <section className="panel">
         <div className="panel-heading">
           <h2>Registered Entities</h2>
           <span className="muted">
-            {isLoading ? "Loading..." : canQueryRuntime ? "Logical entities with physical file instances" : "Open a workdir to query runtime data"}
+            {isLoading
+              ? "Loading..."
+              : canQueryRuntime
+                ? `${total} matching entity row(s)`
+                : "Open a workdir to query runtime data"}
           </span>
         </div>
         {!canQueryRuntime ? (
@@ -169,52 +148,28 @@ export function EntitiesPage() {
         ) : entities.length === 0 ? (
           <p className="empty-text">No entities match the current filters.</p>
         ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Entity ID</th>
-                  <th>Current stage</th>
-                  <th>Status</th>
-                  <th>Validation</th>
-                  <th>File count</th>
-                  <th>Latest file path</th>
-                  <th>Last seen</th>
-                  <th>Updated at</th>
-                  <th>Errors</th>
-                </tr>
-              </thead>
-              <tbody>
-                {entities.map((entity) => (
-                  <tr
-                    key={entity.entity_id}
-                    className="clickable-row"
-                    onClick={() => void navigate(`/entities/${entity.entity_id}`)}
-                  >
-                    <td>
-                      <strong>{entity.entity_id}</strong>
-                    </td>
-                    <td>{entity.current_stage_id ?? "Not available"}</td>
-                    <td>
-                      <StatusBadge status={entity.current_status} />
-                    </td>
-                    <td>
-                      <StatusBadge status={entity.validation_status} />
-                    </td>
-                    <td>{entity.file_count}</td>
-                    <td>
-                      <code>{entity.latest_file_path ?? "Not available"}</code>
-                    </td>
-                    <td>{formatDateTime(entity.last_seen_at)}</td>
-                    <td>{formatDateTime(entity.updated_at)}</td>
-                    <td>{entity.validation_errors.length}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <>
+            <EntitiesTable
+              rows={entities}
+              sortBy={query.sort_by ?? defaultSortBy}
+              sortDirection={query.sort_direction ?? defaultSortDirection}
+              onSortChange={(sortBy, sortDirection) =>
+                setQuery({ sort_by: sortBy, sort_direction: sortDirection, page: 1 })
+              }
+              onRowClick={(entityId) => void navigate(`/entities/${entityId}`)}
+            />
+            <PaginationControls
+              page={query.page ?? 1}
+              pageSize={query.page_size ?? defaultPageSize}
+              total={total}
+              disabled={isLoading}
+              onPageChange={(page) => setQuery({ page })}
+              onPageSizeChange={(pageSize) => setQuery({ page_size: pageSize, page: 1 })}
+            />
+          </>
         )}
       </section>
     </div>
   );
 }
+

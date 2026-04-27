@@ -1,38 +1,59 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import { useBootstrap } from "../app/BootstrapContext";
 import { CommandErrorsPanel } from "../components/CommandErrorsPanel";
-import { InfoGrid } from "../components/InfoGrid";
-import { StatusBadge } from "../components/StatusBadge";
+import { EntityFileInstances } from "../components/entity-detail/EntityFileInstances";
+import { EntityHeader } from "../components/entity-detail/EntityHeader";
+import { EntityJsonPanel } from "../components/entity-detail/EntityJsonPanel";
+import { EntityTimeline } from "../components/entity-detail/EntityTimeline";
+import { ManualActionsPanel } from "../components/entity-detail/ManualActionsPanel";
+import { StageRunsPanel } from "../components/entity-detail/StageRunsPanel";
 import { ValidationIssues } from "../components/ValidationIssues";
-import { formatDateTime, shortChecksum } from "../lib/formatters";
-import { createNextStageCopy, getEntity, listStageRuns, runEntityStage } from "../lib/runtimeApi";
+import {
+  getEntity,
+  openEntityFile,
+  openEntityFolder,
+  resetEntityStageToPending,
+  retryEntityStageNow,
+  runEntityStage,
+  saveEntityFileBusinessJson,
+  skipEntityStage,
+} from "../lib/runtimeApi";
 import type {
   CommandErrorInfo,
   EntityDetailPayload,
-  FileCopyPayload,
   RunDueTasksSummary,
-  StageRunRecord,
 } from "../types/domain";
 
 export function EntityDetailPage() {
   const { entityId } = useParams();
   const { state } = useBootstrap();
   const [detail, setDetail] = useState<EntityDetailPayload | null>(null);
+  const [selectedFileId, setSelectedFileId] = useState<number | null>(null);
   const [errors, setErrors] = useState<CommandErrorInfo[]>([]);
-  const [copyResult, setCopyResult] = useState<FileCopyPayload | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [runResult, setRunResult] = useState<RunDueTasksSummary | null>(null);
-  const [stageRuns, setStageRuns] = useState<StageRunRecord[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [isCopyingStageId, setIsCopyingStageId] = useState<string | null>(null);
-  const [isRunningStageId, setIsRunningStageId] = useState<string | null>(null);
+  const [loadingAction, setLoadingAction] = useState<string | null>(null);
+  const [loadingFileAction, setLoadingFileAction] = useState<string | null>(null);
+  const [isSavingJson, setIsSavingJson] = useState(false);
 
   const workdirPath = state.selected_workdir_path;
   const canQueryRuntime = state.phase === "fully_initialized" && !!workdirPath && !!entityId;
 
-  useEffect(() => {
-    async function loadDetail() {
+  const selectedFile = useMemo(() => {
+    if (!detail) return null;
+    return (
+      detail.files.find((file) => file.id === selectedFileId) ??
+      detail.files.find((file) => file.id === detail.entity.latest_file_id) ??
+      detail.files[0] ??
+      null
+    );
+  }, [detail, selectedFileId]);
+
+  const loadDetail = useCallback(
+    async (fileId = selectedFileId) => {
       if (!canQueryRuntime || !workdirPath || !entityId) {
         setDetail(null);
         setErrors([]);
@@ -41,58 +62,109 @@ export function EntityDetailPage() {
 
       setIsLoading(true);
       try {
-        const result = await getEntity(workdirPath, entityId);
-        const runsResult = await listStageRuns(workdirPath, entityId);
+        const result = await getEntity(workdirPath, entityId, fileId);
         setDetail(result.detail);
-        setStageRuns(runsResult.runs);
-        setErrors([...result.errors, ...runsResult.errors]);
+        setErrors(result.errors);
+        if (result.detail && !fileId) {
+          setSelectedFileId(result.detail.entity.latest_file_id ?? result.detail.files[0]?.id ?? null);
+        }
       } finally {
         setIsLoading(false);
       }
-    }
+    },
+    [canQueryRuntime, entityId, selectedFileId, workdirPath],
+  );
 
+  useEffect(() => {
     void loadDetail();
-  }, [canQueryRuntime, entityId, workdirPath]);
+  }, [loadDetail]);
 
-  async function handleCreateNextStageCopy(sourceStageId: string) {
-    if (!workdirPath || !entityId) {
-      return;
-    }
-
-    setIsCopyingStageId(sourceStageId);
-    try {
-      const result = await createNextStageCopy(workdirPath, entityId, sourceStageId);
-      setCopyResult(result.payload);
-      setErrors(result.errors);
-
-      const refreshed = await getEntity(workdirPath, entityId);
-      setDetail(refreshed.detail);
-      setErrors((current) => [...current, ...refreshed.errors]);
-    } finally {
-      setIsCopyingStageId(null);
+  async function refreshAfterDetailResult(nextDetail: EntityDetailPayload | null, nextErrors: CommandErrorInfo[]) {
+    setDetail(nextDetail);
+    setErrors(nextErrors);
+    if (nextDetail && selectedFileId === null) {
+      setSelectedFileId(nextDetail.entity.latest_file_id ?? nextDetail.files[0]?.id ?? null);
     }
   }
 
-  async function handleRunStage(stageId: string) {
-    if (!workdirPath || !entityId) {
-      return;
-    }
+  async function handleManualAction(
+    action: "retry" | "reset" | "skip" | "run",
+    stageId: string,
+  ) {
+    if (!workdirPath || !entityId) return;
 
-    setIsRunningStageId(stageId);
+    setLoadingAction(`${action}:${stageId}`);
+    setActionMessage(null);
     try {
-      const result = await runEntityStage(workdirPath, entityId, stageId);
-      setRunResult(result.summary);
-      setErrors([...result.errors, ...(result.summary?.errors ?? [])]);
-
-      const [refreshed, runsResult] = await Promise.all([
-        getEntity(workdirPath, entityId),
-        listStageRuns(workdirPath, entityId),
-      ]);
-      setDetail(refreshed.detail);
-      setStageRuns(runsResult.runs);
-      setErrors((current) => [...current, ...refreshed.errors, ...runsResult.errors]);
+      if (action === "run") {
+        const result = await runEntityStage(workdirPath, entityId, stageId);
+        setRunResult(result.summary);
+        setErrors([...result.errors, ...(result.summary?.errors ?? [])]);
+        await loadDetail(selectedFileId);
+      } else {
+        const result =
+          action === "retry"
+            ? await retryEntityStageNow(workdirPath, entityId, stageId)
+            : action === "reset"
+              ? await resetEntityStageToPending(workdirPath, entityId, stageId)
+              : await skipEntityStage(workdirPath, entityId, stageId);
+        await refreshAfterDetailResult(result.detail, [
+          ...result.errors,
+          ...(result.summary?.errors ?? []),
+        ]);
+        setRunResult(result.summary);
+      }
+      setActionMessage(`${action} completed for stage ${stageId}.`);
     } finally {
-      setIsRunningStageId(null);
+      setLoadingAction(null);
+    }
+  }
+
+  async function handleSelectFile(fileId: number) {
+    setSelectedFileId(fileId);
+    await loadDetail(fileId);
+  }
+
+  async function handleOpenFile(fileId: number) {
+    if (!workdirPath) return;
+    setLoadingFileAction(`file:${fileId}`);
+    try {
+      const result = await openEntityFile(workdirPath, fileId);
+      setErrors(result.errors);
+      setActionMessage(result.payload ? `Opened ${result.payload.opened_path}` : null);
+    } finally {
+      setLoadingFileAction(null);
+    }
+  }
+
+  async function handleOpenFolder(fileId: number) {
+    if (!workdirPath) return;
+    setLoadingFileAction(`folder:${fileId}`);
+    try {
+      const result = await openEntityFolder(workdirPath, fileId);
+      setErrors(result.errors);
+      setActionMessage(result.payload ? `Opened ${result.payload.opened_path}` : null);
+    } finally {
+      setLoadingFileAction(null);
+    }
+  }
+
+  async function handleSaveJson(payloadJson: string, metaJson: string, comment: string) {
+    if (!workdirPath || !selectedFile) return;
+    setIsSavingJson(true);
+    try {
+      const result = await saveEntityFileBusinessJson(
+        workdirPath,
+        selectedFile.id,
+        payloadJson,
+        metaJson,
+        comment || null,
+      );
+      setDetail(result.detail);
+      setErrors(result.errors);
+      setActionMessage(result.errors.length === 0 ? "JSON payload/meta saved." : null);
+    } finally {
+      setIsSavingJson(false);
     }
   }
 
@@ -104,7 +176,10 @@ export function EntityDetailPage() {
           <h1>Entity Detail</h1>
         </div>
       </div>
+
       <CommandErrorsPanel title="Entity Detail Errors" errors={errors} />
+      {actionMessage ? <section className="compact-panel panel">{actionMessage}</section> : null}
+
       {!canQueryRuntime ? (
         <section className="panel">
           <h2>{entityId ?? "No entity selected"}</h2>
@@ -118,238 +193,57 @@ export function EntityDetailPage() {
         </section>
       ) : detail ? (
         <>
-          <section className="panel">
-            <div className="panel-heading">
-              <h2>{detail.entity.entity_id}</h2>
-              <div className="button-row">
-                <StatusBadge status={detail.entity.current_status} />
-                <StatusBadge status={detail.entity.validation_status} />
-              </div>
-            </div>
-            <InfoGrid
-              items={[
-                { label: "Current stage", value: detail.entity.current_stage_id },
-                { label: "Latest file path", value: detail.entity.latest_file_path },
-                { label: "Latest file id", value: detail.entity.latest_file_id },
-                { label: "File count", value: detail.entity.file_count },
-                { label: "First seen", value: formatDateTime(detail.entity.first_seen_at) },
-                { label: "Last seen", value: formatDateTime(detail.entity.last_seen_at) },
-                { label: "Updated at", value: formatDateTime(detail.entity.updated_at) },
-              ]}
-            />
-          </section>
-          {copyResult ? (
-            <section className="panel">
-              <div className="panel-heading">
-                <h2>Last Managed Copy</h2>
-                <StatusBadge status={copyResult.status} />
-              </div>
-              <InfoGrid
-                items={[
-                  { label: "Source stage", value: copyResult.source_stage_id },
-                  { label: "Target stage", value: copyResult.target_stage_id },
-                  { label: "Source file", value: copyResult.source_file_path },
-                  { label: "Target file", value: copyResult.target_file_path },
-                  { label: "Message", value: copyResult.message },
-                ]}
-              />
-            </section>
-          ) : null}
+          <EntityHeader
+            entity={detail.entity}
+            isRefreshing={isLoading}
+            onRefresh={() => void loadDetail(selectedFileId)}
+          />
           {runResult ? (
             <section className="panel">
               <div className="panel-heading">
-                <h2>Last Execution</h2>
-                <span className="muted">Manual stage run</span>
+                <h2>Last Manual Execution</h2>
+                <span className="muted">Summary from backend command</span>
               </div>
-              <InfoGrid
-                items={[
-                  { label: "Claimed", value: runResult.claimed },
-                  { label: "Succeeded", value: runResult.succeeded },
-                  { label: "Retry scheduled", value: runResult.retry_scheduled },
-                  { label: "Failed", value: runResult.failed },
-                  { label: "Blocked", value: runResult.blocked },
-                  { label: "Skipped", value: runResult.skipped },
-                  { label: "Stuck reconciled", value: runResult.stuck_reconciled },
-                ]}
-              />
+              <div className="inline-meta">
+                <span>claimed {runResult.claimed}</span>
+                <span>succeeded {runResult.succeeded}</span>
+                <span>retry {runResult.retry_scheduled}</span>
+                <span>failed {runResult.failed}</span>
+                <span>blocked {runResult.blocked}</span>
+                <span>skipped {runResult.skipped}</span>
+              </div>
             </section>
           ) : null}
+          <ManualActionsPanel
+            stageStates={detail.stage_states}
+            allowedActions={detail.allowed_actions}
+            loadingAction={loadingAction}
+            onRetry={(stageId) => void handleManualAction("retry", stageId)}
+            onReset={(stageId) => void handleManualAction("reset", stageId)}
+            onSkip={(stageId) => void handleManualAction("skip", stageId)}
+            onRun={(stageId) => void handleManualAction("run", stageId)}
+          />
+          <EntityTimeline timeline={detail.timeline} />
           <ValidationIssues
             title="Validation Issues"
             issues={detail.entity.validation_errors}
             emptyText="No validation issues recorded for this entity."
           />
-          <section className="panel">
-            <div className="panel-heading">
-              <h2>JSON Preview</h2>
-              <span className="muted">Read-only preview of the latest file instance</span>
-            </div>
-            <pre className="json-preview">{detail.latest_json_preview}</pre>
-          </section>
-          <section className="panel">
-            <div className="panel-heading">
-              <h2>File Instances</h2>
-              <span className="muted">{detail.files.length} file record(s)</span>
-            </div>
-            {detail.files.length === 0 ? (
-              <p className="empty-text">No file instances were recorded for this entity.</p>
-            ) : (
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Stage</th>
-                      <th>Path</th>
-                      <th>Status</th>
-                      <th>Validation</th>
-                      <th>Presence</th>
-                      <th>Checksum</th>
-                      <th>Size</th>
-                      <th>Updated</th>
-                      <th>Copy</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detail.files.map((file) => (
-                      <tr key={file.id}>
-                        <td>{file.stage_id}</td>
-                        <td>
-                          <code>{file.file_path}</code>
-                        </td>
-                        <td>
-                          <StatusBadge status={file.status} />
-                        </td>
-                        <td>
-                          <StatusBadge status={file.validation_status} />
-                        </td>
-                        <td>{file.file_exists ? "Present" : `Missing since ${formatDateTime(file.missing_since)}`}</td>
-                        <td>
-                          <code>{shortChecksum(file.checksum)}</code>
-                        </td>
-                        <td>{file.file_size}</td>
-                        <td>{formatDateTime(file.updated_at)}</td>
-                        <td>
-                          <button
-                            type="button"
-                            className="button secondary"
-                            disabled={!file.file_exists || isCopyingStageId === file.stage_id}
-                            onClick={() => void handleCreateNextStageCopy(file.stage_id)}
-                          >
-                            {isCopyingStageId === file.stage_id ? "Creating..." : "Create next-stage copy"}
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-          <section className="panel">
-            <div className="panel-heading">
-              <h2>Stage State Rows</h2>
-              <span className="muted">{detail.stage_states.length} record(s)</span>
-            </div>
-            {detail.stage_states.length === 0 ? (
-              <p className="empty-text">No stage state rows were found for this entity.</p>
-            ) : (
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Stage</th>
-                      <th>Status</th>
-                      <th>Attempts</th>
-                      <th>Max attempts</th>
-                      <th>File path</th>
-                      <th>Presence</th>
-                      <th>Last error</th>
-                      <th>Last HTTP</th>
-                      <th>Next retry</th>
-                      <th>Updated</th>
-                      <th>Run</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detail.stage_states.map((stageState) => (
-                      <tr key={stageState.id}>
-                        <td>{stageState.stage_id}</td>
-                        <td>
-                          <StatusBadge status={stageState.status} />
-                        </td>
-                        <td>{stageState.attempts}</td>
-                        <td>{stageState.max_attempts}</td>
-                        <td>
-                          <code>{stageState.file_path}</code>
-                        </td>
-                        <td>{stageState.file_exists ? "Present" : "Missing"}</td>
-                        <td>{stageState.last_error ?? "Not available"}</td>
-                        <td>{stageState.last_http_status ?? "Not available"}</td>
-                        <td>{formatDateTime(stageState.next_retry_at)}</td>
-                        <td>{formatDateTime(stageState.updated_at)}</td>
-                        <td>
-                          <button
-                            type="button"
-                            className="button secondary"
-                            disabled={
-                              !stageState.file_exists ||
-                              isRunningStageId === stageState.stage_id ||
-                              !["pending", "retry_wait"].includes(stageState.status)
-                            }
-                            onClick={() => void handleRunStage(stageState.stage_id)}
-                          >
-                            {isRunningStageId === stageState.stage_id ? "Running..." : "Run this stage"}
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-          <section className="panel">
-            <div className="panel-heading">
-              <h2>Stage Runs</h2>
-              <span className="muted">{stageRuns.length} audit row(s)</span>
-            </div>
-            {stageRuns.length === 0 ? (
-              <p className="empty-text">No execution attempts have been recorded for this entity.</p>
-            ) : (
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Run</th>
-                      <th>Stage</th>
-                      <th>Attempt</th>
-                      <th>Success</th>
-                      <th>HTTP</th>
-                      <th>Error</th>
-                      <th>Started</th>
-                      <th>Duration</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {stageRuns.map((run) => (
-                      <tr key={run.id}>
-                        <td>
-                          <code>{run.run_id}</code>
-                        </td>
-                        <td>{run.stage_id}</td>
-                        <td>{run.attempt_no}</td>
-                        <td>{run.success ? "Yes" : "No"}</td>
-                        <td>{run.http_status ?? "Not available"}</td>
-                        <td>{run.error_message ?? run.error_type ?? "None"}</td>
-                        <td>{formatDateTime(run.started_at)}</td>
-                        <td>{run.duration_ms ?? "Not available"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
+          <EntityFileInstances
+            files={detail.files}
+            selectedFileId={selectedFile?.id ?? null}
+            loadingFileAction={loadingFileAction}
+            onSelectFile={(fileId) => void handleSelectFile(fileId)}
+            onOpenFile={(fileId) => void handleOpenFile(fileId)}
+            onOpenFolder={(fileId) => void handleOpenFolder(fileId)}
+          />
+          <EntityJsonPanel
+            selectedFile={selectedFile}
+            selectedJson={detail.selected_file_json}
+            isSaving={isSavingJson}
+            onSave={handleSaveJson}
+          />
+          <StageRunsPanel runs={detail.stage_runs} />
         </>
       ) : (
         <section className="panel">

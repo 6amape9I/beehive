@@ -10,8 +10,9 @@ pub(crate) enum RuntimeTransitionReason {
     RuntimeFailed,
     RuntimeBlocked,
     StuckReconciliation,
-    ManualResetReserved,
-    ManualSkipReserved,
+    ManualRetryNow,
+    ManualReset,
+    ManualSkip,
     ClaimRecovery,
 }
 
@@ -25,8 +26,9 @@ impl RuntimeTransitionReason {
             Self::RuntimeFailed => "runtime_failed",
             Self::RuntimeBlocked => "runtime_blocked",
             Self::StuckReconciliation => "stuck_reconciliation",
-            Self::ManualResetReserved => "manual_reset_reserved",
-            Self::ManualSkipReserved => "manual_skip_reserved",
+            Self::ManualRetryNow => "manual_retry_now",
+            Self::ManualReset => "manual_reset",
+            Self::ManualSkip => "manual_skip",
             Self::ClaimRecovery => "claim_recovery",
         }
     }
@@ -109,16 +111,28 @@ pub(crate) fn validate_transition(
             StageStatus::Queued,
             StageStatus::Pending
         ) | (
-            RuntimeTransitionReason::ManualResetReserved,
+            RuntimeTransitionReason::ManualReset,
             StageStatus::Failed,
             StageStatus::Pending
         ) | (
-            RuntimeTransitionReason::ManualResetReserved,
+            RuntimeTransitionReason::ManualReset,
+            StageStatus::Blocked,
+            StageStatus::Pending
+        ) | (
+            RuntimeTransitionReason::ManualReset,
+            StageStatus::RetryWait,
+            StageStatus::Pending
+        ) | (
+            RuntimeTransitionReason::ManualReset,
             StageStatus::Skipped,
             StageStatus::Pending
         ) | (
-            RuntimeTransitionReason::ManualSkipReserved,
+            RuntimeTransitionReason::ManualSkip,
             StageStatus::Pending,
+            StageStatus::Skipped
+        ) | (
+            RuntimeTransitionReason::ManualSkip,
+            StageStatus::RetryWait,
             StageStatus::Skipped
         )
     );
@@ -216,6 +230,31 @@ mod tests {
                 StageStatus::Queued,
                 StageStatus::Pending,
                 RuntimeTransitionReason::ClaimRecovery,
+            ),
+            (
+                StageStatus::Failed,
+                StageStatus::Pending,
+                RuntimeTransitionReason::ManualReset,
+            ),
+            (
+                StageStatus::Blocked,
+                StageStatus::Pending,
+                RuntimeTransitionReason::ManualReset,
+            ),
+            (
+                StageStatus::RetryWait,
+                StageStatus::Pending,
+                RuntimeTransitionReason::ManualReset,
+            ),
+            (
+                StageStatus::Pending,
+                StageStatus::Skipped,
+                RuntimeTransitionReason::ManualSkip,
+            ),
+            (
+                StageStatus::RetryWait,
+                StageStatus::Skipped,
+                RuntimeTransitionReason::ManualSkip,
             ),
         ];
 

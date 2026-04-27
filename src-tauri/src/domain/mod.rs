@@ -223,6 +223,38 @@ pub struct EntityRecord {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct EntityListQuery {
+    pub search: Option<String>,
+    pub stage_id: Option<String>,
+    pub status: Option<String>,
+    pub validation_status: Option<EntityValidationStatus>,
+    pub sort_by: Option<String>,
+    pub sort_direction: Option<String>,
+    pub page: Option<u64>,
+    pub page_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityTableRow {
+    pub entity_id: String,
+    pub current_stage_id: Option<String>,
+    pub current_status: String,
+    pub latest_file_path: Option<String>,
+    pub latest_file_id: Option<i64>,
+    pub file_count: u64,
+    pub attempts: Option<u64>,
+    pub max_attempts: Option<u64>,
+    pub last_error: Option<String>,
+    pub last_http_status: Option<i64>,
+    pub next_retry_at: Option<String>,
+    pub last_started_at: Option<String>,
+    pub last_finished_at: Option<String>,
+    pub validation_status: EntityValidationStatus,
+    pub updated_at: String,
+    pub last_seen_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityFileRecord {
     pub id: i64,
@@ -269,6 +301,33 @@ pub struct EntityStageStateRecord {
     pub discovered_at: String,
     pub last_seen_at: Option<String>,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityTimelineItem {
+    pub stage_id: String,
+    pub status: String,
+    pub attempts: u64,
+    pub max_attempts: u64,
+    pub file_path: Option<String>,
+    pub file_exists: bool,
+    pub last_error: Option<String>,
+    pub last_http_status: Option<i64>,
+    pub next_retry_at: Option<String>,
+    pub last_started_at: Option<String>,
+    pub last_finished_at: Option<String>,
+    pub created_child_path: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityStageAllowedActions {
+    pub stage_id: String,
+    pub can_retry_now: bool,
+    pub can_reset_to_pending: bool,
+    pub can_skip: bool,
+    pub can_run_this_stage: bool,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -452,6 +511,7 @@ pub struct DashboardOverview {
     pub recent_runs: Vec<DashboardRunItem>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct EntityFilters {
     pub stage_id: Option<String>,
@@ -510,9 +570,12 @@ pub struct StageListResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityListResult {
-    pub entities: Vec<EntityRecord>,
+    pub entities: Vec<EntityTableRow>,
     pub total: u64,
+    pub page: u64,
+    pub page_size: u64,
     pub available_stages: Vec<String>,
+    pub available_statuses: Vec<String>,
     pub errors: Vec<CommandErrorInfo>,
 }
 
@@ -527,7 +590,11 @@ pub struct EntityDetailPayload {
     pub entity: EntityRecord,
     pub files: Vec<EntityFileRecord>,
     pub stage_states: Vec<EntityStageStateRecord>,
+    pub stage_runs: Vec<StageRunRecord>,
+    pub timeline: Vec<EntityTimelineItem>,
     pub latest_json_preview: String,
+    pub selected_file_json: Option<String>,
+    pub allowed_actions: Vec<EntityStageAllowedActions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -665,5 +732,29 @@ pub struct StageRunsResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReconcileStuckTasksResult {
     pub reconciled: u64,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ManualEntityStageActionResult {
+    pub detail: Option<EntityDetailPayload>,
+    pub summary: Option<RunDueTasksSummary>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenEntityPathPayload {
+    pub opened_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenEntityPathResult {
+    pub payload: Option<OpenEntityPathPayload>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SaveEntityFileJsonResult {
+    pub detail: Option<EntityDetailPayload>,
     pub errors: Vec<CommandErrorInfo>,
 }

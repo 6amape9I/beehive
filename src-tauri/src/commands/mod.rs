@@ -7,12 +7,14 @@ use crate::database;
 use crate::discovery;
 use crate::domain::{
     AppEventsResult, BootstrapResult, CommandErrorInfo, DashboardOverviewResult,
-    EntityDetailResult, EntityFilesResult, EntityFilters, EntityListResult, FileCopyResult,
+    EntityDetailResult, EntityFilesResult, EntityListQuery, EntityListResult, FileCopyResult,
+    ManualEntityStageActionResult, OpenEntityPathPayload, OpenEntityPathResult,
     ReconcileStuckTasksResult, RunDueTasksResult, RunEntityStageResult, RuntimeSummaryResult,
-    ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult, StageRunsResult,
-    WorkspaceExplorerResult,
+    SaveEntityFileJsonResult, ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult,
+    StageRunsResult, WorkspaceExplorerResult,
 };
 use crate::executor;
+use crate::file_open::{self, OpenEntityPathKind};
 use crate::file_ops;
 use crate::workdir;
 
@@ -146,24 +148,30 @@ pub fn list_stages(path: String) -> StageListResult {
 }
 
 #[tauri::command]
-pub fn list_entities(path: String, filters: Option<EntityFilters>) -> EntityListResult {
+pub fn list_entities(path: String, query: Option<EntityListQuery>) -> EntityListResult {
     match load_runtime_context(&path) {
         Ok(context) => {
-            let filters = filters.unwrap_or_default();
+            let query = query.unwrap_or_default();
             match (
-                database::list_entities(&context.database_path, &filters),
+                database::list_entity_table_page(&context.database_path, &query),
                 database::list_stages(&context.database_path),
             ) {
-                (Ok(entities), Ok(stages)) => EntityListResult {
-                    total: entities.len() as u64,
+                (Ok(page), Ok(stages)) => EntityListResult {
+                    total: page.total,
+                    page: page.page,
+                    page_size: page.page_size,
                     available_stages: stages.into_iter().map(|stage| stage.id).collect(),
-                    entities,
+                    available_statuses: page.available_statuses,
+                    entities: page.entities,
                     errors: Vec::new(),
                 },
                 (Err(message), _) | (_, Err(message)) => EntityListResult {
                     entities: Vec::new(),
                     total: 0,
+                    page: 1,
+                    page_size: 50,
                     available_stages: Vec::new(),
+                    available_statuses: Vec::new(),
                     errors: vec![command_error("list_entities_failed", message, None)],
                 },
             }
@@ -171,7 +179,10 @@ pub fn list_entities(path: String, filters: Option<EntityFilters>) -> EntityList
         Err(error) => EntityListResult {
             entities: Vec::new(),
             total: 0,
+            page: 1,
+            page_size: 50,
             available_stages: Vec::new(),
+            available_statuses: Vec::new(),
             errors: vec![error],
         },
     }
@@ -200,9 +211,17 @@ pub fn list_entity_files(path: String, entity_id: Option<String>) -> EntityFiles
 }
 
 #[tauri::command]
-pub fn get_entity(path: String, entity_id: String) -> EntityDetailResult {
+pub fn get_entity(
+    path: String,
+    entity_id: String,
+    selected_file_id: Option<i64>,
+) -> EntityDetailResult {
     match load_runtime_context(&path) {
-        Ok(context) => match database::get_entity_detail(&context.database_path, &entity_id) {
+        Ok(context) => match database::get_entity_detail_with_selection(
+            &context.database_path,
+            &entity_id,
+            selected_file_id,
+        ) {
             Ok(Some(detail)) => EntityDetailResult {
                 detail: Some(detail),
                 errors: Vec::new(),
@@ -310,6 +329,172 @@ pub fn run_entity_stage(path: String, entity_id: String, stage_id: String) -> Ru
         },
         Err(error) => RunEntityStageResult {
             summary: None,
+            errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn retry_entity_stage_now(
+    path: String,
+    entity_id: String,
+    stage_id: String,
+    operator_comment: Option<String>,
+) -> ManualEntityStageActionResult {
+    match load_runtime_context(&path) {
+        Ok(context) => {
+            let previous_status = match database::get_stage_state_status(
+                &context.database_path,
+                &entity_id,
+                &stage_id,
+            ) {
+                Ok(Some(status)) => status,
+                Ok(None) => {
+                    return manual_action_error(
+                        "stage_state_missing",
+                        format!(
+                            "No stage state exists for entity '{entity_id}' on stage '{stage_id}'."
+                        ),
+                    )
+                }
+                Err(message) => return manual_action_error("manual_retry_failed", message),
+            };
+
+            if !matches!(previous_status.as_str(), "pending" | "retry_wait") {
+                return manual_action_error(
+                    "manual_retry_not_allowed",
+                    format!(
+                        "Retry now is allowed only for pending or retry_wait states; current status is '{}'.",
+                        previous_status
+                    ),
+                );
+            }
+
+            let summary = match executor::run_entity_stage(
+                &context.workdir_path,
+                &context.database_path,
+                &entity_id,
+                &stage_id,
+                context.config.runtime.request_timeout_sec,
+                context.config.runtime.stuck_task_timeout_sec,
+                context.config.runtime.file_stability_delay_ms,
+            ) {
+                Ok(summary) => summary,
+                Err(message) => return manual_action_error("manual_retry_failed", message),
+            };
+            let new_status =
+                database::get_stage_state_status(&context.database_path, &entity_id, &stage_id)
+                    .ok()
+                    .flatten();
+            if let Err(message) = database::record_manual_retry_event(
+                &context.database_path,
+                &entity_id,
+                &stage_id,
+                Some(&previous_status),
+                new_status.as_deref(),
+                operator_comment.as_deref(),
+            ) {
+                return manual_action_error("manual_retry_event_failed", message);
+            }
+            refreshed_manual_detail(&context.database_path, &entity_id, Some(summary))
+        }
+        Err(error) => ManualEntityStageActionResult {
+            detail: None,
+            summary: None,
+            errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn reset_entity_stage_to_pending(
+    path: String,
+    entity_id: String,
+    stage_id: String,
+    operator_comment: Option<String>,
+) -> ManualEntityStageActionResult {
+    match load_runtime_context(&path) {
+        Ok(context) => match database::reset_entity_stage_to_pending(
+            &context.database_path,
+            &entity_id,
+            &stage_id,
+            operator_comment.as_deref(),
+        ) {
+            Ok(()) => refreshed_manual_detail(&context.database_path, &entity_id, None),
+            Err(message) => manual_action_error("manual_reset_failed", message),
+        },
+        Err(error) => ManualEntityStageActionResult {
+            detail: None,
+            summary: None,
+            errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn skip_entity_stage(
+    path: String,
+    entity_id: String,
+    stage_id: String,
+    operator_comment: Option<String>,
+) -> ManualEntityStageActionResult {
+    match load_runtime_context(&path) {
+        Ok(context) => match database::skip_entity_stage(
+            &context.database_path,
+            &entity_id,
+            &stage_id,
+            operator_comment.as_deref(),
+        ) {
+            Ok(()) => refreshed_manual_detail(&context.database_path, &entity_id, None),
+            Err(message) => manual_action_error("manual_skip_failed", message),
+        },
+        Err(error) => ManualEntityStageActionResult {
+            detail: None,
+            summary: None,
+            errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn open_entity_file(path: String, entity_file_id: i64) -> OpenEntityPathResult {
+    open_entity_path(path, entity_file_id, OpenEntityPathKind::File)
+}
+
+#[tauri::command]
+pub fn open_entity_folder(path: String, entity_file_id: i64) -> OpenEntityPathResult {
+    open_entity_path(path, entity_file_id, OpenEntityPathKind::Folder)
+}
+
+#[tauri::command]
+pub fn save_entity_file_business_json(
+    path: String,
+    entity_file_id: i64,
+    payload_json: String,
+    meta_json: String,
+    operator_comment: Option<String>,
+) -> SaveEntityFileJsonResult {
+    match load_runtime_context(&path) {
+        Ok(context) => match file_ops::save_entity_file_business_json(
+            &context.workdir_path,
+            &context.database_path,
+            entity_file_id,
+            &payload_json,
+            &meta_json,
+            operator_comment.as_deref(),
+            context.config.runtime.file_stability_delay_ms,
+        ) {
+            Ok(detail) => SaveEntityFileJsonResult {
+                detail: Some(detail),
+                errors: Vec::new(),
+            },
+            Err(message) => SaveEntityFileJsonResult {
+                detail: None,
+                errors: vec![command_error("save_entity_file_json_failed", message, None)],
+            },
+        },
+        Err(error) => SaveEntityFileJsonResult {
+            detail: None,
             errors: vec![error],
         },
     }
@@ -470,6 +655,57 @@ fn command_error(code: &str, message: impl Into<String>, path: Option<String>) -
         code: code.to_string(),
         message: message.into(),
         path,
+    }
+}
+
+fn refreshed_manual_detail(
+    database_path: &Path,
+    entity_id: &str,
+    summary: Option<crate::domain::RunDueTasksSummary>,
+) -> ManualEntityStageActionResult {
+    match database::get_entity_detail_with_selection(database_path, entity_id, None) {
+        Ok(detail) => ManualEntityStageActionResult {
+            detail,
+            summary,
+            errors: Vec::new(),
+        },
+        Err(message) => manual_action_error("manual_action_refresh_failed", message),
+    }
+}
+
+fn manual_action_error(code: &str, message: impl Into<String>) -> ManualEntityStageActionResult {
+    ManualEntityStageActionResult {
+        detail: None,
+        summary: None,
+        errors: vec![command_error(code, message, None)],
+    }
+}
+
+fn open_entity_path(
+    path: String,
+    entity_file_id: i64,
+    kind: OpenEntityPathKind,
+) -> OpenEntityPathResult {
+    match load_runtime_context(&path) {
+        Ok(context) => match file_open::open_entity_path(
+            &context.workdir_path,
+            &context.database_path,
+            entity_file_id,
+            kind,
+        ) {
+            Ok(opened_path) => OpenEntityPathResult {
+                payload: Some(OpenEntityPathPayload { opened_path }),
+                errors: Vec::new(),
+            },
+            Err(message) => OpenEntityPathResult {
+                payload: None,
+                errors: vec![command_error("open_entity_path_failed", message, None)],
+            },
+        },
+        Err(error) => OpenEntityPathResult {
+            payload: None,
+            errors: vec![error],
+        },
     }
 }
 

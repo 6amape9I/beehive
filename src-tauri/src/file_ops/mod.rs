@@ -7,14 +7,18 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::database::{
-    ensure_entity_stub, find_latest_entity_file_for_stage, find_stage_by_id, insert_app_event,
-    open_connection, recompute_entity_summaries, system_time_to_rfc3339, upsert_entity_file,
+    ensure_entity_stub, find_entity_file_by_id, find_latest_entity_file_for_stage,
+    find_stage_by_id, get_entity_detail_with_selection, insert_app_event, open_connection,
+    recompute_entity_summaries, system_time_to_rfc3339, upsert_entity_file,
     upsert_entity_stage_state, PersistEntityFileInput, PersistEntityStageStateInput,
 };
 use crate::discovery::ensure_stage_directories_for_stage_ids;
 use crate::domain::{
-    AppEventLevel, EntityValidationStatus, FileCopyPayload, FileCopyStatus, StageStatus,
+    AppEventLevel, EntityDetailPayload, EntityValidationStatus, FileCopyPayload, FileCopyStatus,
+    StageStatus,
 };
+use crate::file_safety::read_stable_file;
+use crate::state_machine::parse_status;
 use crate::workdir::path_string;
 
 pub fn create_next_stage_copy(
@@ -591,6 +595,154 @@ pub fn create_next_stage_copy_from_response(
     })
 }
 
+pub fn save_entity_file_business_json(
+    workdir_path: &Path,
+    database_path: &Path,
+    entity_file_id: i64,
+    payload_json: &str,
+    meta_json: &str,
+    operator_comment: Option<&str>,
+    file_stability_delay_ms: u64,
+) -> Result<EntityDetailPayload, String> {
+    let connection = open_connection(database_path)?;
+    let file = find_entity_file_by_id(&connection, entity_file_id)?
+        .ok_or_else(|| format!("Entity file id '{entity_file_id}' was not found."))?;
+    drop(connection);
+
+    if !file.file_exists {
+        return Err(format!(
+            "Entity file '{}' is marked missing and cannot be edited.",
+            file.file_path
+        ));
+    }
+
+    let file_path = canonical_registered_file_path(workdir_path, &file.file_path, true)?;
+    let stable_read = read_stable_file(&file_path, file_stability_delay_ms)
+        .map_err(|issue| format!("{}: {}", issue.code, issue.message))?;
+    let current_checksum = format!("{:x}", Sha256::digest(&stable_read.bytes));
+    if current_checksum != file.checksum
+        || stable_read.file_size != file.file_size
+        || stable_read.file_mtime != file.file_mtime
+    {
+        return Err(format!(
+            "File '{}' changed since the last scan. Refresh or scan the workspace before saving.",
+            file.file_path
+        ));
+    }
+
+    let disk_json = serde_json::from_slice::<Value>(&stable_read.bytes).map_err(|error| {
+        format!(
+            "Failed to parse registered file '{}' before save: {error}",
+            file.file_path
+        )
+    })?;
+    let mut root = disk_json
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "Edited file root must be a JSON object.".to_string())?;
+    let disk_entity_id = root.get("id").and_then(Value::as_str).unwrap_or_default();
+    if disk_entity_id != file.entity_id {
+        return Err(format!(
+            "Registered file '{}' changed entity id from '{}' to '{}'. Run scan before editing.",
+            file.file_path, file.entity_id, disk_entity_id
+        ));
+    }
+
+    let payload = serde_json::from_str::<Value>(payload_json)
+        .map_err(|error| format!("Payload JSON is invalid: {error}"))?;
+    if payload.is_null() {
+        return Err("Payload must exist and must not be null.".to_string());
+    }
+    let meta = serde_json::from_str::<Value>(meta_json)
+        .map_err(|error| format!("Meta JSON is invalid: {error}"))?;
+    if !meta.is_object() {
+        return Err("Meta must be a JSON object.".to_string());
+    }
+
+    root.insert("payload".to_string(), payload.clone());
+    root.insert("meta".to_string(), meta.clone());
+
+    let updated_bytes = serde_json::to_vec_pretty(&Value::Object(root))
+        .map_err(|error| format!("Failed to serialize edited JSON: {error}"))?;
+    write_atomic_json(&file_path, &updated_bytes)?;
+
+    let metadata = fs::metadata(&file_path).map_err(|error| {
+        format!(
+            "Failed to read metadata after saving '{}': {error}",
+            file_path.display()
+        )
+    })?;
+    let modified = metadata.modified().map_err(|error| {
+        format!(
+            "Failed to read modified time after saving '{}': {error}",
+            file_path.display()
+        )
+    })?;
+    let now = Utc::now().to_rfc3339();
+    let updated_checksum = format!("{:x}", Sha256::digest(&updated_bytes));
+    let status = parse_status(&file.status).ok_or_else(|| {
+        format!(
+            "Unknown file status '{}' for '{}'.",
+            file.status, file.file_path
+        )
+    })?;
+
+    let mut connection = open_connection(database_path)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("Failed to start JSON-save transaction: {error}"))?;
+    upsert_entity_file(
+        &transaction,
+        &PersistEntityFileInput {
+            entity_id: file.entity_id.clone(),
+            stage_id: file.stage_id.clone(),
+            file_path: file.file_path.clone(),
+            file_name: file.file_name.clone(),
+            checksum: updated_checksum,
+            file_mtime: system_time_to_rfc3339(modified),
+            file_size: metadata.len(),
+            payload_json: serde_json::to_string(&payload)
+                .map_err(|error| format!("Failed to store payload JSON: {error}"))?,
+            meta_json: serde_json::to_string(&meta)
+                .map_err(|error| format!("Failed to store meta JSON: {error}"))?,
+            current_stage: file.current_stage.clone(),
+            next_stage: file.next_stage.clone(),
+            status,
+            validation_status: file.validation_status.clone(),
+            validation_errors: file.validation_errors.clone(),
+            is_managed_copy: file.is_managed_copy,
+            copy_source_file_id: file.copy_source_file_id,
+            first_seen_at: file.first_seen_at.clone(),
+            last_seen_at: now.clone(),
+            updated_at: now.clone(),
+        },
+    )?;
+    recompute_entity_summaries(&transaction)?;
+    insert_app_event(
+        &transaction,
+        AppEventLevel::Info,
+        "entity_file_json_saved",
+        &format!(
+            "Business JSON was saved for entity file '{}'.",
+            file.file_path
+        ),
+        Some(json!({
+            "entity_id": &file.entity_id,
+            "stage_id": &file.stage_id,
+            "entity_file_id": entity_file_id,
+            "file_path": &file.file_path,
+            "operator_comment": operator_comment,
+        })),
+        &now,
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| format!("Failed to commit JSON-save transaction: {error}"))?;
+
+    get_entity_detail_with_selection(database_path, &file.entity_id, Some(entity_file_id))?
+        .ok_or_else(|| format!("Entity '{}' was not found after JSON save.", file.entity_id))
+}
+
 fn build_target_json(
     root: &Map<String, Value>,
     source_stage_id: &str,
@@ -776,6 +928,68 @@ fn write_atomic_json(target_path: &Path, bytes: &[u8]) -> Result<(), String> {
     }
 
     write_result
+}
+
+pub(crate) fn canonical_registered_file_path(
+    workdir_path: &Path,
+    registered_file_path: &str,
+    must_exist: bool,
+) -> Result<PathBuf, String> {
+    let workdir = workdir_path.canonicalize().map_err(|error| {
+        format!(
+            "Failed to canonicalize workdir '{}': {error}",
+            workdir_path.display()
+        )
+    })?;
+    let candidate = PathBuf::from(registered_file_path);
+    if !candidate.is_absolute() {
+        return Err(format!(
+            "Registered file path '{}' is not absolute.",
+            registered_file_path
+        ));
+    }
+    if must_exist && !candidate.exists() {
+        return Err(format!(
+            "Registered file path '{}' does not exist.",
+            registered_file_path
+        ));
+    }
+
+    let canonical = if candidate.exists() {
+        candidate.canonicalize().map_err(|error| {
+            format!(
+                "Failed to canonicalize registered file '{}': {error}",
+                candidate.display()
+            )
+        })?
+    } else {
+        let parent = candidate.parent().ok_or_else(|| {
+            format!(
+                "Registered file path '{}' does not have a parent directory.",
+                registered_file_path
+            )
+        })?;
+        let canonical_parent = parent.canonicalize().map_err(|error| {
+            format!(
+                "Failed to canonicalize registered file parent '{}': {error}",
+                parent.display()
+            )
+        })?;
+        canonical_parent.join(candidate.file_name().ok_or_else(|| {
+            format!(
+                "Registered file path '{}' does not have a file name.",
+                registered_file_path
+            )
+        })?)
+    };
+
+    if !canonical.starts_with(&workdir) {
+        return Err(format!(
+            "Registered file path '{}' is outside the selected workdir.",
+            registered_file_path
+        ));
+    }
+    Ok(canonical)
 }
 
 fn register_target_file(
@@ -1245,5 +1459,113 @@ mod tests {
 
         assert_eq!(payload.status, FileCopyStatus::Blocked);
         assert_eq!(detail.files.len(), 1);
+    }
+
+    #[test]
+    fn save_business_json_updates_file_snapshot_without_runtime_regression() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(
+            &database_path,
+            &test_config(vec![stage(
+                "incoming",
+                "stages/incoming",
+                "stages/incoming-out",
+                None,
+            )]),
+        )
+        .expect("bootstrap");
+        let source_path = workdir.join("stages/incoming/entity-1.json");
+        write_json(
+            &source_path,
+            r#"{"id":"entity-1","current_stage":"incoming","status":"pending","payload":{"value":1},"meta":{"source":"manual"}}"#,
+        );
+        scan_workspace(&workdir, &database_path).expect("scan");
+        let connection = open_connection(&database_path).expect("connection");
+        connection
+            .execute(
+                "UPDATE entity_stage_states SET status = 'done' WHERE entity_id = 'entity-1'",
+                [],
+            )
+            .expect("mark done");
+        connection
+            .execute(
+                "UPDATE entities SET current_status = 'done' WHERE entity_id = 'entity-1'",
+                [],
+            )
+            .expect("summary done");
+        let file = list_entity_files(&database_path, Some("entity-1")).expect("files")[0].clone();
+        drop(connection);
+
+        let detail = save_entity_file_business_json(
+            &workdir,
+            &database_path,
+            file.id,
+            r#"{"value":2}"#,
+            r#"{"source":"operator"}"#,
+            Some("edit payload"),
+            0,
+        )
+        .expect("save");
+        let saved_bytes = fs::read(&source_path).expect("saved file");
+        let saved_json = serde_json::from_slice::<Value>(&saved_bytes).expect("saved json");
+        let saved_file = detail
+            .files
+            .iter()
+            .find(|item| item.id == file.id)
+            .expect("file");
+        let saved_state = detail
+            .stage_states
+            .iter()
+            .find(|state| state.stage_id == "incoming")
+            .expect("state");
+
+        assert_eq!(saved_json["payload"]["value"], 2);
+        assert_eq!(saved_json["meta"]["source"], "operator");
+        assert_ne!(saved_file.checksum, file.checksum);
+        assert_eq!(saved_state.status, "done");
+        assert_eq!(detail.entity.current_status, "done");
+    }
+
+    #[test]
+    fn save_business_json_rejects_stale_disk_snapshot() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(
+            &database_path,
+            &test_config(vec![stage(
+                "incoming",
+                "stages/incoming",
+                "stages/incoming-out",
+                None,
+            )]),
+        )
+        .expect("bootstrap");
+        let source_path = workdir.join("stages/incoming/entity-1.json");
+        write_json(
+            &source_path,
+            r#"{"id":"entity-1","payload":{"value":1},"meta":{}}"#,
+        );
+        scan_workspace(&workdir, &database_path).expect("scan");
+        let file = list_entity_files(&database_path, Some("entity-1")).expect("files")[0].clone();
+        write_json(
+            &source_path,
+            r#"{"id":"entity-1","payload":{"value":99},"meta":{}}"#,
+        );
+
+        let error = save_entity_file_business_json(
+            &workdir,
+            &database_path,
+            file.id,
+            r#"{"value":2}"#,
+            r#"{}"#,
+            None,
+            0,
+        )
+        .expect_err("stale save should reject");
+
+        assert!(error.contains("changed since the last scan"));
     }
 }
