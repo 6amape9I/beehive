@@ -9,6 +9,7 @@ mod executor;
 mod file_open;
 mod file_ops;
 mod file_safety;
+mod pipeline_editor;
 mod state_machine;
 mod workdir;
 
@@ -25,6 +26,9 @@ pub fn run() {
             commands::ensure_stage_directories,
             commands::get_runtime_summary,
             commands::list_stages,
+            commands::get_pipeline_editor_state,
+            commands::validate_pipeline_config_draft,
+            commands::save_pipeline_config,
             commands::list_entities,
             commands::list_entity_files,
             commands::get_entity,

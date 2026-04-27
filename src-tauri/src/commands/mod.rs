@@ -9,13 +9,15 @@ use crate::domain::{
     AppEventsResult, BootstrapResult, CommandErrorInfo, DashboardOverviewResult,
     EntityDetailResult, EntityFilesResult, EntityListQuery, EntityListResult, FileCopyResult,
     ManualEntityStageActionResult, OpenEntityPathPayload, OpenEntityPathResult,
-    ReconcileStuckTasksResult, RunDueTasksResult, RunEntityStageResult, RuntimeSummaryResult,
-    SaveEntityFileJsonResult, ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult,
-    StageRunsResult, WorkspaceExplorerResult,
+    PipelineConfigDraft, PipelineEditorStateResult, ReconcileStuckTasksResult, RunDueTasksResult,
+    RunEntityStageResult, RuntimeSummaryResult, SaveEntityFileJsonResult, SavePipelineConfigResult,
+    ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult, StageRunsResult,
+    ValidatePipelineConfigDraftResult, WorkspaceExplorerResult,
 };
 use crate::executor;
 use crate::file_open::{self, OpenEntityPathKind};
 use crate::file_ops;
+use crate::pipeline_editor;
 use crate::workdir;
 
 #[tauri::command]
@@ -143,6 +145,57 @@ pub fn list_stages(path: String) -> StageListResult {
         Err(error) => StageListResult {
             stages: Vec::new(),
             errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn get_pipeline_editor_state(path: String) -> PipelineEditorStateResult {
+    match pipeline_editor::get_pipeline_editor_state(&path) {
+        Ok(state) => PipelineEditorStateResult {
+            state: Some(state),
+            errors: Vec::new(),
+        },
+        Err(message) => PipelineEditorStateResult {
+            state: None,
+            errors: vec![command_error("pipeline_editor_state_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn validate_pipeline_config_draft(
+    path: String,
+    draft: PipelineConfigDraft,
+) -> ValidatePipelineConfigDraftResult {
+    match pipeline_editor::validate_pipeline_config_draft(&path, &draft) {
+        Ok(result) => result,
+        Err(message) => ValidatePipelineConfigDraftResult {
+            validation: crate::domain::ConfigValidationResult::from_issues(Vec::new()),
+            normalized_config: None,
+            yaml_preview: None,
+            stage_usages: Vec::new(),
+            errors: vec![command_error(
+                "pipeline_draft_validation_failed",
+                message,
+                None,
+            )],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn save_pipeline_config(
+    path: String,
+    draft: PipelineConfigDraft,
+    operator_comment: Option<String>,
+) -> SavePipelineConfigResult {
+    match pipeline_editor::save_pipeline_config(&path, &draft, operator_comment.as_deref()) {
+        Ok(result) => result,
+        Err(message) => SavePipelineConfigResult {
+            state: None,
+            backup_path: None,
+            errors: vec![command_error("save_pipeline_config_failed", message, None)],
         },
     }
 }

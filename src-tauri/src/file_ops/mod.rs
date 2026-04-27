@@ -7,9 +7,10 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::database::{
-    ensure_entity_stub, find_entity_file_by_id, find_latest_entity_file_for_stage,
-    find_stage_by_id, get_entity_detail_with_selection, insert_app_event, open_connection,
-    recompute_entity_summaries, system_time_to_rfc3339, upsert_entity_file,
+    ensure_entity_stub, evaluate_entity_file_allowed_actions, find_entity_file_by_id,
+    find_latest_entity_file_for_stage, find_stage_by_id, get_entity_detail_with_selection,
+    insert_app_event, open_connection, recompute_entity_summaries,
+    record_entity_file_json_edit_rejected, system_time_to_rfc3339, upsert_entity_file,
     upsert_entity_stage_state, PersistEntityFileInput, PersistEntityStageStateInput,
 };
 use crate::discovery::ensure_stage_directories_for_stage_ids;
@@ -607,6 +608,11 @@ pub fn save_entity_file_business_json(
     let connection = open_connection(database_path)?;
     let file = find_entity_file_by_id(&connection, entity_file_id)?
         .ok_or_else(|| format!("Entity file id '{entity_file_id}' was not found."))?;
+    let edit_policy = evaluate_entity_file_allowed_actions(&connection, &file)?;
+    if !edit_policy.can_edit_business_json {
+        record_entity_file_json_edit_rejected(&connection, &file, &edit_policy, operator_comment)?;
+        return Err(edit_policy.reasons.join(" "));
+    }
     drop(connection);
 
     if !file.file_exists {
@@ -1109,9 +1115,14 @@ fn register_target_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::{bootstrap_database, get_entity_detail, list_entity_files};
+    use crate::database::{
+        bootstrap_database, get_entity_detail, list_app_events, list_entity_files,
+    };
     use crate::discovery::scan_workspace;
-    use crate::domain::{PipelineConfig, ProjectConfig, RuntimeConfig, StageDefinition};
+    use crate::domain::{
+        EntityFileRecord, PipelineConfig, ProjectConfig, RuntimeConfig, StageDefinition,
+    };
+    use rusqlite::params;
 
     fn test_config(stages: Vec<StageDefinition>) -> PipelineConfig {
         PipelineConfig {
@@ -1146,6 +1157,53 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent");
         }
         fs::write(path, contents).expect("write json");
+    }
+
+    fn setup_business_json_edit_case(
+        status: Option<&str>,
+    ) -> (
+        tempfile::TempDir,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        EntityFileRecord,
+    ) {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(
+            &database_path,
+            &test_config(vec![stage(
+                "incoming",
+                "stages/incoming",
+                "stages/incoming-out",
+                None,
+            )]),
+        )
+        .expect("bootstrap");
+        let source_path = workdir.join("stages/incoming/entity-1.json");
+        write_json(
+            &source_path,
+            r#"{"id":"entity-1","current_stage":"incoming","status":"pending","payload":{"value":1},"meta":{"source":"manual"}}"#,
+        );
+        scan_workspace(&workdir, &database_path).expect("scan");
+        if let Some(status) = status {
+            let connection = open_connection(&database_path).expect("connection");
+            connection
+                .execute(
+                    "UPDATE entity_stage_states SET status = ?1 WHERE entity_id = 'entity-1'",
+                    params![status],
+                )
+                .expect("set status");
+            connection
+                .execute(
+                    "UPDATE entities SET current_status = ?1 WHERE entity_id = 'entity-1'",
+                    params![status],
+                )
+                .expect("set entity status");
+        }
+        let file = list_entity_files(&database_path, Some("entity-1")).expect("files")[0].clone();
+        (tempdir, workdir, database_path, source_path, file)
     }
 
     #[test]
@@ -1462,41 +1520,9 @@ mod tests {
     }
 
     #[test]
-    fn save_business_json_updates_file_snapshot_without_runtime_regression() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workdir = tempdir.path().join("workdir");
-        let database_path = workdir.join("app.db");
-        bootstrap_database(
-            &database_path,
-            &test_config(vec![stage(
-                "incoming",
-                "stages/incoming",
-                "stages/incoming-out",
-                None,
-            )]),
-        )
-        .expect("bootstrap");
-        let source_path = workdir.join("stages/incoming/entity-1.json");
-        write_json(
-            &source_path,
-            r#"{"id":"entity-1","current_stage":"incoming","status":"pending","payload":{"value":1},"meta":{"source":"manual"}}"#,
-        );
-        scan_workspace(&workdir, &database_path).expect("scan");
-        let connection = open_connection(&database_path).expect("connection");
-        connection
-            .execute(
-                "UPDATE entity_stage_states SET status = 'done' WHERE entity_id = 'entity-1'",
-                [],
-            )
-            .expect("mark done");
-        connection
-            .execute(
-                "UPDATE entities SET current_status = 'done' WHERE entity_id = 'entity-1'",
-                [],
-            )
-            .expect("summary done");
-        let file = list_entity_files(&database_path, Some("entity-1")).expect("files")[0].clone();
-        drop(connection);
+    fn save_business_json_updates_file_snapshot_for_editable_state() {
+        let (_tempdir, workdir, database_path, source_path, file) =
+            setup_business_json_edit_case(Some("pending"));
 
         let detail = save_entity_file_business_json(
             &workdir,
@@ -1524,8 +1550,8 @@ mod tests {
         assert_eq!(saved_json["payload"]["value"], 2);
         assert_eq!(saved_json["meta"]["source"], "operator");
         assert_ne!(saved_file.checksum, file.checksum);
-        assert_eq!(saved_state.status, "done");
-        assert_eq!(detail.entity.current_status, "done");
+        assert_eq!(saved_state.status, "pending");
+        assert_eq!(detail.entity.current_status, "pending");
     }
 
     #[test]
@@ -1567,5 +1593,103 @@ mod tests {
         .expect_err("stale save should reject");
 
         assert!(error.contains("changed since the last scan"));
+    }
+
+    #[test]
+    fn save_business_json_allows_only_editable_runtime_statuses() {
+        for status in ["pending", "retry_wait", "failed", "blocked", "skipped"] {
+            let (_tempdir, workdir, database_path, source_path, file) =
+                setup_business_json_edit_case(Some(status));
+
+            let detail = save_entity_file_business_json(
+                &workdir,
+                &database_path,
+                file.id,
+                r#"{"value":42}"#,
+                r#"{"source":"operator"}"#,
+                Some("allowed edit"),
+                0,
+            )
+            .unwrap_or_else(|error| panic!("status {status} should allow save: {error}"));
+            let saved_json =
+                serde_json::from_slice::<Value>(&fs::read(&source_path).expect("saved bytes"))
+                    .expect("saved json");
+            let saved_state = detail
+                .stage_states
+                .iter()
+                .find(|state| state.stage_id == "incoming")
+                .expect("state");
+
+            assert_eq!(saved_json["payload"]["value"], 42);
+            assert_eq!(saved_json["meta"]["source"], "operator");
+            assert_eq!(saved_state.status, status);
+        }
+    }
+
+    #[test]
+    fn save_business_json_rejects_active_complete_and_missing_runtime_state_without_mutation() {
+        for status in ["queued", "in_progress", "done"] {
+            let (_tempdir, workdir, database_path, source_path, file) =
+                setup_business_json_edit_case(Some(status));
+            let original_bytes = fs::read(&source_path).expect("original bytes");
+
+            let error = save_entity_file_business_json(
+                &workdir,
+                &database_path,
+                file.id,
+                r#"{"value":99}"#,
+                r#"{"source":"operator"}"#,
+                Some("rejected edit"),
+                0,
+            )
+            .expect_err("forbidden status should reject save");
+            let after_bytes = fs::read(&source_path).expect("after bytes");
+            let after_file =
+                list_entity_files(&database_path, Some("entity-1")).expect("files")[0].clone();
+            let events = list_app_events(&database_path, 20).expect("events");
+
+            assert!(error.contains(status));
+            assert_eq!(after_bytes, original_bytes);
+            assert_eq!(after_file.checksum, file.checksum);
+            assert_eq!(after_file.file_mtime, file.file_mtime);
+            assert!(events
+                .iter()
+                .any(|event| event.code == "entity_file_json_edit_rejected"));
+        }
+
+        let (_tempdir, workdir, database_path, source_path, file) =
+            setup_business_json_edit_case(None);
+        let original_bytes = fs::read(&source_path).expect("original bytes");
+        let connection = open_connection(&database_path).expect("connection");
+        connection
+            .execute(
+                "DELETE FROM entity_stage_states WHERE entity_id = 'entity-1' AND stage_id = 'incoming'",
+                [],
+            )
+            .expect("delete state");
+        drop(connection);
+
+        let error = save_entity_file_business_json(
+            &workdir,
+            &database_path,
+            file.id,
+            r#"{"value":99}"#,
+            r#"{"source":"operator"}"#,
+            Some("missing state edit"),
+            0,
+        )
+        .expect_err("missing state should reject save");
+        let after_bytes = fs::read(&source_path).expect("after bytes");
+        let after_file =
+            list_entity_files(&database_path, Some("entity-1")).expect("files")[0].clone();
+        let events = list_app_events(&database_path, 20).expect("events");
+
+        assert!(error.contains("No runtime stage state exists"));
+        assert_eq!(after_bytes, original_bytes);
+        assert_eq!(after_file.checksum, file.checksum);
+        assert_eq!(after_file.file_mtime, file.file_mtime);
+        assert!(events
+            .iter()
+            .any(|event| event.code == "entity_file_json_edit_rejected"));
     }
 }

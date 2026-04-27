@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 
-import type { EntityFileRecord } from "../../types/domain";
+import type { EntityFileAllowedActions, EntityFileRecord } from "../../types/domain";
 
 interface EntityJsonPanelProps {
   selectedFile: EntityFileRecord | null;
   selectedJson: string | null;
+  selectedFileActions: EntityFileAllowedActions | null;
   isSaving: boolean;
   onSave: (payloadJson: string, metaJson: string, comment: string) => Promise<void>;
 }
@@ -16,6 +17,7 @@ function pretty(value: unknown) {
 export function EntityJsonPanel({
   selectedFile,
   selectedJson,
+  selectedFileActions,
   isSaving,
   onSave,
 }: EntityJsonPanelProps) {
@@ -32,6 +34,12 @@ export function EntityJsonPanel({
   const [metaText, setMetaText] = useState("{}");
   const [comment, setComment] = useState("");
   const [parseError, setParseError] = useState<string | null>(null);
+  const canEditBusinessJson = Boolean(
+    selectedFile && selectedFileActions?.can_edit_business_json,
+  );
+  const policyReason =
+    selectedFileActions?.reasons.find((reason) => reason.trim().length > 0) ??
+    (!selectedFile ? "Select a file instance to edit JSON." : null);
 
   useEffect(() => {
     setIsEditing(false);
@@ -43,6 +51,10 @@ export function EntityJsonPanel({
 
   async function handleSave() {
     setParseError(null);
+    if (!canEditBusinessJson) {
+      setParseError(policyReason ?? "Business JSON editing is disabled for this file.");
+      return;
+    }
     try {
       const payload = JSON.parse(payloadText);
       const meta = JSON.parse(metaText);
@@ -73,12 +85,15 @@ export function EntityJsonPanel({
         <button
           type="button"
           className="button secondary"
-          disabled={!selectedFile || !selectedFile.file_exists || isSaving}
+          disabled={!canEditBusinessJson || isSaving}
           onClick={() => setIsEditing((value) => !value)}
         >
           {isEditing ? "Cancel edit" : "Edit payload/meta"}
         </button>
       </div>
+      {selectedFile && !canEditBusinessJson && policyReason ? (
+        <p className="muted">{policyReason}</p>
+      ) : null}
       {!selectedFile ? (
         <p className="empty-text">Select a file instance to inspect JSON.</p>
       ) : selectedJson ? (
@@ -111,7 +126,12 @@ export function EntityJsonPanel({
             </div>
             {parseError ? <p className="error-text">{parseError}</p> : null}
             <div className="button-row">
-              <button type="button" className="button primary" disabled={isSaving} onClick={() => void handleSave()}>
+              <button
+                type="button"
+                className="button primary"
+                disabled={isSaving || !canEditBusinessJson}
+                onClick={() => void handleSave()}
+              >
                 {isSaving ? "Saving..." : "Save"}
               </button>
               <button type="button" className="button secondary" disabled={isSaving} onClick={() => setIsEditing(false)}>
@@ -128,4 +148,3 @@ export function EntityJsonPanel({
     </section>
   );
 }
-

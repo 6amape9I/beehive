@@ -99,6 +99,89 @@ pub struct PipelineConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectConfigDraft {
+    pub name: String,
+    pub workdir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeConfigDraft {
+    pub scan_interval_sec: i64,
+    pub max_parallel_tasks: i64,
+    pub stuck_task_timeout_sec: i64,
+    pub request_timeout_sec: i64,
+    pub file_stability_delay_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageDefinitionDraft {
+    pub id: String,
+    pub input_folder: String,
+    pub output_folder: String,
+    pub workflow_url: String,
+    pub max_attempts: i64,
+    pub retry_delay_sec: i64,
+    pub next_stage: Option<String>,
+    pub original_stage_id: Option<String>,
+    pub is_new: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineConfigDraft {
+    pub project: ProjectConfigDraft,
+    pub runtime: RuntimeConfigDraft,
+    pub stages: Vec<StageDefinitionDraft>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageUsageSummary {
+    pub stage_id: String,
+    pub is_active: bool,
+    pub entity_count: u64,
+    pub entity_file_count: u64,
+    pub stage_state_count: u64,
+    pub run_count: u64,
+    pub last_seen_in_config_at: Option<String>,
+    pub archived_at: Option<String>,
+    pub can_remove_from_config: bool,
+    pub can_rename: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineEditorState {
+    pub config: Option<PipelineConfig>,
+    pub draft: Option<PipelineConfigDraft>,
+    pub yaml_text: String,
+    pub yaml_preview: String,
+    pub validation: ConfigValidationResult,
+    pub stage_usages: Vec<StageUsageSummary>,
+    pub loaded_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineEditorStateResult {
+    pub state: Option<PipelineEditorState>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidatePipelineConfigDraftResult {
+    pub validation: ConfigValidationResult,
+    pub normalized_config: Option<PipelineConfig>,
+    pub yaml_preview: Option<String>,
+    pub stage_usages: Vec<StageUsageSummary>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavePipelineConfigResult {
+    pub state: Option<PipelineEditorState>,
+    pub backup_path: Option<String>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkdirHealthSeverity {
     Info,
@@ -327,6 +410,15 @@ pub struct EntityStageAllowedActions {
     pub can_reset_to_pending: bool,
     pub can_skip: bool,
     pub can_run_this_stage: bool,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityFileAllowedActions {
+    pub entity_file_id: i64,
+    pub can_edit_business_json: bool,
+    pub can_open_file: bool,
+    pub can_open_folder: bool,
     pub reasons: Vec<String>,
 }
 
@@ -595,6 +687,7 @@ pub struct EntityDetailPayload {
     pub latest_json_preview: String,
     pub selected_file_json: Option<String>,
     pub allowed_actions: Vec<EntityStageAllowedActions>,
+    pub file_allowed_actions: Vec<EntityFileAllowedActions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

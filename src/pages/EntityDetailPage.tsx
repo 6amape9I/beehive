@@ -51,6 +51,14 @@ export function EntityDetailPage() {
       null
     );
   }, [detail, selectedFileId]);
+  const selectedFileActions = useMemo(() => {
+    if (!detail || !selectedFile) return null;
+    return (
+      detail.file_allowed_actions.find(
+        (actions) => actions.entity_file_id === selectedFile.id,
+      ) ?? null
+    );
+  }, [detail, selectedFile]);
 
   const loadDetail = useCallback(
     async (fileId = selectedFileId) => {
@@ -231,6 +239,7 @@ export function EntityDetailPage() {
           />
           <EntityFileInstances
             files={detail.files}
+            fileAllowedActions={detail.file_allowed_actions}
             selectedFileId={selectedFile?.id ?? null}
             loadingFileAction={loadingFileAction}
             onSelectFile={(fileId) => void handleSelectFile(fileId)}
@@ -240,6 +249,7 @@ export function EntityDetailPage() {
           <EntityJsonPanel
             selectedFile={selectedFile}
             selectedJson={detail.selected_file_json}
+            selectedFileActions={selectedFileActions}
             isSaving={isSavingJson}
             onSave={handleSaveJson}
           />

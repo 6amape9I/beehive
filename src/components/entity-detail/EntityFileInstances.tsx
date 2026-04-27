@@ -1,9 +1,10 @@
 import { formatDateTime, shortChecksum } from "../../lib/formatters";
-import type { EntityFileRecord } from "../../types/domain";
+import type { EntityFileAllowedActions, EntityFileRecord } from "../../types/domain";
 import { StatusBadge } from "../StatusBadge";
 
 interface EntityFileInstancesProps {
   files: EntityFileRecord[];
+  fileAllowedActions: EntityFileAllowedActions[];
   selectedFileId: number | null;
   loadingFileAction: string | null;
   onSelectFile: (fileId: number) => void;
@@ -13,6 +14,7 @@ interface EntityFileInstancesProps {
 
 export function EntityFileInstances({
   files,
+  fileAllowedActions,
   selectedFileId,
   loadingFileAction,
   onSelectFile,
@@ -42,12 +44,16 @@ export function EntityFileInstances({
                 <th>Size</th>
                 <th>Modified</th>
                 <th>Managed copy</th>
+                <th>Edit</th>
                 <th>Open</th>
               </tr>
             </thead>
             <tbody>
               {files.map((file) => {
                 const busy = loadingFileAction?.endsWith(`:${file.id}`) ?? false;
+                const actions = fileAllowedActions.find(
+                  (item) => item.entity_file_id === file.id,
+                );
                 return (
                   <tr key={file.id} className={selectedFileId === file.id ? "selected-row" : ""}>
                     <td>
@@ -80,12 +86,15 @@ export function EntityFileInstances({
                     <td>{file.file_size}</td>
                     <td>{formatDateTime(file.file_mtime)}</td>
                     <td>{file.is_managed_copy ? "Yes" : "No"}</td>
+                    <td title={actions?.reasons.join(" ")}>
+                      {actions?.can_edit_business_json ? "Allowed" : "Locked"}
+                    </td>
                     <td>
                       <div className="button-row">
                         <button
                           type="button"
                           className="button secondary"
-                          disabled={busy || !file.file_exists}
+                          disabled={busy || !(actions?.can_open_file ?? file.file_exists)}
                           onClick={() => onOpenFile(file.id)}
                         >
                           File
@@ -93,7 +102,7 @@ export function EntityFileInstances({
                         <button
                           type="button"
                           className="button secondary"
-                          disabled={busy}
+                          disabled={busy || actions?.can_open_folder === false}
                           onClick={() => onOpenFolder(file.id)}
                         >
                           Folder
@@ -110,4 +119,3 @@ export function EntityFileInstances({
     </section>
   );
 }
-

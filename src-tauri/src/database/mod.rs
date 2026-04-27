@@ -9,17 +9,21 @@ use serde_json::{json, Value};
 
 use crate::domain::{
     AppEventLevel, AppEventRecord, ConfigValidationIssue, DatabaseState, EntityDetailPayload,
-    EntityFileRecord, EntityFilters, EntityListQuery, EntityRecord, EntityStageAllowedActions,
-    EntityStageStateRecord, EntityTableRow, EntityTimelineItem, EntityValidationStatus,
-    InvalidDiscoveryRecord, PipelineConfig, RuntimeSummary, StageDefinition, StageRecord,
-    StageRunRecord, StageStatus, StatusCount, WorkspaceExplorerResult, WorkspaceFileRecord,
-    WorkspaceStageGroup,
+    EntityFileRecord, EntityFilters, EntityListQuery, EntityRecord, EntityStageStateRecord,
+    EntityTableRow, EntityTimelineItem, EntityValidationStatus, InvalidDiscoveryRecord,
+    PipelineConfig, RuntimeSummary, StageDefinition, StageRecord, StageRunRecord, StageStatus,
+    StatusCount, WorkspaceExplorerResult, WorkspaceFileRecord, WorkspaceStageGroup,
 };
 use crate::state_machine::{
     parse_status as parse_runtime_status, status_value as runtime_status_value,
     validate_transition, RuntimeTransitionReason,
 };
 use crate::workdir::path_string;
+
+pub(crate) mod entities;
+pub(crate) use entities::{
+    evaluate_entity_file_allowed_actions, record_entity_file_json_edit_rejected,
+};
 
 const SCHEMA_VERSION: u32 = 4;
 
@@ -118,9 +122,9 @@ struct StageStateTransitionContext {
     stage_id: String,
 }
 
-struct StageStateIdentity {
-    id: i64,
-    status: String,
+pub(crate) struct StageStateIdentity {
+    pub(crate) id: i64,
+    pub(crate) status: String,
 }
 
 pub fn bootstrap_database(path: &Path, config: &PipelineConfig) -> Result<DatabaseState, String> {
@@ -434,7 +438,8 @@ pub fn get_entity_detail_with_selection(
         })
         .or_else(|| files.first());
     let selected_file_json = selected_file.map(build_full_file_json).transpose()?;
-    let allowed_actions = build_allowed_actions(&stage_states);
+    let allowed_actions = entities::build_stage_allowed_actions(&stage_states);
+    let file_allowed_actions = entities::build_file_allowed_actions(&files, &stage_states);
 
     Ok(Some(EntityDetailPayload {
         entity,
@@ -445,6 +450,7 @@ pub fn get_entity_detail_with_selection(
         latest_json_preview: json_preview,
         selected_file_json,
         allowed_actions,
+        file_allowed_actions,
     }))
 }
 
@@ -3316,52 +3322,6 @@ fn timeline_item_from_state(state: &EntityStageStateRecord) -> EntityTimelineIte
     }
 }
 
-fn build_allowed_actions(
-    stage_states: &[EntityStageStateRecord],
-) -> Vec<EntityStageAllowedActions> {
-    stage_states
-        .iter()
-        .map(|state| {
-            let mut reasons = Vec::new();
-            let status = state.status.as_str();
-            let active = !matches!(status, "queued" | "in_progress" | "done");
-            if !active {
-                reasons.push(format!("Status '{}' is not manually actionable.", status));
-            }
-            let can_retry_now = matches!(status, "pending" | "retry_wait");
-            let can_reset_to_pending =
-                matches!(status, "failed" | "blocked" | "skipped" | "retry_wait");
-            let can_skip = matches!(status, "pending" | "retry_wait");
-            let can_run_this_stage = can_retry_now;
-
-            if can_retry_now && status == "retry_wait" {
-                reasons.push(
-                    "Manual retry may bypass next_retry_at for operator debugging.".to_string(),
-                );
-            }
-            if can_reset_to_pending {
-                reasons.push(
-                    "Reset keeps stage_runs history and clears retry/error fields.".to_string(),
-                );
-            }
-            if can_skip {
-                reasons.push(
-                    "Skip does not create a copy, advance the entity, or call n8n.".to_string(),
-                );
-            }
-
-            EntityStageAllowedActions {
-                stage_id: state.stage_id.clone(),
-                can_retry_now,
-                can_reset_to_pending,
-                can_skip,
-                can_run_this_stage,
-                reasons,
-            }
-        })
-        .collect()
-}
-
 fn ensure_state_transition(
     connection: &Connection,
     state_id: i64,
@@ -3395,7 +3355,7 @@ fn ensure_state_transition(
     Ok(context)
 }
 
-fn find_stage_state_identity(
+pub(crate) fn find_stage_state_identity(
     connection: &Connection,
     entity_id: &str,
     stage_id: &str,
@@ -4332,6 +4292,13 @@ mod tests {
             .expect("actions");
         assert!(actions.can_retry_now);
         assert!(actions.can_skip);
+        let file_actions = detail
+            .file_allowed_actions
+            .iter()
+            .find(|action| action.entity_file_id == file.id)
+            .expect("file actions");
+        assert!(file_actions.can_edit_business_json);
+        assert!(file_actions.can_open_file);
     }
 
     #[test]

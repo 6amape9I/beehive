@@ -110,6 +110,38 @@ Runtime also supports:
 
 `workflow_url` must come from `pipeline.yaml`. Do not hardcode real n8n webhook URLs into application code. The known development n8n production webhook may be used manually or in docs as an example, but automated tests use local mock HTTP servers.
 
+## Stage Editor
+
+Stage 7 adds an operator UI for editing `pipeline.yaml` from the desktop app.
+
+The editor uses a draft workflow:
+
+```text
+load pipeline.yaml -> edit draft -> validate -> save atomically -> sync SQLite stages
+```
+
+Save behavior:
+
+- no YAML writes happen on keystroke;
+- invalid drafts are rejected before write;
+- the previous `pipeline.yaml` is moved to a timestamped backup;
+- the new YAML is written through a same-directory temp file and rename;
+- SQLite `stages` is synchronized after save;
+- missing active stage input/output directories are provisioned;
+- `pipeline_config_saved` is recorded in app events.
+
+Stage rules:
+
+- saved stage IDs are immutable in Stage 7;
+- new draft stage IDs are editable until saved;
+- removing a stage removes it from active YAML config only;
+- removed stages become inactive/archived in SQLite;
+- historical entity files, stage states, and stage runs are not deleted;
+- terminal stages may omit `output_folder`;
+- non-terminal stages with `next_stage` require `output_folder`.
+
+Stage Editor does not call n8n, manage n8n workflows, move JSON files, delete runtime history, or provide a visual graph builder.
+
 ## JSON File Requirements
 
 Eligible files must be:
@@ -217,6 +249,21 @@ On success:
 For terminal stages with no `next_stage`, success marks the source state `done` and does not create a target file.
 
 Reconciliation scans do not overwrite SQLite execution state from source JSON. For example, if a successful run leaves the source JSON with `"status": "pending"`, the SQLite stage state remains `done` after the next scan.
+
+## Entity Detail JSON Editing
+
+Stage 6 exposes a read/write editor for business JSON only:
+
+- editable fields are `payload` and `meta`;
+- `id`, runtime status, attempts, retry fields, and stage state are not edited through JSON;
+- SQLite `entity_stage_states` remains the runtime source of truth.
+
+The backend disables business JSON edits when the related runtime state is active or complete:
+
+- locked: `queued`, `in_progress`, `done`;
+- editable: `pending`, `retry_wait`, `failed`, `blocked`, `skipped`.
+
+If a file has no matching runtime stage state, run `Scan workspace` before editing. Completed artifacts should not be edited silently; use an explicit reset/manual workflow when correction is required.
 
 On failure:
 

@@ -10,15 +10,19 @@ import type {
   FileCopyResult,
   ManualEntityStageActionResult,
   OpenEntityPathResult,
+  PipelineConfigDraft,
+  PipelineEditorStateResult,
   ReconcileStuckTasksResult,
   RunDueTasksResult,
   RunEntityStageResult,
   RuntimeSummaryResult,
   SaveEntityFileJsonResult,
+  SavePipelineConfigResult,
   ScanWorkspaceResult,
   StageDirectoryProvisionResult,
   StageListResult,
   StageRunsResult,
+  ValidatePipelineConfigDraftResult,
   WorkspaceExplorerResult,
 } from "../types/domain";
 
@@ -40,6 +44,32 @@ export async function getRuntimeSummary(path: string): Promise<RuntimeSummaryRes
 
 export async function listStages(path: string): Promise<StageListResult> {
   return invoke<StageListResult>("list_stages", { path });
+}
+
+export async function getPipelineEditorState(path: string): Promise<PipelineEditorStateResult> {
+  return invoke<PipelineEditorStateResult>("get_pipeline_editor_state", { path });
+}
+
+export async function validatePipelineConfigDraft(
+  path: string,
+  draft: PipelineConfigDraft,
+): Promise<ValidatePipelineConfigDraftResult> {
+  return invoke<ValidatePipelineConfigDraftResult>("validate_pipeline_config_draft", {
+    path,
+    draft,
+  });
+}
+
+export async function savePipelineConfig(
+  path: string,
+  draft: PipelineConfigDraft,
+  operatorComment?: string | null,
+): Promise<SavePipelineConfigResult> {
+  return invoke<SavePipelineConfigResult>("save_pipeline_config", {
+    path,
+    draft,
+    operatorComment,
+  });
 }
 
 export async function listEntities(

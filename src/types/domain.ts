@@ -55,6 +55,80 @@ export interface PipelineConfig {
   stages: StageDefinition[];
 }
 
+export interface ProjectConfigDraft {
+  name: string;
+  workdir: string;
+}
+
+export interface RuntimeConfigDraft {
+  scan_interval_sec: number;
+  max_parallel_tasks: number;
+  stuck_task_timeout_sec: number;
+  request_timeout_sec: number;
+  file_stability_delay_ms: number;
+}
+
+export interface StageDefinitionDraft {
+  id: string;
+  input_folder: string;
+  output_folder: string;
+  workflow_url: string;
+  max_attempts: number;
+  retry_delay_sec: number;
+  next_stage: string | null;
+  original_stage_id: string | null;
+  is_new: boolean;
+}
+
+export interface PipelineConfigDraft {
+  project: ProjectConfigDraft;
+  runtime: RuntimeConfigDraft;
+  stages: StageDefinitionDraft[];
+}
+
+export interface StageUsageSummary {
+  stage_id: string;
+  is_active: boolean;
+  entity_count: number;
+  entity_file_count: number;
+  stage_state_count: number;
+  run_count: number;
+  last_seen_in_config_at: string | null;
+  archived_at: string | null;
+  can_remove_from_config: boolean;
+  can_rename: boolean;
+  warnings: string[];
+}
+
+export interface PipelineEditorState {
+  config: PipelineConfig | null;
+  draft: PipelineConfigDraft | null;
+  yaml_text: string;
+  yaml_preview: string;
+  validation: ConfigValidationResult;
+  stage_usages: StageUsageSummary[];
+  loaded_at: string;
+}
+
+export interface PipelineEditorStateResult {
+  state: PipelineEditorState | null;
+  errors: CommandErrorInfo[];
+}
+
+export interface ValidatePipelineConfigDraftResult {
+  validation: ConfigValidationResult;
+  normalized_config: PipelineConfig | null;
+  yaml_preview: string | null;
+  stage_usages: StageUsageSummary[];
+  errors: CommandErrorInfo[];
+}
+
+export interface SavePipelineConfigResult {
+  state: PipelineEditorState | null;
+  backup_path: string | null;
+  errors: CommandErrorInfo[];
+}
+
 export interface WorkdirHealthIssue {
   severity: WorkdirHealthSeverity;
   code: string;
@@ -260,6 +334,14 @@ export interface EntityStageAllowedActions {
   can_reset_to_pending: boolean;
   can_skip: boolean;
   can_run_this_stage: boolean;
+  reasons: string[];
+}
+
+export interface EntityFileAllowedActions {
+  entity_file_id: number;
+  can_edit_business_json: boolean;
+  can_open_file: boolean;
+  can_open_folder: boolean;
   reasons: string[];
 }
 
@@ -493,6 +575,7 @@ export interface EntityDetailPayload {
   latest_json_preview: string;
   selected_file_json: string | null;
   allowed_actions: EntityStageAllowedActions[];
+  file_allowed_actions: EntityFileAllowedActions[];
 }
 
 export interface EntityDetailResult {
