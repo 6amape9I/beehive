@@ -690,6 +690,74 @@ textarea:focus {
   font-size: 16px;
 }
 
+.workspace-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(360px, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.workspace-stage-tree {
+  display: grid;
+  gap: 16px;
+}
+
+.workspace-stage-panel summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.workspace-stage-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.workspace-stage-panel summary > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.workspace-stage-content {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr);
+  gap: 18px;
+  margin-top: 16px;
+}
+
+.workspace-stage-content h3,
+.workspace-trail-panel h3 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.workspace-file-table {
+  min-width: 1240px;
+}
+
+.workspace-toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.workspace-toggle-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #33414d;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.workspace-trail-panel {
+  position: sticky;
+  top: 18px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -737,6 +805,8 @@ th {
   .path-control,
   .filter-grid,
   .explorer-split,
+  .workspace-layout,
+  .workspace-stage-content,
   .summary-card-grid,
   .dashboard-split,
   .stage-editor-form-grid {

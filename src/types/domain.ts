@@ -604,17 +604,30 @@ export interface AppEventsResult {
   errors: CommandErrorInfo[];
 }
 
-export interface WorkspaceFileRecord {
-  file_id: number;
+export interface WorkspaceFileNode {
+  entity_file_id: number;
   entity_id: string;
+  stage_id: string;
   file_name: string;
   file_path: string;
-  status: string;
-  validation_status: EntityValidationStatus;
-  updated_at: string;
   file_exists: boolean;
   missing_since: string | null;
   is_managed_copy: boolean;
+  copy_source_file_id: number | null;
+  copy_source_entity_id: string | null;
+  copy_source_stage_id: string | null;
+  runtime_status: string | null;
+  file_status: string;
+  validation_status: EntityValidationStatus;
+  validation_errors: ConfigValidationIssue[];
+  current_stage: string | null;
+  next_stage: string | null;
+  checksum: string;
+  file_size: number;
+  file_mtime: string;
+  updated_at: string;
+  can_open_file: boolean;
+  can_open_folder: boolean;
 }
 
 export interface InvalidDiscoveryRecord {
@@ -626,14 +639,80 @@ export interface InvalidDiscoveryRecord {
   created_at: string;
 }
 
-export interface WorkspaceStageGroup {
-  stage: StageRecord;
-  files: WorkspaceFileRecord[];
+export interface WorkspaceStageTreeCounters {
+  registered_files: number;
+  present_files: number;
+  missing_files: number;
+  invalid_files: number;
+  managed_copies: number;
+  pending: number;
+  queued: number;
+  in_progress: number;
+  retry_wait: number;
+  done: number;
+  failed: number;
+  blocked: number;
+  skipped: number;
+}
+
+export interface WorkspaceStageTree {
+  stage_id: string;
+  input_folder: string;
+  output_folder: string | null;
+  workflow_url: string | null;
+  next_stage: string | null;
+  is_active: boolean;
+  archived_at: string | null;
+  folder_path: string;
+  folder_exists: boolean;
+  files: WorkspaceFileNode[];
   invalid_files: InvalidDiscoveryRecord[];
+  counters: WorkspaceStageTreeCounters;
+}
+
+export interface WorkspaceEntityTrailNode {
+  entity_file_id: number;
+  stage_id: string;
+  file_name: string;
+  file_path: string;
+  file_exists: boolean;
+  runtime_status: string | null;
+  is_managed_copy: boolean;
+}
+
+export interface WorkspaceEntityTrailEdge {
+  from_entity_file_id: number;
+  to_entity_file_id: number;
+  relation: string;
+  created_child_path: string | null;
+}
+
+export interface WorkspaceEntityTrail {
+  entity_id: string;
+  file_count: number;
+  stages: WorkspaceEntityTrailNode[];
+  edges: WorkspaceEntityTrailEdge[];
+}
+
+export interface WorkspaceExplorerTotals {
+  stages_total: number;
+  active_stages_total: number;
+  inactive_stages_total: number;
+  entities_total: number;
+  registered_files_total: number;
+  present_files_total: number;
+  missing_files_total: number;
+  invalid_files_total: number;
+  managed_copies_total: number;
 }
 
 export interface WorkspaceExplorerResult {
-  groups: WorkspaceStageGroup[];
+  generated_at: string;
+  workdir_path: string;
+  last_scan_at: string | null;
+  stages: WorkspaceStageTree[];
+  entity_trails: WorkspaceEntityTrail[];
+  totals: WorkspaceExplorerTotals;
   errors: CommandErrorInfo[];
 }
 

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
 use crate::domain::{
@@ -12,7 +12,9 @@ use crate::domain::{
     EntityFileRecord, EntityFilters, EntityListQuery, EntityRecord, EntityStageStateRecord,
     EntityTableRow, EntityTimelineItem, EntityValidationStatus, InvalidDiscoveryRecord,
     PipelineConfig, RuntimeSummary, StageDefinition, StageRecord, StageRunRecord, StageStatus,
-    StatusCount, WorkspaceExplorerResult, WorkspaceFileRecord, WorkspaceStageGroup,
+    StatusCount, WorkspaceEntityTrail, WorkspaceEntityTrailEdge, WorkspaceEntityTrailNode,
+    WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceFileNode, WorkspaceStageTree,
+    WorkspaceStageTreeCounters,
 };
 use crate::state_machine::{
     parse_status as parse_runtime_status, status_value as runtime_status_value,
@@ -166,6 +168,23 @@ pub fn open_connection(path: &Path) -> Result<Connection, String> {
     connection
         .execute_batch("PRAGMA foreign_keys = ON;")
         .map_err(|error| format!("Failed to enable SQLite foreign keys: {error}"))?;
+    Ok(connection)
+}
+
+fn open_readonly_connection(path: &Path) -> Result<Connection, String> {
+    if !path.exists() {
+        return Err(format!(
+            "SQLite database '{}' does not exist.",
+            path.display()
+        ));
+    }
+    let connection =
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| {
+            format!(
+                "Failed to open SQLite database '{}': {error}",
+                path.display()
+            )
+        })?;
     Ok(connection)
 }
 
@@ -631,95 +650,429 @@ pub fn skip_entity_stage(
     )
 }
 
-pub fn get_workspace_explorer(path: &Path) -> Result<WorkspaceExplorerResult, String> {
-    let connection = open_connection(path)?;
+pub fn get_workspace_explorer(
+    workdir_path: &Path,
+    database_path: &Path,
+) -> Result<WorkspaceExplorerResult, String> {
+    let connection = open_readonly_connection(database_path)?;
+    let generated_at = Utc::now().to_rfc3339();
     let stages = load_stage_records_from_connection(&connection)?;
-    let mut files_by_stage: HashMap<String, Vec<WorkspaceFileRecord>> = HashMap::new();
-
-    for file in load_entity_files_from_connection(&connection, None)? {
-        files_by_stage
-            .entry(file.stage_id.clone())
+    let stage_order: HashMap<String, usize> = stages
+        .iter()
+        .enumerate()
+        .map(|(index, stage)| (stage.id.clone(), index))
+        .collect();
+    let files = load_entity_files_from_connection(&connection, None)?;
+    let stage_states = load_all_stage_states_from_connection(&connection)?;
+    let state_by_file_id: HashMap<i64, EntityStageStateRecord> = stage_states
+        .iter()
+        .filter_map(|state| {
+            state
+                .file_instance_id
+                .map(|file_id| (file_id, state.clone()))
+        })
+        .collect();
+    let mut state_by_stage: HashMap<String, Vec<EntityStageStateRecord>> = HashMap::new();
+    let mut created_child_by_source_file: HashMap<i64, String> = HashMap::new();
+    for state in &stage_states {
+        state_by_stage
+            .entry(state.stage_id.clone())
             .or_default()
-            .push(WorkspaceFileRecord {
-                file_id: file.id,
-                entity_id: file.entity_id,
-                file_name: file.file_name,
-                file_path: file.file_path,
-                status: file.status,
-                validation_status: file.validation_status,
-                updated_at: file.updated_at,
-                file_exists: file.file_exists,
-                missing_since: file.missing_since,
-                is_managed_copy: file.is_managed_copy,
-            });
-    }
-
-    let last_scan_id = load_setting(&connection, "last_scan_id")?;
-    let mut invalid_by_stage: HashMap<String, Vec<InvalidDiscoveryRecord>> = HashMap::new();
-    if let Some(scan_id) = last_scan_id {
-        for event in load_app_events_from_connection(&connection, 250)? {
-            let is_relevant = matches!(
-                event.code.as_str(),
-                "invalid_json_file"
-                    | "missing_entity_id"
-                    | "missing_payload"
-                    | "duplicate_entity_in_stage"
-                    | "entity_id_changed_for_path"
-                    | "file_metadata_unavailable"
-                    | "file_read_failed"
-            );
-            if !is_relevant {
-                continue;
-            }
-
-            let Some(context) = event.context.as_ref() else {
-                continue;
-            };
-            let Some(event_scan_id) = context.get("scan_id").and_then(Value::as_str) else {
-                continue;
-            };
-            if event_scan_id != scan_id {
-                continue;
-            }
-            let Some(stage_id) = context.get("stage_id").and_then(Value::as_str) else {
-                continue;
-            };
-
-            invalid_by_stage
-                .entry(stage_id.to_string())
-                .or_default()
-                .push(InvalidDiscoveryRecord {
-                    stage_id: Some(stage_id.to_string()),
-                    file_name: context
-                        .get("file_name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    file_path: context
-                        .get("file_path")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    code: event.code,
-                    message: event.message,
-                    created_at: event.created_at,
-                });
+            .push(state.clone());
+        if let (Some(file_id), Some(child_path)) =
+            (state.file_instance_id, state.created_child_path.as_ref())
+        {
+            created_child_by_source_file.insert(file_id, child_path.clone());
         }
     }
 
-    let groups = stages
+    let mut file_lookup: HashMap<i64, EntityFileRecord> = HashMap::new();
+    for file in &files {
+        file_lookup.insert(file.id, file.clone());
+    }
+
+    let last_scan_at = load_setting(&connection, "last_scan_completed_at")?;
+    let mut invalid_by_stage = load_invalid_discovery_records_for_latest_scan(&connection)?;
+    let mut files_by_stage: HashMap<String, Vec<WorkspaceFileNode>> = HashMap::new();
+
+    for file in &files {
+        let absolute_path = workdir_path.join(&file.file_path);
+        let parent_exists = absolute_path
+            .parent()
+            .map(|parent| parent.exists())
+            .unwrap_or(false);
+        let source_file = file
+            .copy_source_file_id
+            .and_then(|source_file_id| file_lookup.get(&source_file_id));
+        let runtime_status = state_by_file_id
+            .get(&file.id)
+            .map(|state| state.status.clone())
+            .or_else(|| {
+                stage_states
+                    .iter()
+                    .find(|state| {
+                        state.entity_id == file.entity_id && state.stage_id == file.stage_id
+                    })
+                    .map(|state| state.status.clone())
+            });
+
+        files_by_stage
+            .entry(file.stage_id.clone())
+            .or_default()
+            .push(WorkspaceFileNode {
+                entity_file_id: file.id,
+                entity_id: file.entity_id.clone(),
+                stage_id: file.stage_id.clone(),
+                file_name: file.file_name.clone(),
+                file_path: file.file_path.clone(),
+                file_exists: file.file_exists,
+                missing_since: file.missing_since.clone(),
+                is_managed_copy: file.is_managed_copy,
+                copy_source_file_id: file.copy_source_file_id,
+                copy_source_entity_id: source_file.map(|source| source.entity_id.clone()),
+                copy_source_stage_id: source_file.map(|source| source.stage_id.clone()),
+                runtime_status,
+                file_status: file.status.clone(),
+                validation_status: file.validation_status.clone(),
+                validation_errors: file.validation_errors.clone(),
+                current_stage: file.current_stage.clone(),
+                next_stage: file.next_stage.clone(),
+                checksum: file.checksum.clone(),
+                file_size: file.file_size,
+                file_mtime: file.file_mtime.clone(),
+                updated_at: file.updated_at.clone(),
+                can_open_file: file.file_exists && absolute_path.exists(),
+                can_open_folder: parent_exists,
+            });
+    }
+
+    let mut totals = WorkspaceExplorerTotals {
+        stages_total: stages.len() as u64,
+        active_stages_total: stages.iter().filter(|stage| stage.is_active).count() as u64,
+        inactive_stages_total: stages.iter().filter(|stage| !stage.is_active).count() as u64,
+        entities_total: query_count(&connection, "SELECT COUNT(*) FROM entities", [])?,
+        registered_files_total: files.len() as u64,
+        present_files_total: files.iter().filter(|file| file.file_exists).count() as u64,
+        missing_files_total: files.iter().filter(|file| !file.file_exists).count() as u64,
+        invalid_files_total: 0,
+        managed_copies_total: files.iter().filter(|file| file.is_managed_copy).count() as u64,
+    };
+
+    let stage_trees = stages
         .into_iter()
-        .map(|stage| WorkspaceStageGroup {
-            invalid_files: invalid_by_stage.remove(&stage.id).unwrap_or_default(),
-            files: files_by_stage.remove(&stage.id).unwrap_or_default(),
-            stage,
+        .map(|stage| {
+            let stage_files = files_by_stage.remove(&stage.id).unwrap_or_default();
+            let invalid_files = invalid_by_stage.remove(&stage.id).unwrap_or_default();
+            totals.invalid_files_total += invalid_files.len() as u64;
+            let counters = build_workspace_stage_counters(
+                &stage_files,
+                state_by_stage
+                    .get(&stage.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                invalid_files.len() as u64,
+            );
+            let folder_path = workdir_path.join(&stage.input_folder);
+            WorkspaceStageTree {
+                stage_id: stage.id,
+                input_folder: stage.input_folder,
+                output_folder: non_empty_string(stage.output_folder),
+                workflow_url: non_empty_string(stage.workflow_url),
+                next_stage: stage.next_stage,
+                is_active: stage.is_active,
+                archived_at: stage.archived_at,
+                folder_path: path_string(&folder_path),
+                folder_exists: folder_path.exists(),
+                files: stage_files,
+                invalid_files,
+                counters,
+            }
         })
         .collect();
 
+    let entity_trails = build_workspace_entity_trails(
+        &files,
+        &state_by_file_id,
+        &stage_order,
+        &created_child_by_source_file,
+    );
+
     Ok(WorkspaceExplorerResult {
-        groups,
+        generated_at,
+        workdir_path: path_string(workdir_path),
+        last_scan_at,
+        stages: stage_trees,
+        entity_trails,
+        totals,
         errors: Vec::new(),
     })
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn build_workspace_stage_counters(
+    files: &[WorkspaceFileNode],
+    states: &[EntityStageStateRecord],
+    invalid_files: u64,
+) -> WorkspaceStageTreeCounters {
+    let mut counters = WorkspaceStageTreeCounters {
+        registered_files: files.len() as u64,
+        present_files: files.iter().filter(|file| file.file_exists).count() as u64,
+        missing_files: files.iter().filter(|file| !file.file_exists).count() as u64,
+        invalid_files,
+        managed_copies: files.iter().filter(|file| file.is_managed_copy).count() as u64,
+        ..WorkspaceStageTreeCounters::default()
+    };
+
+    for state in states {
+        match state.status.as_str() {
+            "pending" => counters.pending += 1,
+            "queued" => counters.queued += 1,
+            "in_progress" => counters.in_progress += 1,
+            "retry_wait" => counters.retry_wait += 1,
+            "done" => counters.done += 1,
+            "failed" => counters.failed += 1,
+            "blocked" => counters.blocked += 1,
+            "skipped" => counters.skipped += 1,
+            _ => {}
+        }
+    }
+
+    counters
+}
+
+fn load_invalid_discovery_records_for_latest_scan(
+    connection: &Connection,
+) -> Result<HashMap<String, Vec<InvalidDiscoveryRecord>>, String> {
+    let Some(scan_id) = load_setting(connection, "last_scan_id")? else {
+        return Ok(HashMap::new());
+    };
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT code, message, context_json, created_at
+            FROM app_events
+            WHERE code IN (
+                'invalid_json_file',
+                'missing_entity_id',
+                'missing_payload',
+                'duplicate_entity_in_stage',
+                'entity_id_changed_for_path',
+                'file_metadata_unavailable',
+                'file_read_failed'
+            )
+            ORDER BY created_at DESC, id DESC
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare invalid discovery event query: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| format!("Failed to query invalid discovery events: {error}"))?;
+
+    let mut by_stage: HashMap<String, Vec<InvalidDiscoveryRecord>> = HashMap::new();
+    for row in rows {
+        let (code, message, context_json, created_at) =
+            row.map_err(|error| format!("Failed to read invalid discovery event: {error}"))?;
+        let Some(context_json) = context_json else {
+            continue;
+        };
+        let context = parse_json_value(&context_json)?;
+        if context.get("scan_id").and_then(Value::as_str) != Some(scan_id.as_str()) {
+            continue;
+        }
+        let Some(stage_id) = context.get("stage_id").and_then(Value::as_str) else {
+            continue;
+        };
+
+        by_stage
+            .entry(stage_id.to_string())
+            .or_default()
+            .push(InvalidDiscoveryRecord {
+                stage_id: Some(stage_id.to_string()),
+                file_name: context
+                    .get("file_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                file_path: context
+                    .get("file_path")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                code,
+                message,
+                created_at,
+            });
+    }
+
+    Ok(by_stage)
+}
+
+fn load_all_stage_states_from_connection(
+    connection: &Connection,
+) -> Result<Vec<EntityStageStateRecord>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT
+                id,
+                entity_id,
+                stage_id,
+                file_path,
+                file_instance_id,
+                file_exists,
+                status,
+                attempts,
+                max_attempts,
+                last_error,
+                last_http_status,
+                next_retry_at,
+                last_started_at,
+                last_finished_at,
+                created_child_path,
+                discovered_at,
+                last_seen_at,
+                updated_at
+            FROM entity_stage_states
+            ORDER BY stage_id ASC, updated_at DESC, id DESC
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare workspace stage-state query: {error}"))?;
+    let rows = statement
+        .query_map([], stage_state_from_row)
+        .map_err(|error| format!("Failed to query workspace stage states: {error}"))?;
+
+    let mut states = Vec::new();
+    for row in rows {
+        states.push(row.map_err(|error| format!("Failed to read workspace stage state: {error}"))?);
+    }
+    Ok(states)
+}
+
+fn stage_state_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityStageStateRecord> {
+    Ok(EntityStageStateRecord {
+        id: row.get(0)?,
+        entity_id: row.get(1)?,
+        stage_id: row.get(2)?,
+        file_path: row.get(3)?,
+        file_instance_id: row.get(4)?,
+        file_exists: row.get::<_, i64>(5)? == 1,
+        status: row.get(6)?,
+        attempts: row.get::<_, i64>(7)? as u64,
+        max_attempts: row.get::<_, i64>(8)? as u64,
+        last_error: row.get(9)?,
+        last_http_status: row.get(10)?,
+        next_retry_at: row.get(11)?,
+        last_started_at: row.get(12)?,
+        last_finished_at: row.get(13)?,
+        created_child_path: row.get(14)?,
+        discovered_at: row.get(15)?,
+        last_seen_at: row.get(16)?,
+        updated_at: row.get(17)?,
+    })
+}
+
+fn build_workspace_entity_trails(
+    files: &[EntityFileRecord],
+    state_by_file_id: &HashMap<i64, EntityStageStateRecord>,
+    stage_order: &HashMap<String, usize>,
+    created_child_by_source_file: &HashMap<i64, String>,
+) -> Vec<WorkspaceEntityTrail> {
+    let mut files_by_entity: HashMap<String, Vec<EntityFileRecord>> = HashMap::new();
+    for file in files {
+        files_by_entity
+            .entry(file.entity_id.clone())
+            .or_default()
+            .push(file.clone());
+    }
+
+    let mut trails = Vec::new();
+    for (entity_id, mut entity_files) in files_by_entity {
+        entity_files.sort_by(|left, right| {
+            stage_order
+                .get(&left.stage_id)
+                .unwrap_or(&usize::MAX)
+                .cmp(stage_order.get(&right.stage_id).unwrap_or(&usize::MAX))
+                .then_with(|| left.updated_at.cmp(&right.updated_at))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let nodes = entity_files
+            .iter()
+            .map(|file| WorkspaceEntityTrailNode {
+                entity_file_id: file.id,
+                stage_id: file.stage_id.clone(),
+                file_name: file.file_name.clone(),
+                file_path: file.file_path.clone(),
+                file_exists: file.file_exists,
+                runtime_status: state_by_file_id
+                    .get(&file.id)
+                    .map(|state| state.status.clone()),
+                is_managed_copy: file.is_managed_copy,
+            })
+            .collect::<Vec<_>>();
+
+        let known_ids: HashSet<i64> = entity_files.iter().map(|file| file.id).collect();
+        let mut edges = Vec::new();
+        let mut edge_keys = HashSet::new();
+        for file in &entity_files {
+            if let Some(source_file_id) = file.copy_source_file_id {
+                if known_ids.contains(&source_file_id) {
+                    let key = (source_file_id, file.id);
+                    if edge_keys.insert(key) {
+                        edges.push(WorkspaceEntityTrailEdge {
+                            from_entity_file_id: source_file_id,
+                            to_entity_file_id: file.id,
+                            relation: if file.is_managed_copy {
+                                "managed_copy".to_string()
+                            } else {
+                                "copy_source".to_string()
+                            },
+                            created_child_path: created_child_by_source_file
+                                .get(&source_file_id)
+                                .cloned(),
+                        });
+                    }
+                }
+            }
+        }
+
+        for pair in entity_files.windows(2) {
+            let from = &pair[0];
+            let to = &pair[1];
+            let key = (from.id, to.id);
+            if edge_keys.insert(key) {
+                edges.push(WorkspaceEntityTrailEdge {
+                    from_entity_file_id: from.id,
+                    to_entity_file_id: to.id,
+                    relation: "same_entity_stage_sequence_inferred".to_string(),
+                    created_child_path: created_child_by_source_file.get(&from.id).cloned(),
+                });
+            }
+        }
+
+        trails.push(WorkspaceEntityTrail {
+            entity_id,
+            file_count: nodes.len() as u64,
+            stages: nodes,
+            edges,
+        });
+    }
+
+    trails.sort_by(|left, right| left.entity_id.cmp(&right.entity_id));
+    trails
 }
 
 pub(crate) fn load_active_stages_from_connection(
@@ -4299,6 +4652,206 @@ mod tests {
             .expect("file actions");
         assert!(file_actions.can_edit_business_json);
         assert!(file_actions.can_open_file);
+    }
+
+    #[test]
+    fn workspace_explorer_fresh_workdir_returns_stage_tree_with_zero_counters() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(
+            &database_path,
+            &test_config(vec![stage("incoming", Some("done")), stage("done", None)]),
+        )
+        .expect("bootstrap");
+
+        let explorer = get_workspace_explorer(&workdir, &database_path).expect("explorer");
+
+        assert_eq!(explorer.workdir_path, path_string(&workdir));
+        assert_eq!(explorer.totals.stages_total, 2);
+        assert_eq!(explorer.totals.registered_files_total, 0);
+        assert_eq!(explorer.stages.len(), 2);
+        assert!(explorer.stages.iter().all(|stage| stage.files.is_empty()));
+        assert!(explorer
+            .stages
+            .iter()
+            .all(|stage| stage.counters.registered_files == 0));
+    }
+
+    #[test]
+    fn workspace_explorer_links_present_missing_invalid_inactive_and_terminal_data() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        let mut terminal = stage("terminal", None);
+        terminal.output_folder = String::new();
+        bootstrap_database(
+            &database_path,
+            &test_config(vec![
+                stage("incoming", Some("normalize")),
+                stage("normalize", Some("terminal")),
+                terminal.clone(),
+            ]),
+        )
+        .expect("bootstrap");
+
+        let incoming_path = workdir.join("stages/incoming/entity-1.json");
+        fs::create_dir_all(incoming_path.parent().expect("parent")).expect("incoming parent");
+        fs::write(
+            &incoming_path,
+            r#"{"id":"entity-1","current_stage":"incoming","next_stage":"normalize","payload":{"value":1},"status":"pending"}"#,
+        )
+        .expect("source");
+        let normalize_path = workdir.join("stages/normalize/entity-1.json");
+        fs::create_dir_all(normalize_path.parent().expect("parent")).expect("normalize parent");
+        fs::write(
+            &normalize_path,
+            r#"{"id":"entity-1","current_stage":"normalize","next_stage":"terminal","payload":{"value":2},"meta":{"beehive":{"copy_source_stage":"incoming"}},"status":"pending"}"#,
+        )
+        .expect("managed target");
+        scan_workspace(&workdir, &database_path).expect("initial scan");
+        let connection = Connection::open(&database_path).expect("open db");
+        let source_file_id: i64 = connection
+            .query_row(
+                "SELECT id FROM entity_files WHERE entity_id = 'entity-1' AND stage_id = 'incoming'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("source file id");
+        connection
+            .execute(
+                r#"
+                UPDATE entity_files
+                SET is_managed_copy = 1, copy_source_file_id = ?1
+                WHERE entity_id = 'entity-1' AND stage_id = 'normalize'
+                "#,
+                params![source_file_id],
+            )
+            .expect("mark managed");
+        drop(connection);
+        fs::remove_file(&incoming_path).expect("remove source");
+        scan_workspace(&workdir, &database_path).expect("missing scan");
+        let invalid_path = workdir.join("stages/normalize/bad.json");
+        fs::write(&invalid_path, "{not-json").expect("invalid");
+        scan_workspace(&workdir, &database_path).expect("invalid scan");
+        let connection = Connection::open(&database_path).expect("open db");
+        connection
+            .execute(
+                r#"
+                UPDATE entity_files
+                SET is_managed_copy = 1, copy_source_file_id = ?1
+                WHERE entity_id = 'entity-1' AND stage_id = 'normalize'
+                "#,
+                params![source_file_id],
+            )
+            .expect("restore managed marker");
+        drop(connection);
+        bootstrap_database(&database_path, &test_config(vec![terminal])).expect("archive stages");
+
+        let explorer = get_workspace_explorer(&workdir, &database_path).expect("explorer");
+        let incoming = explorer
+            .stages
+            .iter()
+            .find(|stage| stage.stage_id == "incoming")
+            .expect("incoming stage");
+        let normalize = explorer
+            .stages
+            .iter()
+            .find(|stage| stage.stage_id == "normalize")
+            .expect("normalize stage");
+        let terminal_stage = explorer
+            .stages
+            .iter()
+            .find(|stage| stage.stage_id == "terminal")
+            .expect("terminal stage");
+        let trail = explorer
+            .entity_trails
+            .iter()
+            .find(|trail| trail.entity_id == "entity-1")
+            .expect("entity trail");
+
+        assert!(!incoming.is_active);
+        assert!(!normalize.is_active);
+        assert_eq!(terminal_stage.output_folder, None);
+        assert!(incoming.files.iter().any(|file| {
+            file.entity_id == "entity-1"
+                && file.stage_id == "incoming"
+                && file.runtime_status.as_deref() == Some("pending")
+                && !file.file_exists
+                && file.missing_since.is_some()
+        }));
+        assert!(normalize.files.iter().any(|file| {
+            file.entity_id == "entity-1"
+                && file.stage_id == "normalize"
+                && file.is_managed_copy
+                && file.copy_source_file_id.is_some()
+                && file.copy_source_entity_id.as_deref() == Some("entity-1")
+        }));
+        assert_eq!(normalize.invalid_files.len(), 1);
+        assert_eq!(normalize.invalid_files[0].code, "invalid_json_file");
+        assert!(incoming.counters.missing_files >= 1);
+        assert!(normalize.counters.managed_copies >= 1);
+        assert!(trail.file_count >= 2);
+        assert!(trail.stages.len() >= 2);
+        assert!(trail
+            .edges
+            .iter()
+            .any(|edge| edge.relation == "managed_copy"));
+    }
+
+    #[test]
+    fn workspace_explorer_read_model_does_not_mutate_sqlite_state() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(&database_path, &test_config(vec![stage("incoming", None)]))
+            .expect("bootstrap");
+        let source_path = workdir.join("stages/incoming/entity-1.json");
+        fs::create_dir_all(source_path.parent().expect("parent")).expect("parent");
+        fs::write(
+            &source_path,
+            r#"{"id":"entity-1","payload":{"ok":true},"status":"pending"}"#,
+        )
+        .expect("source");
+        scan_workspace(&workdir, &database_path).expect("scan");
+        let connection = Connection::open(&database_path).expect("open db");
+        connection
+            .execute(
+                "UPDATE entity_stage_states SET status = 'done', attempts = 1 WHERE entity_id = 'entity-1'",
+                [],
+            )
+            .expect("mark done");
+        let before_status: String = connection
+            .query_row(
+                "SELECT status FROM entity_stage_states WHERE entity_id = 'entity-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("before status");
+        let before_runs =
+            query_count(&connection, "SELECT COUNT(*) FROM stage_runs", []).expect("before runs");
+        drop(connection);
+
+        let explorer = get_workspace_explorer(&workdir, &database_path).expect("explorer");
+        let connection = Connection::open(&database_path).expect("open db after");
+        let after_status: String = connection
+            .query_row(
+                "SELECT status FROM entity_stage_states WHERE entity_id = 'entity-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("after status");
+        let after_runs =
+            query_count(&connection, "SELECT COUNT(*) FROM stage_runs", []).expect("after runs");
+
+        assert_eq!(before_status, "done");
+        assert_eq!(after_status, "done");
+        assert_eq!(before_runs, after_runs);
+        assert!(explorer.stages.iter().any(|stage| {
+            stage.files.iter().any(|file| {
+                file.entity_id == "entity-1" && file.runtime_status.as_deref() == Some("done")
+            })
+        }));
     }
 
     #[test]

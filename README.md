@@ -321,6 +321,27 @@ All manual runtime changes pass through the state machine and write `app_events`
 
 Open file/folder actions resolve registered entity file ids through the backend and reject unsafe paths. JSON editing is intentionally scoped to business `payload` and `meta`; `id`, runtime status, attempts, retry fields, and SQLite execution state are not editable through the JSON editor. Saves verify that the on-disk file still matches the DB snapshot before using an atomic temp-file rename.
 
+## Workspace Explorer
+
+Stage 8 expands Workspace Explorer into a read-only file tree and artifact-connectivity view.
+
+It shows:
+
+- workdir and stage folder context;
+- active and inactive stages;
+- registered JSON files from SQLite `entity_files`;
+- runtime status from SQLite `entity_stage_states`, not JSON `status`;
+- present and missing tracked files;
+- invalid files recorded by the latest manual scan;
+- managed copies and source-file relationships when known;
+- entity trails across stage folders;
+- safe `Open file` and `Open folder` actions through registered entity file ids;
+- deep links to Entity Detail with `file_id` selected.
+
+Workspace Explorer reads SQLite and selected folder metadata only. It does not edit JSON, move files, edit `pipeline.yaml`, run n8n, reconcile stuck tasks, or scan automatically. `Scan workspace` remains an explicit operator action.
+
+Currently deferred: live display of present but unregistered JSON files before a scan. Run `Scan workspace` to register or report those files through the normal reconciliation path.
+
 ## UI
 
 The app surfaces:
@@ -328,7 +349,7 @@ The app surfaces:
 - Dashboard: Stage 5 overview, stage graph, counters, active tasks, recent errors/runs, and manual operational actions
 - Entities: server-side paginated/sorted/filterable logical entity rows with attempts and last-error context
 - Entity Detail: all file instances, stage timeline, allowed manual actions, safe payload/meta JSON editor, open file/folder actions, and stage run history
-- Workspace Explorer: present/missing/invalid/managed-copy file visibility
+- Workspace Explorer: read-only stage tree, registered files, missing/invalid files, managed copies, and entity trails
 - Settings / Diagnostics: schema v4, reconciliation summary, file lifecycle and execution events
 
 ## Intentionally Deferred

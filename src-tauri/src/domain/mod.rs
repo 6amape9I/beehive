@@ -703,20 +703,6 @@ pub struct AppEventsResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkspaceFileRecord {
-    pub file_id: i64,
-    pub entity_id: String,
-    pub file_name: String,
-    pub file_path: String,
-    pub status: String,
-    pub validation_status: EntityValidationStatus,
-    pub updated_at: String,
-    pub file_exists: bool,
-    pub missing_since: Option<String>,
-    pub is_managed_copy: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InvalidDiscoveryRecord {
     pub stage_id: Option<String>,
     pub file_name: String,
@@ -727,15 +713,113 @@ pub struct InvalidDiscoveryRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkspaceStageGroup {
-    pub stage: StageRecord,
-    pub files: Vec<WorkspaceFileRecord>,
+pub struct WorkspaceFileNode {
+    pub entity_file_id: i64,
+    pub entity_id: String,
+    pub stage_id: String,
+    pub file_name: String,
+    pub file_path: String,
+    pub file_exists: bool,
+    pub missing_since: Option<String>,
+    pub is_managed_copy: bool,
+    pub copy_source_file_id: Option<i64>,
+    pub copy_source_entity_id: Option<String>,
+    pub copy_source_stage_id: Option<String>,
+    pub runtime_status: Option<String>,
+    pub file_status: String,
+    pub validation_status: EntityValidationStatus,
+    pub validation_errors: Vec<ConfigValidationIssue>,
+    pub current_stage: Option<String>,
+    pub next_stage: Option<String>,
+    pub checksum: String,
+    pub file_size: u64,
+    pub file_mtime: String,
+    pub updated_at: String,
+    pub can_open_file: bool,
+    pub can_open_folder: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WorkspaceStageTreeCounters {
+    pub registered_files: u64,
+    pub present_files: u64,
+    pub missing_files: u64,
+    pub invalid_files: u64,
+    pub managed_copies: u64,
+    pub pending: u64,
+    pub queued: u64,
+    pub in_progress: u64,
+    pub retry_wait: u64,
+    pub done: u64,
+    pub failed: u64,
+    pub blocked: u64,
+    pub skipped: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceStageTree {
+    pub stage_id: String,
+    pub input_folder: String,
+    pub output_folder: Option<String>,
+    pub workflow_url: Option<String>,
+    pub next_stage: Option<String>,
+    pub is_active: bool,
+    pub archived_at: Option<String>,
+    pub folder_path: String,
+    pub folder_exists: bool,
+    pub files: Vec<WorkspaceFileNode>,
     pub invalid_files: Vec<InvalidDiscoveryRecord>,
+    pub counters: WorkspaceStageTreeCounters,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceEntityTrailNode {
+    pub entity_file_id: i64,
+    pub stage_id: String,
+    pub file_name: String,
+    pub file_path: String,
+    pub file_exists: bool,
+    pub runtime_status: Option<String>,
+    pub is_managed_copy: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceEntityTrailEdge {
+    pub from_entity_file_id: i64,
+    pub to_entity_file_id: i64,
+    pub relation: String,
+    pub created_child_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceEntityTrail {
+    pub entity_id: String,
+    pub file_count: u64,
+    pub stages: Vec<WorkspaceEntityTrailNode>,
+    pub edges: Vec<WorkspaceEntityTrailEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WorkspaceExplorerTotals {
+    pub stages_total: u64,
+    pub active_stages_total: u64,
+    pub inactive_stages_total: u64,
+    pub entities_total: u64,
+    pub registered_files_total: u64,
+    pub present_files_total: u64,
+    pub missing_files_total: u64,
+    pub invalid_files_total: u64,
+    pub managed_copies_total: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceExplorerResult {
-    pub groups: Vec<WorkspaceStageGroup>,
+    pub generated_at: String,
+    pub workdir_path: String,
+    pub last_scan_at: Option<String>,
+    pub stages: Vec<WorkspaceStageTree>,
+    pub entity_trails: Vec<WorkspaceEntityTrail>,
+    pub totals: WorkspaceExplorerTotals,
     pub errors: Vec<CommandErrorInfo>,
 }
 

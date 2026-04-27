@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 
 import { useBootstrap } from "../app/BootstrapContext";
 import { CommandErrorsPanel } from "../components/CommandErrorsPanel";
@@ -28,6 +28,7 @@ import type {
 
 export function EntityDetailPage() {
   const { entityId } = useParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { state } = useBootstrap();
   const [detail, setDetail] = useState<EntityDetailPayload | null>(null);
   const [selectedFileId, setSelectedFileId] = useState<number | null>(null);
@@ -41,6 +42,12 @@ export function EntityDetailPage() {
 
   const workdirPath = state.selected_workdir_path;
   const canQueryRuntime = state.phase === "fully_initialized" && !!workdirPath && !!entityId;
+  const queryFileId = useMemo(() => {
+    const value = searchParams.get("file_id");
+    if (!value) return null;
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }, [searchParams]);
 
   const selectedFile = useMemo(() => {
     if (!detail) return null;
@@ -61,7 +68,7 @@ export function EntityDetailPage() {
   }, [detail, selectedFile]);
 
   const loadDetail = useCallback(
-    async (fileId = selectedFileId) => {
+    async (fileId: number | null = null) => {
       if (!canQueryRuntime || !workdirPath || !entityId) {
         setDetail(null);
         setErrors([]);
@@ -73,19 +80,25 @@ export function EntityDetailPage() {
         const result = await getEntity(workdirPath, entityId, fileId);
         setDetail(result.detail);
         setErrors(result.errors);
-        if (result.detail && !fileId) {
-          setSelectedFileId(result.detail.entity.latest_file_id ?? result.detail.files[0]?.id ?? null);
+        if (result.detail) {
+          const requestedFileIsValid =
+            fileId !== null && result.detail.files.some((file) => file.id === fileId);
+          setSelectedFileId(
+            requestedFileIsValid
+              ? fileId
+              : result.detail.entity.latest_file_id ?? result.detail.files[0]?.id ?? null,
+          );
         }
       } finally {
         setIsLoading(false);
       }
     },
-    [canQueryRuntime, entityId, selectedFileId, workdirPath],
+    [canQueryRuntime, entityId, workdirPath],
   );
 
   useEffect(() => {
-    void loadDetail();
-  }, [loadDetail]);
+    void loadDetail(queryFileId);
+  }, [loadDetail, queryFileId]);
 
   async function refreshAfterDetailResult(nextDetail: EntityDetailPayload | null, nextErrors: CommandErrorInfo[]) {
     setDetail(nextDetail);
@@ -130,6 +143,11 @@ export function EntityDetailPage() {
 
   async function handleSelectFile(fileId: number) {
     setSelectedFileId(fileId);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.set("file_id", String(fileId));
+      return next;
+    });
     await loadDetail(fileId);
   }
 

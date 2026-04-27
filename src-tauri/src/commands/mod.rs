@@ -12,7 +12,7 @@ use crate::domain::{
     PipelineConfigDraft, PipelineEditorStateResult, ReconcileStuckTasksResult, RunDueTasksResult,
     RunEntityStageResult, RuntimeSummaryResult, SaveEntityFileJsonResult, SavePipelineConfigResult,
     ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult, StageRunsResult,
-    ValidatePipelineConfigDraftResult, WorkspaceExplorerResult,
+    ValidatePipelineConfigDraftResult, WorkspaceExplorerResult, WorkspaceExplorerTotals,
 };
 use crate::executor;
 use crate::file_open::{self, OpenEntityPathKind};
@@ -621,18 +621,18 @@ pub fn list_app_events(path: String, limit: Option<u32>) -> AppEventsResult {
 
 #[tauri::command]
 pub fn get_workspace_explorer(path: String) -> WorkspaceExplorerResult {
-    match load_runtime_context(&path) {
-        Ok(context) => match database::get_workspace_explorer(&context.database_path) {
-            Ok(result) => result,
-            Err(message) => WorkspaceExplorerResult {
-                groups: Vec::new(),
-                errors: vec![command_error("workspace_explorer_failed", message, None)],
-            },
-        },
-        Err(error) => WorkspaceExplorerResult {
-            groups: Vec::new(),
-            errors: vec![error],
-        },
+    match load_readonly_runtime_context(&path) {
+        Ok(context) => {
+            match database::get_workspace_explorer(&context.workdir_path, &context.database_path) {
+                Ok(result) => result,
+                Err(message) => empty_workspace_explorer_result(vec![command_error(
+                    "workspace_explorer_failed",
+                    message,
+                    None,
+                )]),
+            }
+        }
+        Err(error) => empty_workspace_explorer_result(vec![error]),
     }
 }
 
@@ -640,6 +640,11 @@ struct RuntimeContext {
     workdir_path: PathBuf,
     database_path: PathBuf,
     config: crate::domain::PipelineConfig,
+}
+
+struct ReadonlyRuntimeContext {
+    workdir_path: PathBuf,
+    database_path: PathBuf,
 }
 
 fn load_runtime_context(path: &str) -> Result<RuntimeContext, CommandErrorInfo> {
@@ -701,6 +706,61 @@ fn load_runtime_context(path: &str) -> Result<RuntimeContext, CommandErrorInfo> 
         database_path,
         config,
     })
+}
+
+fn load_readonly_runtime_context(path: &str) -> Result<ReadonlyRuntimeContext, CommandErrorInfo> {
+    let workdir_path = workdir::resolve_user_path(path).map_err(|message| {
+        let code = if message.contains("outside the application directory") {
+            "workdir_inside_application_directory"
+        } else {
+            "invalid_workdir_path"
+        };
+        command_error(code, message, None)
+    })?;
+    let workdir_state = workdir::inspect(&workdir_path, false);
+
+    if !workdir_state.exists {
+        return Err(command_error(
+            "workdir_missing",
+            "The selected workdir does not exist.",
+            Some(workdir_state.workdir_path),
+        ));
+    }
+
+    if !workdir_state.pipeline_config_exists {
+        return Err(command_error(
+            "pipeline_config_missing",
+            "pipeline.yaml is required to open this workdir.",
+            Some(workdir_state.pipeline_config_path),
+        ));
+    }
+
+    let loaded_config =
+        config::load_pipeline_config(Path::new(&workdir_state.pipeline_config_path));
+    if !loaded_config.validation.is_valid {
+        return Err(command_error(
+            "config_invalid",
+            "pipeline.yaml is invalid; fix validation errors before workspace explorer reads.",
+            Some(workdir_state.pipeline_config_path),
+        ));
+    }
+
+    Ok(ReadonlyRuntimeContext {
+        workdir_path,
+        database_path: PathBuf::from(&workdir_state.database_path),
+    })
+}
+
+fn empty_workspace_explorer_result(errors: Vec<CommandErrorInfo>) -> WorkspaceExplorerResult {
+    WorkspaceExplorerResult {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        workdir_path: String::new(),
+        last_scan_at: None,
+        stages: Vec::new(),
+        entity_trails: Vec::new(),
+        totals: WorkspaceExplorerTotals::default(),
+        errors,
+    }
 }
 
 fn command_error(code: &str, message: impl Into<String>, path: Option<String>) -> CommandErrorInfo {
