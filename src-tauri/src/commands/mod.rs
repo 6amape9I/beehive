@@ -59,7 +59,11 @@ pub fn get_dashboard_overview(path: String) -> DashboardOverviewResult {
 pub fn scan_workspace(path: String) -> ScanWorkspaceResult {
     match load_runtime_context(&path) {
         Ok(context) => {
-            match discovery::scan_workspace(&context.workdir_path, &context.database_path) {
+            match discovery::scan_workspace_with_stability_delay(
+                &context.workdir_path,
+                &context.database_path,
+                context.config.runtime.file_stability_delay_ms,
+            ) {
                 Ok(summary) => ScanWorkspaceResult {
                     summary: Some(summary),
                     errors: Vec::new(),
@@ -265,6 +269,7 @@ pub fn run_due_tasks(path: String) -> RunDueTasksResult {
             context.config.runtime.max_parallel_tasks,
             context.config.runtime.request_timeout_sec,
             context.config.runtime.stuck_task_timeout_sec,
+            context.config.runtime.file_stability_delay_ms,
         ) {
             Ok(summary) => RunDueTasksResult {
                 summary: Some(summary),
@@ -292,6 +297,7 @@ pub fn run_entity_stage(path: String, entity_id: String, stage_id: String) -> Ru
             &stage_id,
             context.config.runtime.request_timeout_sec,
             context.config.runtime.stuck_task_timeout_sec,
+            context.config.runtime.file_stability_delay_ms,
         ) {
             Ok(summary) => RunEntityStageResult {
                 summary: Some(summary),

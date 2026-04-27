@@ -36,6 +36,7 @@ export interface RuntimeConfig {
   max_parallel_tasks: number;
   stuck_task_timeout_sec: number;
   request_timeout_sec: number;
+  file_stability_delay_ms: number;
 }
 
 export interface StageDefinition {

@@ -28,6 +28,7 @@ struct RawRuntimeConfig {
     max_parallel_tasks: Option<u64>,
     stuck_task_timeout_sec: Option<u64>,
     request_timeout_sec: Option<u64>,
+    file_stability_delay_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,6 +59,7 @@ runtime:
   max_parallel_tasks: 3
   stuck_task_timeout_sec: 900
   request_timeout_sec: 30
+  file_stability_delay_ms: 1000
 
 stages:
   - id: ingest
@@ -173,6 +175,7 @@ fn validate_and_build(raw: RawPipelineConfig) -> (Option<PipelineConfig>, Config
                 max_parallel_tasks: runtime.max_parallel_tasks.unwrap_or(3),
                 stuck_task_timeout_sec: runtime.stuck_task_timeout_sec.unwrap_or(900),
                 request_timeout_sec: request_timeout_sec.max(1),
+                file_stability_delay_ms: runtime.file_stability_delay_ms.unwrap_or(1000),
             }
         }
         None => {
@@ -238,12 +241,16 @@ fn build_stages(
             &format!("{prefix}.input_folder"),
             issues,
         );
-        let output_folder = required_string(
-            raw_stage.output_folder,
-            "missing_stage_output_folder",
-            &format!("{prefix}.output_folder"),
-            issues,
-        );
+        let output_folder = normalize_optional_string(raw_stage.output_folder);
+        let next_stage = normalize_optional_string(raw_stage.next_stage);
+        if next_stage.is_some() && output_folder.is_none() {
+            issues.push(issue(
+                ValidationSeverity::Error,
+                "missing_stage_output_folder",
+                format!("{prefix}.output_folder"),
+                "output_folder is required when next_stage is configured.",
+            ));
+        }
         let workflow_url = required_string(
             raw_stage.workflow_url,
             "missing_stage_workflow_url",
@@ -292,17 +299,16 @@ fn build_stages(
             ));
         }
 
-        if let (Some(id), Some(input_folder), Some(output_folder), Some(workflow_url)) =
-            (id, input_folder, output_folder, workflow_url)
+        if let (Some(id), Some(input_folder), Some(workflow_url)) = (id, input_folder, workflow_url)
         {
             stages.push(StageDefinition {
                 id,
                 input_folder,
-                output_folder,
+                output_folder: output_folder.unwrap_or_default(),
                 workflow_url,
                 max_attempts: max_attempts.max(1) as u64,
                 retry_delay_sec: retry_delay_sec.max(0) as u64,
-                next_stage: normalize_optional_string(raw_stage.next_stage),
+                next_stage,
             });
         }
     }
@@ -454,5 +460,51 @@ stages:
             .issues
             .iter()
             .any(|issue| issue.code == "runtime_defaults_applied"));
+    }
+
+    #[test]
+    fn terminal_stage_without_output_folder_is_valid() {
+        let yaml = r#"
+project:
+  name: beehive
+  workdir: .
+stages:
+  - id: terminal
+    input_folder: stages/terminal
+    workflow_url: http://localhost:5678/webhook/terminal
+"#;
+
+        let loaded = parse_pipeline_config(yaml, "now".to_string());
+        let config = loaded.config.expect("config");
+
+        assert!(loaded.validation.is_valid);
+        assert_eq!(config.stages[0].output_folder, "");
+        assert_eq!(config.stages[0].next_stage, None);
+    }
+
+    #[test]
+    fn non_terminal_stage_without_output_folder_is_invalid() {
+        let yaml = r#"
+project:
+  name: beehive
+  workdir: .
+stages:
+  - id: ingest
+    input_folder: stages/incoming
+    workflow_url: http://localhost:5678/webhook/ingest
+    next_stage: done
+  - id: done
+    input_folder: stages/done
+    workflow_url: http://localhost:5678/webhook/done
+"#;
+
+        let loaded = parse_pipeline_config(yaml, "now".to_string());
+
+        assert!(!loaded.validation.is_valid);
+        assert!(loaded
+            .validation
+            .issues
+            .iter()
+            .any(|issue| issue.code == "missing_stage_output_folder"));
     }
 }

@@ -13,6 +13,10 @@ use crate::domain::{
     StageRunRecord, StageStatus, StatusCount, WorkspaceExplorerResult, WorkspaceFileRecord,
     WorkspaceStageGroup,
 };
+use crate::state_machine::{
+    parse_status as parse_runtime_status, status_value as runtime_status_value,
+    validate_transition, RuntimeTransitionReason,
+};
 use crate::workdir::path_string;
 
 const SCHEMA_VERSION: u32 = 4;
@@ -96,6 +100,12 @@ pub(crate) struct FinishStageRunInput {
     pub error_message: Option<String>,
     pub finished_at: String,
     pub duration_ms: u64,
+}
+
+struct StageStateTransitionContext {
+    status: String,
+    entity_id: String,
+    stage_id: String,
 }
 
 pub fn bootstrap_database(path: &Path, config: &PipelineConfig) -> Result<DatabaseState, String> {
@@ -537,12 +547,225 @@ pub(crate) fn find_runtime_task(
         })
 }
 
+fn find_runtime_task_by_state_id(
+    connection: &Connection,
+    state_id: i64,
+) -> Result<Option<RuntimeTaskRecord>, String> {
+    connection
+        .query_row(
+            r#"
+            SELECT
+                state.id,
+                state.entity_id,
+                state.stage_id,
+                state.status,
+                state.attempts,
+                state.max_attempts,
+                state.file_path,
+                state.file_instance_id,
+                state.file_exists,
+                stage.workflow_url,
+                stage.retry_delay_sec,
+                stage.next_stage
+            FROM entity_stage_states state
+            JOIN stages stage ON stage.stage_id = state.stage_id
+            LEFT JOIN entity_files file ON file.id = state.file_instance_id
+            WHERE state.id = ?1
+            "#,
+            params![state_id],
+            runtime_task_from_row,
+        )
+        .optional()
+        .map_err(|error| format!("Failed to load runtime task state '{state_id}': {error}"))
+}
+
+pub(crate) fn claim_eligible_runtime_tasks(
+    connection: &mut Connection,
+    now: &str,
+    limit: u64,
+) -> Result<Vec<RuntimeTaskRecord>, String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("Failed to start runtime claim transaction: {error}"))?;
+    let candidates = list_eligible_runtime_tasks(&transaction, now, limit)?;
+    let mut claimed = Vec::new();
+
+    for candidate in candidates {
+        ensure_runtime_transition(
+            &candidate.status,
+            &StageStatus::Queued,
+            RuntimeTransitionReason::RuntimeClaim,
+            Some(candidate.state_id),
+            Some(&candidate.entity_id),
+            Some(&candidate.stage_id),
+        )?;
+        let affected = transaction
+            .execute(
+                r#"
+                UPDATE entity_stage_states
+                SET status = 'queued',
+                    updated_at = ?2
+                WHERE id = ?1
+                  AND file_exists = 1
+                  AND attempts < max_attempts
+                  AND (
+                        status = 'pending'
+                        OR (status = 'retry_wait' AND next_retry_at IS NOT NULL AND next_retry_at <= ?2)
+                      )
+                  AND EXISTS (
+                        SELECT 1 FROM stages
+                        WHERE stages.stage_id = entity_stage_states.stage_id
+                          AND stages.is_active = 1
+                          AND TRIM(stages.workflow_url) <> ''
+                  )
+                  AND EXISTS (
+                        SELECT 1 FROM entity_files
+                        WHERE entity_files.id = entity_stage_states.file_instance_id
+                          AND entity_files.file_exists = 1
+                  )
+                "#,
+                params![candidate.state_id, now],
+            )
+            .map_err(|error| {
+                format!(
+                    "Failed to claim runtime state '{}' for entity '{}' on stage '{}': {error}",
+                    candidate.state_id, candidate.entity_id, candidate.stage_id
+                )
+            })?;
+
+        if affected == 1 {
+            if let Some(task) = find_runtime_task_by_state_id(&transaction, candidate.state_id)? {
+                claimed.push(task);
+            }
+        }
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| format!("Failed to commit runtime claim transaction: {error}"))?;
+    Ok(claimed)
+}
+
+pub(crate) fn claim_specific_runtime_task(
+    connection: &mut Connection,
+    entity_id: &str,
+    stage_id: &str,
+    now: &str,
+) -> Result<Option<RuntimeTaskRecord>, String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("Failed to start runtime claim transaction: {error}"))?;
+    let Some(candidate) = find_runtime_task(&transaction, entity_id, stage_id)? else {
+        transaction
+            .commit()
+            .map_err(|error| format!("Failed to commit empty runtime claim: {error}"))?;
+        return Ok(None);
+    };
+
+    if !matches!(candidate.status.as_str(), "pending" | "retry_wait") {
+        transaction
+            .commit()
+            .map_err(|error| format!("Failed to commit skipped runtime claim: {error}"))?;
+        return Ok(None);
+    }
+
+    ensure_runtime_transition(
+        &candidate.status,
+        &StageStatus::Queued,
+        RuntimeTransitionReason::RuntimeClaim,
+        Some(candidate.state_id),
+        Some(&candidate.entity_id),
+        Some(&candidate.stage_id),
+    )?;
+
+    let affected = transaction
+        .execute(
+            r#"
+            UPDATE entity_stage_states
+            SET status = 'queued',
+                updated_at = ?4
+            WHERE id = ?1
+              AND entity_id = ?2
+              AND stage_id = ?3
+              AND file_exists = 1
+              AND attempts < max_attempts
+              AND status IN ('pending', 'retry_wait')
+              AND EXISTS (
+                    SELECT 1 FROM stages
+                    WHERE stages.stage_id = entity_stage_states.stage_id
+                      AND stages.is_active = 1
+                      AND TRIM(stages.workflow_url) <> ''
+              )
+              AND EXISTS (
+                    SELECT 1 FROM entity_files
+                    WHERE entity_files.id = entity_stage_states.file_instance_id
+                      AND entity_files.file_exists = 1
+              )
+            "#,
+            params![candidate.state_id, entity_id, stage_id, now],
+        )
+        .map_err(|error| {
+            format!(
+                "Failed to claim runtime state '{}' for entity '{}' on stage '{}': {error}",
+                candidate.state_id, entity_id, stage_id
+            )
+        })?;
+
+    let task = if affected == 1 {
+        find_runtime_task_by_state_id(&transaction, candidate.state_id)?
+    } else {
+        None
+    };
+    transaction
+        .commit()
+        .map_err(|error| format!("Failed to commit runtime claim transaction: {error}"))?;
+    Ok(task)
+}
+
+pub(crate) fn release_queued_claim(
+    connection: &Connection,
+    state_id: i64,
+    updated_at: &str,
+) -> Result<(), String> {
+    let context = ensure_state_transition(
+        connection,
+        state_id,
+        &StageStatus::Pending,
+        RuntimeTransitionReason::ClaimRecovery,
+    )?;
+    connection
+        .execute(
+            r#"
+            UPDATE entity_stage_states
+            SET status = 'pending',
+                next_retry_at = NULL,
+                updated_at = ?2
+            WHERE id = ?1 AND status = 'queued'
+            "#,
+            params![state_id, updated_at],
+        )
+        .map_err(|error| {
+            format!(
+                "Failed to release queued claim for entity '{}' on stage '{}': {error}",
+                context.entity_id, context.stage_id
+            )
+        })?;
+    update_entity_summary_from_state(connection, state_id, StageStatus::Pending, updated_at)?;
+    Ok(())
+}
+
 pub(crate) fn update_stage_state_for_run_start(
     connection: &Connection,
     state_id: i64,
     attempt_no: u64,
     started_at: &str,
 ) -> Result<(), String> {
+    ensure_state_transition(
+        connection,
+        state_id,
+        &StageStatus::InProgress,
+        RuntimeTransitionReason::RuntimeStart,
+    )?;
     connection
         .execute(
             r#"
@@ -568,6 +791,12 @@ pub(crate) fn update_stage_state_success(
     finished_at: &str,
     created_child_path: Option<&str>,
 ) -> Result<(), String> {
+    ensure_state_transition(
+        connection,
+        state_id,
+        &StageStatus::Done,
+        RuntimeTransitionReason::RuntimeSuccess,
+    )?;
     connection
         .execute(
             r#"
@@ -597,6 +826,35 @@ pub(crate) fn update_stage_state_failure(
     next_retry_at: Option<&str>,
     finished_at: &str,
 ) -> Result<(), String> {
+    let reason = match status {
+        StageStatus::RetryWait => RuntimeTransitionReason::RuntimeRetryScheduled,
+        StageStatus::Failed => RuntimeTransitionReason::RuntimeFailed,
+        StageStatus::Blocked => RuntimeTransitionReason::RuntimeBlocked,
+        _ => RuntimeTransitionReason::RuntimeFailed,
+    };
+    update_stage_state_failure_with_reason(
+        connection,
+        state_id,
+        status,
+        error_message,
+        http_status,
+        next_retry_at,
+        finished_at,
+        reason,
+    )
+}
+
+pub(crate) fn update_stage_state_failure_with_reason(
+    connection: &Connection,
+    state_id: i64,
+    status: StageStatus,
+    error_message: &str,
+    http_status: Option<i64>,
+    next_retry_at: Option<&str>,
+    finished_at: &str,
+    reason: RuntimeTransitionReason,
+) -> Result<(), String> {
+    ensure_state_transition(connection, state_id, &status, reason)?;
     connection
         .execute(
             r#"
@@ -2488,6 +2746,68 @@ fn build_json_preview(file: Option<&EntityFileRecord>) -> Result<String, String>
     }))
 }
 
+fn ensure_state_transition(
+    connection: &Connection,
+    state_id: i64,
+    to_status: &StageStatus,
+    reason: RuntimeTransitionReason,
+) -> Result<StageStateTransitionContext, String> {
+    let context = connection
+        .query_row(
+            "SELECT status, entity_id, stage_id FROM entity_stage_states WHERE id = ?1",
+            params![state_id],
+            |row| {
+                Ok(StageStateTransitionContext {
+                    status: row.get(0)?,
+                    entity_id: row.get(1)?,
+                    stage_id: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| format!("Failed to load stage state '{state_id}': {error}"))?
+        .ok_or_else(|| format!("Stage state '{state_id}' does not exist."))?;
+
+    ensure_runtime_transition(
+        &context.status,
+        to_status,
+        reason,
+        Some(state_id),
+        Some(&context.entity_id),
+        Some(&context.stage_id),
+    )?;
+    Ok(context)
+}
+
+fn ensure_runtime_transition(
+    from_status: &str,
+    to_status: &StageStatus,
+    reason: RuntimeTransitionReason,
+    state_id: Option<i64>,
+    entity_id: Option<&str>,
+    stage_id: Option<&str>,
+) -> Result<(), String> {
+    let from = parse_runtime_status(from_status).ok_or_else(|| {
+        format!(
+            "Unknown runtime status '{}' for state '{}'.",
+            from_status,
+            state_id
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        )
+    })?;
+    validate_transition(&from, to_status, reason).map_err(|mut error| {
+        error.state_id = state_id;
+        error.entity_id = entity_id.map(ToOwned::to_owned);
+        error.stage_id = stage_id.map(ToOwned::to_owned);
+        error.message = format!(
+            "{} state_id={:?}, entity_id={:?}, stage_id={:?}",
+            error.message, error.state_id, error.entity_id, error.stage_id
+        );
+        error.to_string()
+    })
+}
+
 fn update_entity_summary_from_state(
     connection: &Connection,
     state_id: i64,
@@ -2749,16 +3069,7 @@ fn parse_validation_status(value: &str) -> rusqlite::Result<EntityValidationStat
 }
 
 fn stage_status_value(status: &StageStatus) -> &'static str {
-    match status {
-        StageStatus::Pending => "pending",
-        StageStatus::Queued => "queued",
-        StageStatus::InProgress => "in_progress",
-        StageStatus::RetryWait => "retry_wait",
-        StageStatus::Done => "done",
-        StageStatus::Failed => "failed",
-        StageStatus::Blocked => "blocked",
-        StageStatus::Skipped => "skipped",
-    }
+    runtime_status_value(status)
 }
 
 fn serialize_json<T: serde::Serialize>(value: &T) -> Result<String, String> {
@@ -2812,7 +3123,9 @@ fn load_table_names(connection: &Connection) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::scan_workspace;
     use crate::domain::{PipelineConfig, ProjectConfig, RuntimeConfig};
+    use std::fs;
 
     fn test_config(stages: Vec<StageDefinition>) -> PipelineConfig {
         PipelineConfig {
@@ -3130,5 +3443,52 @@ mod tests {
         assert_eq!(result.active_stage_count, 1);
         assert!(!ingest.is_active);
         assert!(ingest.archived_at.is_some());
+    }
+
+    #[test]
+    fn database_transition_wrapper_rejects_invalid_status_regression() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        let source_path = workdir.join("stages").join("ingest").join("entity-1.json");
+        bootstrap_database(&database_path, &test_config(vec![stage("ingest", None)]))
+            .expect("bootstrap");
+        fs::create_dir_all(source_path.parent().expect("source parent")).expect("parent");
+        fs::write(
+            &source_path,
+            r#"{"id":"entity-1","payload":{"ok":true},"status":"pending"}"#,
+        )
+        .expect("source");
+        scan_workspace(&workdir, &database_path).expect("scan");
+        let connection = Connection::open(&database_path).expect("open db");
+        let state = get_entity_detail(&database_path, "entity-1")
+            .expect("detail result")
+            .expect("detail exists")
+            .stage_states
+            .into_iter()
+            .find(|state| state.stage_id == "ingest")
+            .expect("state");
+
+        let result = update_stage_state_success(
+            &connection,
+            state.id,
+            Some(200),
+            &Utc::now().to_rfc3339(),
+            None,
+        );
+        let after = get_entity_detail(&database_path, "entity-1")
+            .expect("detail result")
+            .expect("detail exists")
+            .stage_states
+            .into_iter()
+            .find(|state| state.stage_id == "ingest")
+            .expect("state");
+
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .expect("error")
+            .contains("Invalid runtime transition"));
+        assert_eq!(after.status, "pending");
     }
 }

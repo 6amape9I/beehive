@@ -2,7 +2,7 @@
 
 beehive is a local desktop operator tool for JSON stage pipelines.
 
-Stage 4 turns the Stage 3 file lifecycle foundation into a manually triggered execution foundation:
+Stage 5.5 stabilizes the Stage 1-5 foundation with a formal runtime state machine, atomic task claiming, file-stability guards, and terminal-stage handling.
 
 `eligible stage state -> queued -> in_progress -> n8n webhook -> stage_runs -> done/retry_wait/failed -> next-stage file`
 
@@ -94,15 +94,18 @@ Each stage should define:
 
 - `id`
 - `input_folder`
-- `output_folder`
+- `output_folder` when `next_stage` is configured
 - `workflow_url`
 - `max_attempts`
 - `retry_delay_sec`
 - optional `next_stage`
 
+Terminal stages, where `next_stage` is absent or empty, may omit `output_folder`. Internally this is normalized to an empty string in the current v4 schema and displayed as not required.
+
 Runtime also supports:
 
 - `runtime.request_timeout_sec` with default `30`
+- `runtime.file_stability_delay_ms` with default `1000`
 
 `workflow_url` must come from `pipeline.yaml`. Do not hardcode real n8n webhook URLs into application code. The known development n8n production webhook may be used manually or in docs as an example, but automated tests use local mock HTTP servers.
 
@@ -142,15 +145,17 @@ It:
 
 1. loads active stages;
 2. provisions missing input/output directories;
-3. scans active input folders non-recursively;
-4. registers new file instances;
-5. updates changed file instances;
-6. marks missing files instead of deleting rows;
-7. restores missing files if they reappear;
-8. recomputes logical entity summaries;
-9. records file lifecycle app events.
+3. skips files that are too fresh or change while being read;
+4. scans active input folders non-recursively;
+5. registers new file instances;
+6. updates changed file instances;
+7. marks missing files instead of deleting rows;
+8. restores missing files if they reappear;
+9. recomputes logical entity summaries;
+10. records file lifecycle app events.
 
 Inactive stages are not scanned for new files, but their historical rows remain visible.
+Fresh or changing files are recorded as `unstable_file_skipped`, not as permanent invalid JSON.
 
 ## Managed Next-Stage Copy
 
@@ -180,6 +185,12 @@ Managed copy updates target JSON fields:
 
 `Run this stage` / `run_entity_stage` is a manual debug path. It may execute a `retry_wait` state even when `next_retry_at` is still in the future. The production-like `Run due tasks` path stays strict and only executes `pending` or due `retry_wait` states.
 
+Stage 5.5 routes runtime state changes through a formal state machine. SQLite `entity_stage_states` is the runtime source of truth; source JSON remains business input and is not mutated to mirror execution state.
+
+Before execution, a task is atomically claimed in SQLite by moving from `pending` or due `retry_wait` to `queued`. Only successfully claimed rows can run. Stale `queued` claims are released back to `pending` without incrementing attempts or creating `stage_runs`.
+
+Before HTTP is sent, the registered source file is checked again. If it is missing, too fresh, changed during read, or no longer matches the DB snapshot, no HTTP request is sent, no `stage_runs` row is created, and attempts are not incremented. Run `Scan workspace` after the file is stable.
+
 Execution sends:
 
 - `POST`
@@ -201,6 +212,8 @@ On success:
 - source JSON file is not mutated;
 - target file is created from response `payload`;
 - target stage state is `pending`.
+
+For terminal stages with no `next_stage`, success marks the source state `done` and does not create a target file.
 
 Reconciliation scans do not overwrite SQLite execution state from source JSON. For example, if a successful run leaves the source JSON with `"status": "pending"`, the SQLite stage state remains `done` after the next scan.
 

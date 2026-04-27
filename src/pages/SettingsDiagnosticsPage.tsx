@@ -88,6 +88,13 @@ export function SettingsDiagnosticsPage() {
             { label: "Missing files", value: summary?.missing_file_count },
             { label: "Managed copies", value: summary?.managed_copy_count },
             { label: "Invalid files", value: summary?.invalid_file_count },
+            {
+              label: "File stability delay",
+              value:
+                state.config?.runtime.file_stability_delay_ms !== undefined
+                  ? `${state.config.runtime.file_stability_delay_ms} ms`
+                  : undefined,
+            },
             { label: "Last reconciliation", value: formatDateTime(summary?.last_reconciliation_at) },
             {
               label: "Execution states",

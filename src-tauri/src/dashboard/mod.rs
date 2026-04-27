@@ -288,7 +288,8 @@ fn build_stage_nodes(
                 id: stage.id.clone(),
                 label: stage.id.clone(),
                 input_folder: stage.input_folder.clone(),
-                output_folder: Some(stage.output_folder.clone()),
+                output_folder: (!stage.output_folder.trim().is_empty())
+                    .then(|| stage.output_folder.clone()),
                 workflow_url: Some(stage.workflow_url.clone()),
                 is_active: stage.is_active,
                 archived_at: stage.archived_at.clone(),

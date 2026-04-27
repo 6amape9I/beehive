@@ -5,16 +5,20 @@ use chrono::{DateTime, Duration, Utc};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::database::{
-    block_stage_state, find_latest_entity_file_for_stage, find_runtime_task, finish_stage_run,
-    insert_app_event, insert_stage_run, list_eligible_runtime_tasks, open_connection,
-    update_stage_state_failure, update_stage_state_for_run_start, update_stage_state_success,
-    FinishStageRunInput, NewStageRunInput, RuntimeTaskRecord,
+    block_stage_state, claim_eligible_runtime_tasks, claim_specific_runtime_task,
+    find_latest_entity_file_for_stage, finish_stage_run, insert_app_event, insert_stage_run,
+    open_connection, release_queued_claim, update_stage_state_failure,
+    update_stage_state_failure_with_reason, update_stage_state_for_run_start,
+    update_stage_state_success, FinishStageRunInput, NewStageRunInput, RuntimeTaskRecord,
 };
 use crate::domain::{AppEventLevel, CommandErrorInfo, RunDueTasksSummary, StageStatus};
 use crate::file_ops;
+use crate::file_safety::read_stable_file;
+use crate::state_machine::RuntimeTransitionReason;
 
 pub fn run_due_tasks(
     workdir_path: &Path,
@@ -22,15 +26,16 @@ pub fn run_due_tasks(
     max_tasks: u64,
     request_timeout_sec: u64,
     stuck_task_timeout_sec: u64,
+    file_stability_delay_ms: u64,
 ) -> Result<RunDueTasksSummary, String> {
-    let connection = open_connection(database_path)?;
+    let mut connection = open_connection(database_path)?;
     let stuck_reconciled = reconcile_stuck_tasks_with_connection(
         &connection,
         stuck_task_timeout_sec,
         &Utc::now().to_rfc3339(),
     )?;
     let tasks =
-        list_eligible_runtime_tasks(&connection, &Utc::now().to_rfc3339(), max_tasks.max(1))?;
+        claim_eligible_runtime_tasks(&mut connection, &Utc::now().to_rfc3339(), max_tasks.max(1))?;
     drop(connection);
 
     let mut summary = RunDueTasksSummary {
@@ -40,7 +45,13 @@ pub fn run_due_tasks(
     };
 
     for task in tasks {
-        let outcome = execute_task(workdir_path, database_path, task, request_timeout_sec);
+        let outcome = execute_task(
+            workdir_path,
+            database_path,
+            task,
+            request_timeout_sec,
+            file_stability_delay_ms,
+        );
         match outcome {
             Ok(TaskOutcome::Succeeded) => summary.succeeded += 1,
             Ok(TaskOutcome::RetryScheduled) => summary.retry_scheduled += 1,
@@ -67,45 +78,43 @@ pub fn run_entity_stage(
     stage_id: &str,
     request_timeout_sec: u64,
     stuck_task_timeout_sec: u64,
+    file_stability_delay_ms: u64,
 ) -> Result<RunDueTasksSummary, String> {
-    let connection = open_connection(database_path)?;
+    let mut connection = open_connection(database_path)?;
     let stuck_reconciled = reconcile_stuck_tasks_with_connection(
         &connection,
         stuck_task_timeout_sec,
         &Utc::now().to_rfc3339(),
     )?;
-    let Some(task) = find_runtime_task(&connection, entity_id, stage_id)? else {
+    // Manual debug execution intentionally allows retry_wait even when next_retry_at is in the future,
+    // but it still uses the same queued claim so active queued/in_progress work cannot be launched twice.
+    let Some(task) = claim_specific_runtime_task(
+        &mut connection,
+        entity_id,
+        stage_id,
+        &Utc::now().to_rfc3339(),
+    )?
+    else {
         return Ok(RunDueTasksSummary {
             skipped: 1,
             stuck_reconciled,
-            errors: vec![CommandErrorInfo {
-                code: "runtime_task_not_found".to_string(),
-                message: format!(
-                    "No stage state exists for entity '{entity_id}' on stage '{stage_id}'."
-                ),
-                path: None,
-            }],
             ..RunDueTasksSummary::default()
         });
     };
     drop(connection);
-
-    // Manual debug execution intentionally allows retry_wait even when next_retry_at is in the future.
-    // The production-like run_due_tasks path remains strict and only selects due retry_wait states.
-    if !is_debug_runnable(&task) {
-        return Ok(RunDueTasksSummary {
-            skipped: 1,
-            stuck_reconciled,
-            ..RunDueTasksSummary::default()
-        });
-    }
 
     let mut summary = RunDueTasksSummary {
         claimed: 1,
         stuck_reconciled,
         ..RunDueTasksSummary::default()
     };
-    match execute_task(workdir_path, database_path, task, request_timeout_sec) {
+    match execute_task(
+        workdir_path,
+        database_path,
+        task,
+        request_timeout_sec,
+        file_stability_delay_ms,
+    ) {
         Ok(TaskOutcome::Succeeded) => summary.succeeded = 1,
         Ok(TaskOutcome::RetryScheduled) => summary.retry_scheduled = 1,
         Ok(TaskOutcome::Failed) => summary.failed = 1,
@@ -152,8 +161,9 @@ fn execute_task(
     database_path: &Path,
     task: RuntimeTaskRecord,
     request_timeout_sec: u64,
+    file_stability_delay_ms: u64,
 ) -> Result<TaskOutcome, String> {
-    if !is_debug_runnable(&task) {
+    if task.status != "queued" {
         return Ok(TaskOutcome::Skipped);
     }
     if !task.file_exists || task.file_instance_id <= 0 {
@@ -168,12 +178,6 @@ fn execute_task(
     }
 
     let connection = open_connection(database_path)?;
-    connection
-        .execute(
-            "UPDATE entity_stage_states SET status = 'queued', updated_at = ?2 WHERE id = ?1",
-            rusqlite::params![task.state_id, Utc::now().to_rfc3339()],
-        )
-        .map_err(|error| format!("Failed to queue stage state '{}': {error}", task.state_id))?;
     insert_app_event(
         &connection,
         AppEventLevel::Info,
@@ -194,6 +198,30 @@ fn execute_task(
                     task.entity_id, task.stage_id
                 )
             })?;
+    if let Some(message) =
+        source_file_preflight_error(workdir_path, &source_file, file_stability_delay_ms)
+    {
+        let now = Utc::now().to_rfc3339();
+        release_queued_claim(&connection, task.state_id, &now)?;
+        insert_app_event(
+            &connection,
+            AppEventLevel::Warning,
+            if message.contains("changed") {
+                "source_file_changed_before_execution"
+            } else {
+                "source_file_unstable_before_execution"
+            },
+            &message,
+            Some(json!({
+                "entity_id": task.entity_id,
+                "stage_id": task.stage_id,
+                "file_path": source_file.file_path,
+                "file_id": source_file.id,
+            })),
+            &now,
+        )?;
+        return Ok(TaskOutcome::Skipped);
+    }
     let attempt_no = task.attempts + 1;
     let run_id = Uuid::new_v4().to_string();
     let started_at = Utc::now();
@@ -617,10 +645,32 @@ fn build_request_json(
     }))
 }
 
-fn is_debug_runnable(task: &RuntimeTaskRecord) -> bool {
-    matches!(task.status.as_str(), "pending" | "retry_wait")
-        && task.attempts < task.max_attempts
-        && task.file_exists
+fn source_file_preflight_error(
+    workdir_path: &Path,
+    source_file: &crate::domain::EntityFileRecord,
+    file_stability_delay_ms: u64,
+) -> Option<String> {
+    let stored_path = Path::new(&source_file.file_path);
+    let resolved_path = if stored_path.is_absolute() {
+        stored_path.to_path_buf()
+    } else {
+        workdir_path.join(stored_path)
+    };
+    let stable_read = match read_stable_file(&resolved_path, file_stability_delay_ms) {
+        Ok(read) => read,
+        Err(issue) => return Some(issue.message),
+    };
+    let checksum = format!("{:x}", Sha256::digest(&stable_read.bytes));
+    if checksum != source_file.checksum
+        || stable_read.file_size != source_file.file_size
+        || stable_read.file_mtime != source_file.file_mtime
+    {
+        return Some(format!(
+            "Source file '{}' changed after the last scan; run Scan workspace before execution.",
+            resolved_path.display()
+        ));
+    }
+    None
 }
 
 fn reconcile_stuck_tasks_with_connection(
@@ -629,6 +679,19 @@ fn reconcile_stuck_tasks_with_connection(
     now: &str,
 ) -> Result<u64, String> {
     let cutoff = (Utc::now() - Duration::seconds(stuck_task_timeout_sec as i64)).to_rfc3339();
+    let stale_queued = load_stale_queued_state_ids(connection, &cutoff)?;
+    for state_id in &stale_queued {
+        release_queued_claim(connection, *state_id, now)?;
+        insert_app_event(
+            connection,
+            AppEventLevel::Warning,
+            "queued_claim_released",
+            "A stale queued task claim was released before execution started.",
+            Some(json!({"state_id": state_id})),
+            now,
+        )?;
+    }
+
     let mut statement = connection
         .prepare(
             r#"
@@ -666,7 +729,7 @@ fn reconcile_stuck_tasks_with_connection(
         } else {
             None
         };
-        update_stage_state_failure(
+        update_stage_state_failure_with_reason(
             connection,
             *state_id,
             next_status,
@@ -674,6 +737,7 @@ fn reconcile_stuck_tasks_with_connection(
             None,
             next_retry_at,
             now,
+            RuntimeTransitionReason::StuckReconciliation,
         )?;
         insert_app_event(
             connection,
@@ -685,7 +749,32 @@ fn reconcile_stuck_tasks_with_connection(
         )?;
     }
 
-    Ok(states.len() as u64)
+    Ok((states.len() + stale_queued.len()) as u64)
+}
+
+fn load_stale_queued_state_ids(
+    connection: &rusqlite::Connection,
+    cutoff: &str,
+) -> Result<Vec<i64>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT id
+            FROM entity_stage_states
+            WHERE status = 'queued'
+              AND updated_at < ?1
+            ORDER BY updated_at ASC, id ASC
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare stale queued task query: {error}"))?;
+    let rows = statement
+        .query_map(rusqlite::params![cutoff], |row| row.get::<_, i64>(0))
+        .map_err(|error| format!("Failed to query stale queued tasks: {error}"))?;
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(row.map_err(|error| format!("Failed to read stale queued task row: {error}"))?);
+    }
+    Ok(ids)
 }
 
 #[cfg(test)]
@@ -696,7 +785,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
-    use crate::database::{bootstrap_database, get_entity_detail, list_stage_runs};
+    use crate::database::{
+        bootstrap_database, claim_eligible_runtime_tasks, get_entity_detail, list_stage_runs,
+        open_connection,
+    };
     use crate::discovery::scan_workspace;
     use crate::domain::{PipelineConfig, ProjectConfig, RuntimeConfig, StageDefinition};
     use sha2::Digest;
@@ -765,6 +857,7 @@ mod tests {
                 max_parallel_tasks: 3,
                 stuck_task_timeout_sec: 1,
                 request_timeout_sec: 5,
+                file_stability_delay_ms: 0,
             },
             stages: vec![
                 StageDefinition {
@@ -874,7 +967,7 @@ mod tests {
         let (_tempdir, workdir, database_path, source_path) = prepare_workdir(&server.url, 3, 0);
         let source_before = std::fs::read(&source_path).expect("read source before");
 
-        let summary = run_due_tasks(&workdir, &database_path, 3, 5, 1).expect("run tasks");
+        let summary = run_due_tasks(&workdir, &database_path, 3, 5, 1, 0).expect("run tasks");
         let detail = get_entity_detail(&database_path, "entity-1")
             .expect("detail result")
             .expect("detail exists");
@@ -960,9 +1053,9 @@ mod tests {
         .expect("source");
         scan_workspace(&workdir, &database_path).expect("initial scan");
 
-        let first = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("first run");
+        let first = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("first run");
         scan_workspace(&workdir, &database_path).expect("scan after success");
-        let second = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("second run");
+        let second = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("second run");
 
         assert_eq!(first.succeeded, 1);
         assert_eq!(stage_status(&database_path, "incoming"), "done");
@@ -978,8 +1071,8 @@ mod tests {
         ]);
         let (_tempdir, workdir, database_path, _source_path) = prepare_workdir(&server.url, 2, 0);
 
-        let first = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("first run");
-        let second = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("second run");
+        let first = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("first run");
+        let second = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("second run");
         let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
 
         assert_eq!(first.retry_scheduled, 1);
@@ -994,7 +1087,7 @@ mod tests {
         let server = mock_server(vec![(200, r#"{"success":true,"meta":{}}"#)]);
         let (_tempdir, workdir, database_path, _source_path) = prepare_workdir(&server.url, 1, 0);
 
-        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("run tasks");
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run tasks");
         let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
 
         assert_eq!(summary.failed, 1);
@@ -1017,17 +1110,61 @@ mod tests {
             )
             .expect("future retry");
 
-        let skipped = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("skipped");
+        let skipped = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("skipped");
         connection
             .execute(
                 "UPDATE entity_stage_states SET next_retry_at = ?1 WHERE entity_id = 'entity-1' AND stage_id = 'incoming'",
                 rusqlite::params![(Utc::now() - Duration::hours(1)).to_rfc3339()],
             )
             .expect("past retry");
-        let due = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("due");
+        let due = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("due");
 
         assert_eq!(skipped.claimed, 0);
         assert_eq!(due.succeeded, 1);
+    }
+
+    #[test]
+    fn duplicate_claim_of_same_state_is_noop_after_first_claim() {
+        let server = mock_server(Vec::new());
+        let (_tempdir, _workdir, database_path, _source_path) = prepare_workdir(&server.url, 3, 0);
+        let mut first_connection = open_connection(&database_path).expect("first connection");
+        let mut second_connection = open_connection(&database_path).expect("second connection");
+        let now = Utc::now().to_rfc3339();
+
+        let first =
+            claim_eligible_runtime_tasks(&mut first_connection, &now, 1).expect("first claim");
+        let second =
+            claim_eligible_runtime_tasks(&mut second_connection, &now, 1).expect("second claim");
+        let state = stage_state(&database_path, "incoming");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+
+        assert_eq!(first.len(), 1);
+        assert!(second.is_empty());
+        assert_eq!(state.status, "queued");
+        assert_eq!(state.attempts, 0);
+        assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn stale_queued_claim_is_released_without_attempt_increment_or_stage_run() {
+        let server = mock_server(Vec::new());
+        let (_tempdir, _workdir, database_path, _source_path) = prepare_workdir(&server.url, 3, 0);
+        let connection = open_connection(&database_path).expect("open db");
+        connection
+            .execute(
+                "UPDATE entity_stage_states SET status = 'queued', updated_at = ?1 WHERE entity_id = 'entity-1' AND stage_id = 'incoming'",
+                rusqlite::params![(Utc::now() - Duration::hours(1)).to_rfc3339()],
+            )
+            .expect("stale queued");
+
+        let reconciled = reconcile_stuck_tasks(&database_path, 1).expect("reconcile");
+        let state = stage_state(&database_path, "incoming");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+
+        assert_eq!(reconciled, 1);
+        assert_eq!(state.status, "pending");
+        assert_eq!(state.attempts, 0);
+        assert!(runs.is_empty());
     }
 
     #[test]
@@ -1054,7 +1191,7 @@ mod tests {
         let due_at = chrono::DateTime::parse_from_rfc3339(next_retry_at)
             .expect("parse next_retry_at")
             .with_timezone(&Utc);
-        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("run tasks");
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run tasks");
 
         assert_eq!(reconciled, 1);
         assert_eq!(state_after_reconcile.status, "retry_wait");
@@ -1075,9 +1212,31 @@ mod tests {
             )
             .expect("done state");
 
-        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("run tasks");
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run tasks");
 
         assert_eq!(summary.claimed, 0);
+        assert_eq!(server.requests.lock().expect("requests").len(), 0);
+    }
+
+    #[test]
+    fn source_file_changed_after_scan_is_not_sent_or_counted_as_attempt() {
+        let server = mock_server(Vec::new());
+        let (_tempdir, workdir, database_path, source_path) = prepare_workdir(&server.url, 3, 0);
+        std::fs::write(
+            &source_path,
+            r#"{"id":"entity-1","current_stage":"incoming","next_stage":"normalized","status":"pending","payload":{"title":"changed"},"meta":{}}"#,
+        )
+        .expect("mutate source after scan");
+
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run tasks");
+        let state = stage_state(&database_path, "incoming");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+
+        assert_eq!(summary.claimed, 1);
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(state.status, "pending");
+        assert_eq!(state.attempts, 0);
+        assert!(runs.is_empty());
         assert_eq!(server.requests.lock().expect("requests").len(), 0);
     }
 
@@ -1116,7 +1275,7 @@ mod tests {
         .expect("source");
         scan_workspace(&workdir, &database_path).expect("scan");
 
-        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("run");
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run");
         let state = stage_state(&database_path, "incoming");
         let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
 
@@ -1178,7 +1337,7 @@ mod tests {
         .expect("source");
         scan_workspace(&workdir, &database_path).expect("scan");
 
-        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("run");
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run");
         let state = stage_state(&database_path, "incoming");
         let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
 
@@ -1204,13 +1363,83 @@ mod tests {
             )
             .expect("future retry");
 
-        let due_summary = run_due_tasks(&workdir, &database_path, 1, 5, 1).expect("due run");
+        let due_summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("due run");
         let debug_summary =
-            run_entity_stage(&workdir, &database_path, "entity-1", "incoming", 5, 1)
+            run_entity_stage(&workdir, &database_path, "entity-1", "incoming", 5, 1, 0)
                 .expect("debug run");
 
         assert_eq!(due_summary.claimed, 0);
         assert_eq!(debug_summary.succeeded, 1);
+        assert_eq!(server.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[test]
+    fn run_entity_stage_refuses_active_queued_state() {
+        let server = mock_server(Vec::new());
+        let (_tempdir, workdir, database_path, _source_path) = prepare_workdir(&server.url, 3, 0);
+        let connection = open_connection(&database_path).expect("open db");
+        connection
+            .execute(
+                "UPDATE entity_stage_states SET status = 'queued', updated_at = ?1 WHERE entity_id = 'entity-1' AND stage_id = 'incoming'",
+                rusqlite::params![Utc::now().to_rfc3339()],
+            )
+            .expect("queued state");
+
+        let summary = run_entity_stage(&workdir, &database_path, "entity-1", "incoming", 5, 1, 0)
+            .expect("debug run");
+
+        assert_eq!(summary.claimed, 0);
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(server.requests.lock().expect("requests").len(), 0);
+    }
+
+    #[test]
+    fn terminal_stage_without_output_folder_succeeds_without_target_copy() {
+        let server = mock_server(vec![(200, r#"{"success":true,"meta":{}}"#)]);
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        let source_path = workdir
+            .join("stages")
+            .join("incoming")
+            .join("entity-1.json");
+        bootstrap_database(
+            &database_path,
+            &PipelineConfig {
+                project: ProjectConfig {
+                    name: "beehive".to_string(),
+                    workdir: ".".to_string(),
+                },
+                runtime: RuntimeConfig::default(),
+                stages: vec![StageDefinition {
+                    id: "incoming".to_string(),
+                    input_folder: "stages/incoming".to_string(),
+                    output_folder: String::new(),
+                    workflow_url: server.url.clone(),
+                    max_attempts: 3,
+                    retry_delay_sec: 0,
+                    next_stage: None,
+                }],
+            },
+        )
+        .expect("bootstrap");
+        std::fs::create_dir_all(source_path.parent().expect("source parent")).expect("parent");
+        std::fs::write(
+            &source_path,
+            r#"{"id":"entity-1","current_stage":"incoming","status":"pending","payload":{"title":"terminal"},"meta":{}}"#,
+        )
+        .expect("source");
+        scan_workspace(&workdir, &database_path).expect("scan");
+
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run");
+        let state = stage_state(&database_path, "incoming");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(state.status, "done");
+        assert!(state.created_child_path.is_none());
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].success);
         assert_eq!(server.requests.lock().expect("requests").len(), 1);
     }
 }

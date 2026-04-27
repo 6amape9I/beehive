@@ -7,6 +7,8 @@ mod discovery;
 mod domain;
 mod executor;
 mod file_ops;
+mod file_safety;
+mod state_machine;
 mod workdir;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

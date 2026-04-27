@@ -88,7 +88,7 @@ export function StageEditorPage() {
                       </div>
                     </td>
                     <td>{stage.input_folder}</td>
-                    <td>{stage.output_folder}</td>
+                    <td>{stage.output_folder.trim() ? stage.output_folder : "Not required"}</td>
                     <td>
                       <code>{stage.workflow_url}</code>
                     </td>

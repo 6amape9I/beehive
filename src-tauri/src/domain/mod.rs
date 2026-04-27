@@ -65,6 +65,7 @@ pub struct RuntimeConfig {
     pub max_parallel_tasks: u64,
     pub stuck_task_timeout_sec: u64,
     pub request_timeout_sec: u64,
+    pub file_stability_delay_ms: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -74,6 +75,7 @@ impl Default for RuntimeConfig {
             max_parallel_tasks: 3,
             stuck_task_timeout_sec: 900,
             request_timeout_sec: 30,
+            file_stability_delay_ms: 1000,
         }
     }
 }

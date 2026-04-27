@@ -12,14 +12,14 @@ use crate::database::{
     ensure_entity_stub, find_entity_by_id, find_entity_file_by_entity_stage,
     find_entity_file_by_path, insert_app_event, list_entity_files,
     load_active_stages_from_connection, mark_missing_files_for_active_stages, open_connection,
-    recompute_entity_summaries, set_setting, system_time_to_rfc3339, upsert_entity_file,
-    upsert_entity_stage_state, EntityFileWriteOutcome, PersistEntityFileInput,
-    PersistEntityStageStateInput,
+    recompute_entity_summaries, set_setting, upsert_entity_file, upsert_entity_stage_state,
+    EntityFileWriteOutcome, PersistEntityFileInput, PersistEntityStageStateInput,
 };
 use crate::domain::{
     AppEventLevel, ConfigValidationIssue, EntityValidationStatus, ScanSummary,
     StageDirectoryProvisionSummary, StageRecord, StageStatus, ValidationSeverity,
 };
+use crate::file_safety::{read_stable_file, FileStabilityIssue};
 use crate::workdir::path_string;
 
 pub fn ensure_stage_directories(
@@ -45,7 +45,16 @@ pub fn ensure_stage_directories(
     Ok(summary)
 }
 
+#[allow(dead_code)]
 pub fn scan_workspace(workdir_path: &Path, database_path: &Path) -> Result<ScanSummary, String> {
+    scan_workspace_with_stability_delay(workdir_path, database_path, 0)
+}
+
+pub fn scan_workspace_with_stability_delay(
+    workdir_path: &Path,
+    database_path: &Path,
+    file_stability_delay_ms: u64,
+) -> Result<ScanSummary, String> {
     let started_at = Instant::now();
     let started_at_rfc3339 = Utc::now().to_rfc3339();
     let scan_id = format!(
@@ -94,6 +103,7 @@ pub fn scan_workspace(workdir_path: &Path, database_path: &Path) -> Result<ScanS
             stage,
             &active_stage_ids,
             &scan_id,
+            file_stability_delay_ms,
             &mut seen_paths,
             &mut summary,
             &mut newly_registered_entities,
@@ -247,6 +257,7 @@ fn scan_stage(
     stage: &StageRecord,
     active_stage_ids: &HashSet<String>,
     scan_id: &str,
+    file_stability_delay_ms: u64,
     seen_paths: &mut HashSet<String>,
     summary: &mut MutableScanSummary,
     newly_registered_entities: &mut HashSet<String>,
@@ -301,6 +312,7 @@ fn scan_stage(
             &path,
             active_stage_ids,
             scan_id,
+            file_stability_delay_ms,
             newly_registered_entities,
         )? {
             FileProcessOutcome::Inserted => summary.registered_file_count += 1,
@@ -309,6 +321,7 @@ fn scan_stage(
             FileProcessOutcome::Restored => summary.restored_file_count += 1,
             FileProcessOutcome::Invalid => summary.invalid_count += 1,
             FileProcessOutcome::Duplicate => summary.duplicate_count += 1,
+            FileProcessOutcome::Skipped => {}
         }
     }
 
@@ -321,6 +334,7 @@ fn process_json_file(
     file_path: &Path,
     active_stage_ids: &HashSet<String>,
     scan_id: &str,
+    file_stability_delay_ms: u64,
     newly_registered_entities: &mut HashSet<String>,
 ) -> Result<FileProcessOutcome, String> {
     let file_path_string = path_string(file_path);
@@ -330,63 +344,29 @@ fn process_json_file(
         .unwrap_or("unknown.json")
         .to_string();
 
-    let metadata = match fs::metadata(file_path) {
-        Ok(metadata) => metadata,
-        Err(error) => {
+    let stable_read = match read_stable_file(file_path, file_stability_delay_ms) {
+        Ok(read) => read,
+        Err(issue) if issue.code == "unstable_file_skipped" => {
+            record_file_warning(transaction, scan_id, stage, file_path, &issue)?;
+            return Ok(FileProcessOutcome::Skipped);
+        }
+        Err(issue) => {
             record_file_error(
                 transaction,
                 scan_id,
                 stage,
                 file_path,
-                "file_metadata_unavailable",
-                format!(
-                    "Failed to read file metadata for '{}': {error}",
-                    file_path.display()
-                ),
+                issue.code,
+                issue.message,
             )?;
             return Ok(FileProcessOutcome::Invalid);
         }
     };
+    let file_size = stable_read.file_size;
+    let file_mtime = stable_read.file_mtime;
+    let checksum = format!("{:x}", Sha256::digest(&stable_read.bytes));
 
-    let file_size = metadata.len();
-    let file_mtime = match metadata.modified() {
-        Ok(modified) => system_time_to_rfc3339(modified),
-        Err(error) => {
-            record_file_error(
-                transaction,
-                scan_id,
-                stage,
-                file_path,
-                "file_metadata_unavailable",
-                format!(
-                    "Failed to read file modified time for '{}': {error}",
-                    file_path.display()
-                ),
-            )?;
-            return Ok(FileProcessOutcome::Invalid);
-        }
-    };
-
-    let bytes = match fs::read(file_path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            record_file_error(
-                transaction,
-                scan_id,
-                stage,
-                file_path,
-                "file_read_failed",
-                format!(
-                    "Failed to read JSON file '{}': {error}",
-                    file_path.display()
-                ),
-            )?;
-            return Ok(FileProcessOutcome::Invalid);
-        }
-    };
-    let checksum = format!("{:x}", Sha256::digest(&bytes));
-
-    let json_value = match serde_json::from_slice::<Value>(&bytes) {
+    let json_value = match serde_json::from_slice::<Value>(&stable_read.bytes) {
         Ok(value) => value,
         Err(error) => {
             record_file_error(
@@ -698,6 +678,28 @@ fn record_file_error(
     )
 }
 
+fn record_file_warning(
+    transaction: &Transaction<'_>,
+    scan_id: &str,
+    stage: &StageRecord,
+    file_path: &Path,
+    issue: &FileStabilityIssue,
+) -> Result<(), String> {
+    insert_app_event(
+        transaction,
+        AppEventLevel::Warning,
+        issue.code,
+        &issue.message,
+        Some(json!({
+            "scan_id": scan_id,
+            "stage_id": stage.id.clone(),
+            "file_path": path_string(file_path),
+            "file_name": file_path.file_name().and_then(|value| value.to_str()).unwrap_or("unknown"),
+        })),
+        &Utc::now().to_rfc3339(),
+    )
+}
+
 fn issue(
     severity: ValidationSeverity,
     code: impl Into<String>,
@@ -780,6 +782,7 @@ enum FileProcessOutcome {
     Restored,
     Invalid,
     Duplicate,
+    Skipped,
 }
 
 #[cfg(test)]
@@ -1074,6 +1077,42 @@ mod tests {
 
         assert_eq!(summary.invalid_count, 1);
         assert!(events.iter().any(|event| event.code == "invalid_json_file"));
+    }
+
+    #[test]
+    fn fresh_unstable_json_is_skipped_without_invalid_event_then_registers_when_stable() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        let file_path = workdir
+            .join("stages")
+            .join("incoming")
+            .join("entity-1.json");
+        bootstrap_database(
+            &database_path,
+            &test_config(vec![stage(
+                "incoming",
+                "stages/incoming",
+                "stages/out",
+                None,
+            )]),
+        )
+        .expect("bootstrap");
+        write_json(&file_path, r#"{"id":"entity-1","payload":{"ok":true}}"#);
+
+        let skipped =
+            scan_workspace_with_stability_delay(&workdir, &database_path, 60_000).expect("scan");
+        let events = list_app_events(&database_path, 20).expect("events");
+        let registered = scan_workspace(&workdir, &database_path).expect("stable scan");
+        let entities = list_entities(&database_path, &EntityFilters::default()).expect("entities");
+
+        assert_eq!(skipped.registered_file_count, 0);
+        assert_eq!(skipped.invalid_count, 0);
+        assert!(events
+            .iter()
+            .any(|event| event.code == "unstable_file_skipped"));
+        assert_eq!(registered.registered_file_count, 1);
+        assert_eq!(entities.len(), 1);
     }
 
     #[test]
