@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -366,66 +367,108 @@ pub fn create_next_stage_copy(
     })
 }
 
-pub fn create_next_stage_copy_from_response(
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ResponseCopyPayload {
+    pub status: FileCopyStatus,
+    pub source_entity_id: String,
+    pub source_stage_id: String,
+    pub target_stage_id: Option<String>,
+    pub source_file_path: Option<String>,
+    pub target_file_paths: Vec<String>,
+    pub target_files: Vec<crate::domain::EntityFileRecord>,
+    pub output_count: usize,
+    pub message: String,
+}
+
+struct PlannedResponseTarget {
+    child_entity_id: String,
+    file_name: String,
+    target_path: PathBuf,
+    bytes: Vec<u8>,
+    checksum: String,
+    existing_bytes: Option<Vec<u8>>,
+    existing_checksum: Option<String>,
+}
+
+pub fn create_next_stage_copies_from_response(
     workdir_path: &Path,
     database_path: &Path,
-    entity_id: &str,
+    source_entity_id: &str,
     source_stage_id: &str,
-    response_payload: Value,
+    response_payloads: &[Value],
     response_meta: Option<Value>,
     stage_run_id: &str,
-) -> Result<FileCopyPayload, String> {
+) -> Result<ResponseCopyPayload, String> {
     let connection = open_connection(database_path)?;
     let source_stage = find_stage_by_id(&connection, source_stage_id)?
         .ok_or_else(|| format!("Source stage '{source_stage_id}' was not found."))?;
-    let source_file = find_latest_entity_file_for_stage(&connection, entity_id, source_stage_id)?
-        .ok_or_else(|| {
-        format!(
-            "No file instance was found for entity '{}' on source stage '{}'.",
-            entity_id, source_stage_id
-        )
-    })?;
+    let source_file =
+        find_latest_entity_file_for_stage(&connection, source_entity_id, source_stage_id)?
+            .ok_or_else(|| {
+                format!(
+                    "No file instance was found for entity '{}' on source stage '{}'.",
+                    source_entity_id, source_stage_id
+                )
+            })?;
 
     let Some(target_stage_id) = source_file
         .next_stage
         .clone()
         .or_else(|| source_stage.next_stage.clone())
     else {
-        return Ok(FileCopyPayload {
+        return Ok(ResponseCopyPayload {
             status: FileCopyStatus::Blocked,
-            entity_id: entity_id.to_string(),
+            source_entity_id: source_entity_id.to_string(),
             source_stage_id: source_stage_id.to_string(),
             target_stage_id: None,
             source_file_path: Some(source_file.file_path),
-            target_file_path: None,
-            target_file: None,
+            target_file_paths: Vec::new(),
+            target_files: Vec::new(),
+            output_count: response_payloads.len(),
             message: "No next stage is configured for this source stage.".to_string(),
         });
     };
 
     let Some(target_stage) = find_stage_by_id(&connection, &target_stage_id)? else {
-        return Ok(FileCopyPayload {
+        return Ok(ResponseCopyPayload {
             status: FileCopyStatus::Blocked,
-            entity_id: entity_id.to_string(),
+            source_entity_id: source_entity_id.to_string(),
             source_stage_id: source_stage_id.to_string(),
             target_stage_id: Some(target_stage_id),
             source_file_path: Some(source_file.file_path),
-            target_file_path: None,
-            target_file: None,
+            target_file_paths: Vec::new(),
+            target_files: Vec::new(),
+            output_count: response_payloads.len(),
             message: "The resolved next stage does not exist.".to_string(),
         });
     };
 
     if !target_stage.is_active {
-        return Ok(FileCopyPayload {
+        return Ok(ResponseCopyPayload {
             status: FileCopyStatus::Blocked,
-            entity_id: entity_id.to_string(),
+            source_entity_id: source_entity_id.to_string(),
             source_stage_id: source_stage_id.to_string(),
             target_stage_id: Some(target_stage.id),
             source_file_path: Some(source_file.file_path),
-            target_file_path: None,
-            target_file: None,
+            target_file_paths: Vec::new(),
+            target_files: Vec::new(),
+            output_count: response_payloads.len(),
             message: "The resolved next stage is inactive.".to_string(),
+        });
+    }
+
+    if response_payloads.is_empty() {
+        return Ok(ResponseCopyPayload {
+            status: FileCopyStatus::Failed,
+            source_entity_id: source_entity_id.to_string(),
+            source_stage_id: source_stage_id.to_string(),
+            target_stage_id: Some(target_stage.id),
+            source_file_path: Some(source_file.file_path),
+            target_file_paths: Vec::new(),
+            target_files: Vec::new(),
+            output_count: 0,
+            message: "n8n response did not contain any output payload objects.".to_string(),
         });
     }
 
@@ -451,148 +494,161 @@ pub fn create_next_stage_copy_from_response(
     let source_root = source_json
         .as_object()
         .ok_or_else(|| "Source JSON root must be an object before response copy.".to_string())?;
+    drop(connection);
 
     let now = Utc::now().to_rfc3339();
-    let updated_json = build_target_json_from_response(
-        source_root,
-        entity_id,
-        source_stage_id,
-        &target_stage.id,
-        target_stage.next_stage.as_deref(),
-        response_payload,
-        response_meta,
-        source_file.id,
-        stage_run_id,
-        &now,
-    )?;
-    let target_path = workdir_path
-        .join(&target_stage.input_folder)
-        .join(&source_file.file_name);
-    let target_path_string = path_string(&target_path);
-    let target_bytes = serde_json::to_vec_pretty(&updated_json).map_err(|error| {
-        format!("Failed to serialize target JSON for n8n response copy: {error}")
-    })?;
-    let target_checksum = format!("{:x}", Sha256::digest(&target_bytes));
-
-    if target_path.exists() {
-        let existing_bytes = fs::read(&target_path).map_err(|error| {
-            format!(
-                "Failed to read existing target file '{}' during response copy collision check: {error}",
-                target_path.display()
-            )
-        })?;
-        let existing_json = serde_json::from_slice::<Value>(&existing_bytes).map_err(|error| {
-            format!(
-                "Failed to parse existing target file '{}' during response copy collision check: {error}",
-                target_path.display()
-            )
-        })?;
-        let existing_checksum = format!("{:x}", Sha256::digest(&existing_bytes));
-        let existing_entity_id = existing_json
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-
-        if existing_entity_id != entity_id {
-            return Ok(FileCopyPayload {
+    let mut planned_paths = HashSet::new();
+    let mut plans = Vec::new();
+    let output_count = response_payloads.len();
+    for (index, payload) in response_payloads.iter().enumerate() {
+        let Some(_) = payload.as_object() else {
+            return Ok(ResponseCopyPayload {
                 status: FileCopyStatus::Failed,
-                entity_id: entity_id.to_string(),
+                source_entity_id: source_entity_id.to_string(),
                 source_stage_id: source_stage_id.to_string(),
                 target_stage_id: Some(target_stage.id),
                 source_file_path: Some(source_file.file_path),
-                target_file_path: Some(path_string(&target_path)),
-                target_file: None,
-                message: "Target path already exists for another entity.".to_string(),
+                target_file_paths: Vec::new(),
+                target_files: Vec::new(),
+                output_count,
+                message: format!("n8n output item at index {index} is not a JSON object."),
             });
-        }
+        };
+        let plan = match choose_response_target_plan(
+            workdir_path,
+            source_root,
+            source_entity_id,
+            source_stage_id,
+            &target_stage.id,
+            target_stage.next_stage.as_deref(),
+            payload,
+            response_meta.clone(),
+            source_file.id,
+            stage_run_id,
+            index,
+            output_count,
+            &now,
+            &target_stage.input_folder,
+            &mut planned_paths,
+        ) {
+            Ok(plan) => plan,
+            Err(message) => {
+                return Ok(ResponseCopyPayload {
+                    status: FileCopyStatus::Failed,
+                    source_entity_id: source_entity_id.to_string(),
+                    source_stage_id: source_stage_id.to_string(),
+                    target_stage_id: Some(target_stage.id),
+                    source_file_path: Some(source_file.file_path),
+                    target_file_paths: Vec::new(),
+                    target_files: Vec::new(),
+                    output_count,
+                    message,
+                });
+            }
+        };
+        plans.push(plan);
+    }
 
-        let is_compatible_existing_target = existing_checksum == target_checksum
-            || existing_json.as_object().is_some_and(|root| {
-                root.get("id").and_then(Value::as_str) == Some(entity_id)
-                    && root.get("current_stage").and_then(Value::as_str)
-                        == Some(target_stage.id.as_str())
-                    && root.get("status").and_then(Value::as_str) == Some("pending")
-                    && root.get("next_stage").and_then(Value::as_str)
-                        == target_stage.next_stage.as_deref()
-                    && root
-                        .get("meta")
-                        .and_then(Value::as_object)
-                        .and_then(|meta| meta.get("beehive"))
-                        .and_then(Value::as_object)
-                        .is_some_and(|beehive| {
-                            beehive
-                                .get("source_stage_id")
-                                .or_else(|| beehive.get("copy_source_stage"))
-                                .and_then(Value::as_str)
-                                == Some(source_stage_id)
-                                && beehive
-                                    .get("target_stage_id")
-                                    .or_else(|| beehive.get("copy_target_stage"))
-                                    .and_then(Value::as_str)
-                                    == Some(target_stage.id.as_str())
-                        })
-            });
-
-        if !is_compatible_existing_target {
-            return Ok(FileCopyPayload {
-                status: FileCopyStatus::Failed,
-                entity_id: entity_id.to_string(),
-                source_stage_id: source_stage_id.to_string(),
-                target_stage_id: Some(target_stage.id),
-                source_file_path: Some(source_file.file_path),
-                target_file_path: Some(target_path_string),
-                target_file: None,
-                message: "Target path already exists with different content.".to_string(),
-            });
-        }
-
+    let mut target_files = Vec::new();
+    let mut target_paths = Vec::new();
+    let mut created_count = 0_u64;
+    let mut already_exists_count = 0_u64;
+    for plan in &plans {
+        let (bytes, checksum) = if let (Some(existing_bytes), Some(existing_checksum)) =
+            (&plan.existing_bytes, &plan.existing_checksum)
+        {
+            already_exists_count += 1;
+            (existing_bytes.as_slice(), existing_checksum.as_str())
+        } else {
+            write_atomic_json(&plan.target_path, &plan.bytes)?;
+            created_count += 1;
+            (plan.bytes.as_slice(), plan.checksum.as_str())
+        };
         let target_file = register_target_file(
             database_path,
             &target_stage.id,
             &target_stage.next_stage,
-            entity_id,
-            &target_path,
-            &source_file.file_name,
-            &existing_checksum,
-            &existing_bytes,
+            &plan.child_entity_id,
+            &plan.target_path,
+            &plan.file_name,
+            checksum,
+            bytes,
             Some(source_file.id),
             &now,
         )?;
-        return Ok(FileCopyPayload {
-            status: FileCopyStatus::AlreadyExists,
-            entity_id: entity_id.to_string(),
-            source_stage_id: source_stage_id.to_string(),
-            target_stage_id: Some(target_stage.id),
-            source_file_path: Some(source_file.file_path),
-            target_file_path: Some(path_string(&target_path)),
-            target_file: Some(target_file),
-            message: "Target file already exists with compatible content.".to_string(),
-        });
+        target_paths.push(path_string(&plan.target_path));
+        target_files.push(target_file);
     }
 
-    write_atomic_json(&target_path, &target_bytes)?;
-    let target_file = register_target_file(
-        database_path,
-        &target_stage.id,
-        &target_stage.next_stage,
-        entity_id,
-        &target_path,
-        &source_file.file_name,
-        &target_checksum,
-        &target_bytes,
-        Some(source_file.id),
+    let connection = open_connection(database_path)?;
+    insert_app_event(
+        &connection,
+        AppEventLevel::Info,
+        "managed_copy_created",
+        &format!(
+            "Registered {} n8n output artifact(s) from entity '{}' into stage '{}'.",
+            output_count, source_entity_id, target_stage.id
+        ),
+        Some(json!({
+            "source_entity_id": source_entity_id,
+            "source_stage_id": source_stage_id,
+            "source_file_id": source_file.id,
+            "source_file_path": &source_file.file_path,
+            "target_stage_id": &target_stage.id,
+            "stage_run_id": stage_run_id,
+            "output_count": output_count,
+            "created_count": created_count,
+            "already_exists_count": already_exists_count,
+            "target_file_paths": &target_paths,
+        })),
         &now,
     )?;
 
-    Ok(FileCopyPayload {
-        status: FileCopyStatus::Created,
-        entity_id: entity_id.to_string(),
+    Ok(ResponseCopyPayload {
+        status: if created_count == 0 {
+            FileCopyStatus::AlreadyExists
+        } else {
+            FileCopyStatus::Created
+        },
+        source_entity_id: source_entity_id.to_string(),
         source_stage_id: source_stage_id.to_string(),
         target_stage_id: Some(target_stage.id),
         source_file_path: Some(source_file.file_path),
-        target_file_path: Some(path_string(&target_path)),
-        target_file: Some(target_file),
-        message: "Managed n8n response copy created successfully.".to_string(),
+        target_file_paths: target_paths,
+        target_files,
+        output_count,
+        message: format!("Registered {output_count} n8n output artifact(s)."),
+    })
+}
+
+#[allow(dead_code)]
+pub fn create_next_stage_copy_from_response(
+    workdir_path: &Path,
+    database_path: &Path,
+    entity_id: &str,
+    source_stage_id: &str,
+    response_payload: Value,
+    response_meta: Option<Value>,
+    stage_run_id: &str,
+) -> Result<FileCopyPayload, String> {
+    let copy = create_next_stage_copies_from_response(
+        workdir_path,
+        database_path,
+        entity_id,
+        source_stage_id,
+        &[response_payload],
+        response_meta,
+        stage_run_id,
+    )?;
+    Ok(FileCopyPayload {
+        status: copy.status,
+        entity_id: copy.source_entity_id,
+        source_stage_id: copy.source_stage_id,
+        target_stage_id: copy.target_stage_id,
+        source_file_path: copy.source_file_path,
+        target_file_path: copy.target_file_paths.first().cloned(),
+        target_file: copy.target_files.first().cloned(),
+        message: copy.message,
     })
 }
 
@@ -797,9 +853,254 @@ fn build_target_json(
     Ok(Value::Object(next_root))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn choose_response_target_plan(
+    workdir_path: &Path,
+    source_root: &Map<String, Value>,
+    source_entity_id: &str,
+    source_stage_id: &str,
+    target_stage_id: &str,
+    next_stage: Option<&str>,
+    response_payload: &Value,
+    response_meta: Option<Value>,
+    source_file_id: i64,
+    stage_run_id: &str,
+    output_index: usize,
+    output_count: usize,
+    now: &str,
+    target_input_folder: &str,
+    planned_paths: &mut HashSet<String>,
+) -> Result<PlannedResponseTarget, String> {
+    let generated_id = generated_child_entity_id(
+        source_entity_id,
+        target_stage_id,
+        output_index,
+        response_payload,
+    )?;
+    let explicit_id = response_payload
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| is_safe_child_entity_id(value))
+        .map(ToOwned::to_owned);
+    let mut candidate_ids = Vec::new();
+    if let Some(explicit_id) = explicit_id {
+        candidate_ids.push(explicit_id);
+    }
+    if !candidate_ids
+        .iter()
+        .any(|candidate| candidate == &generated_id)
+    {
+        candidate_ids.push(generated_id);
+    }
+
+    let mut last_rejection = None;
+    for child_entity_id in candidate_ids {
+        let file_name = format!("{child_entity_id}.json");
+        let target_path = workdir_path.join(target_input_folder).join(&file_name);
+        let target_path_string = path_string(&target_path);
+        if planned_paths.contains(&target_path_string) {
+            last_rejection = Some(format!(
+                "Output target path '{}' is already planned by another response item.",
+                target_path.display()
+            ));
+            continue;
+        }
+
+        let target_json = build_target_json_from_response(
+            source_root,
+            &child_entity_id,
+            source_entity_id,
+            source_stage_id,
+            target_stage_id,
+            next_stage,
+            response_payload.clone(),
+            response_meta.clone(),
+            source_file_id,
+            stage_run_id,
+            output_index,
+            output_count,
+            now,
+        )?;
+        let bytes = serde_json::to_vec_pretty(&target_json).map_err(|error| {
+            format!("Failed to serialize target JSON for n8n response copy: {error}")
+        })?;
+        let checksum = format!("{:x}", Sha256::digest(&bytes));
+
+        let (existing_bytes, existing_checksum) = if target_path.exists() {
+            let existing_bytes = fs::read(&target_path).map_err(|error| {
+                format!(
+                    "Failed to read existing target file '{}' during response copy collision check: {error}",
+                    target_path.display()
+                )
+            })?;
+            let existing_json = serde_json::from_slice::<Value>(&existing_bytes).map_err(|error| {
+                format!(
+                    "Failed to parse existing target file '{}' during response copy collision check: {error}",
+                    target_path.display()
+                )
+            })?;
+            let existing_checksum = format!("{:x}", Sha256::digest(&existing_bytes));
+            if !is_compatible_response_target(
+                &existing_json,
+                &checksum,
+                &existing_checksum,
+                &child_entity_id,
+                source_entity_id,
+                source_file_id,
+                source_stage_id,
+                target_stage_id,
+                next_stage,
+                response_payload,
+                output_index,
+            ) {
+                last_rejection = Some(format!(
+                    "Target path '{}' already exists with different content.",
+                    target_path.display()
+                ));
+                continue;
+            }
+            (Some(existing_bytes), Some(existing_checksum))
+        } else {
+            (None, None)
+        };
+
+        planned_paths.insert(target_path_string);
+        return Ok(PlannedResponseTarget {
+            child_entity_id,
+            file_name,
+            target_path,
+            bytes,
+            checksum,
+            existing_bytes,
+            existing_checksum,
+        });
+    }
+
+    Err(last_rejection.unwrap_or_else(|| {
+        format!("No safe target file name could be planned for output item {output_index}.")
+    }))
+}
+
+fn is_safe_child_entity_id(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn generated_child_entity_id(
+    source_entity_id: &str,
+    target_stage_id: &str,
+    output_index: usize,
+    response_payload: &Value,
+) -> Result<String, String> {
+    let canonical = canonical_json_bytes(response_payload)?;
+    let hash = format!("{:x}", Sha256::digest(&canonical));
+    Ok(format!(
+        "{}__{}__{}_{}",
+        sanitize_id_part(source_entity_id),
+        sanitize_id_part(target_stage_id),
+        output_index,
+        &hash[..8]
+    ))
+}
+
+fn sanitize_id_part(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if sanitized.trim_matches('-').is_empty() {
+        "item".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, String> {
+    fn normalize(value: &Value) -> Value {
+        match value {
+            Value::Array(items) => Value::Array(items.iter().map(normalize).collect()),
+            Value::Object(object) => {
+                let mut entries = object.iter().collect::<Vec<_>>();
+                entries.sort_by(|left, right| left.0.cmp(right.0));
+                let mut normalized = Map::new();
+                for (key, value) in entries {
+                    normalized.insert(key.clone(), normalize(value));
+                }
+                Value::Object(normalized)
+            }
+            other => other.clone(),
+        }
+    }
+    serde_json::to_vec(&normalize(value))
+        .map_err(|error| format!("Failed to serialize canonical payload JSON: {error}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn is_compatible_response_target(
+    existing_json: &Value,
+    planned_checksum: &str,
+    existing_checksum: &str,
+    child_entity_id: &str,
+    source_entity_id: &str,
+    source_file_id: i64,
+    source_stage_id: &str,
+    target_stage_id: &str,
+    next_stage: Option<&str>,
+    response_payload: &Value,
+    output_index: usize,
+) -> bool {
+    if existing_checksum == planned_checksum {
+        return true;
+    }
+    let Some(root) = existing_json.as_object() else {
+        return false;
+    };
+    if root.get("id").and_then(Value::as_str) != Some(child_entity_id)
+        || root.get("current_stage").and_then(Value::as_str) != Some(target_stage_id)
+        || root.get("status").and_then(Value::as_str) != Some("pending")
+        || root.get("payload") != Some(response_payload)
+    {
+        return false;
+    }
+    if optional_string(root.get("next_stage")) != next_stage {
+        return false;
+    }
+    let Some(beehive) = root
+        .get("meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("beehive"))
+        .and_then(Value::as_object)
+    else {
+        return false;
+    };
+    beehive.get("source_entity_id").and_then(Value::as_str) == Some(source_entity_id)
+        && beehive.get("source_entity_file_id").and_then(Value::as_i64) == Some(source_file_id)
+        && beehive.get("source_stage_id").and_then(Value::as_str) == Some(source_stage_id)
+        && beehive.get("target_stage_id").and_then(Value::as_str) == Some(target_stage_id)
+        && beehive.get("output_index").and_then(Value::as_u64) == Some(output_index as u64)
+}
+
+fn optional_string(value: Option<&Value>) -> Option<&str> {
+    match value {
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(Value::Null) | None => None,
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_target_json_from_response(
     source_root: &Map<String, Value>,
-    entity_id: &str,
+    child_entity_id: &str,
+    source_entity_id: &str,
     source_stage_id: &str,
     target_stage_id: &str,
     next_stage: Option<&str>,
@@ -807,6 +1108,8 @@ fn build_target_json_from_response(
     response_meta: Option<Value>,
     source_file_id: i64,
     stage_run_id: &str,
+    output_index: usize,
+    output_count: usize,
     now: &str,
 ) -> Result<Value, String> {
     if !response_payload.is_object() {
@@ -814,7 +1117,7 @@ fn build_target_json_from_response(
     }
 
     let mut root = Map::new();
-    root.insert("id".to_string(), Value::String(entity_id.to_string()));
+    root.insert("id".to_string(), Value::String(child_entity_id.to_string()));
     root.insert(
         "current_stage".to_string(),
         Value::String(target_stage_id.to_string()),
@@ -840,15 +1143,19 @@ fn build_target_json_from_response(
             }
         }
     }
+    meta.insert("source".to_string(), Value::String("n8n".to_string()));
+    meta.entry("created_at".to_string())
+        .or_insert_with(|| Value::String(now.to_string()));
     meta.insert("updated_at".to_string(), Value::String(now.to_string()));
 
-    let mut beehive = meta
-        .remove("beehive")
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
+    let mut beehive = Map::new();
     beehive.insert(
         "created_by".to_string(),
-        Value::String("stage4_n8n_execution".to_string()),
+        Value::String("n8n_response".to_string()),
+    );
+    beehive.insert(
+        "source_entity_id".to_string(),
+        Value::String(source_entity_id.to_string()),
     );
     beehive.insert(
         "source_stage_id".to_string(),
@@ -865,6 +1172,14 @@ fn build_target_json_from_response(
     beehive.insert(
         "stage_run_id".to_string(),
         Value::String(stage_run_id.to_string()),
+    );
+    beehive.insert(
+        "output_index".to_string(),
+        Value::Number((output_index as u64).into()),
+    );
+    beehive.insert(
+        "output_count".to_string(),
+        Value::Number((output_count as u64).into()),
     );
     beehive.insert(
         "copy_source_stage".to_string(),

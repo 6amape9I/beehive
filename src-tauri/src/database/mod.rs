@@ -298,10 +298,12 @@ pub fn list_entity_table_page(
         .filter(|value| !value.is_empty())
     {
         where_clauses.push(
-            "(LOWER(entity.entity_id) LIKE ? OR LOWER(COALESCE(entity.latest_file_path, '')) LIKE ?)"
+            "(LOWER(entity.entity_id) LIKE ? OR LOWER(COALESCE(entity.latest_file_path, '')) LIKE ? OR LOWER(COALESCE(latest_file.file_name, '')) LIKE ? OR LOWER(COALESCE(latest_file.payload_json, '')) LIKE ?)"
                 .to_string(),
         );
         let pattern = format!("%{}%", search.to_lowercase());
+        values.push(SqlValue::Text(pattern.clone()));
+        values.push(SqlValue::Text(pattern.clone()));
         values.push(SqlValue::Text(pattern.clone()));
         values.push(SqlValue::Text(pattern));
     }
@@ -345,6 +347,8 @@ pub fn list_entity_table_page(
         r#"
         SELECT COUNT(*)
         FROM entities entity
+        LEFT JOIN entity_files latest_file
+          ON latest_file.id = entity.latest_file_id
         LEFT JOIN entity_stage_states state
           ON state.entity_id = entity.entity_id
          AND state.stage_id = entity.current_stage_id
@@ -369,6 +373,7 @@ pub fn list_entity_table_page(
             COALESCE(state.status, entity.current_status) AS runtime_status,
             entity.latest_file_path,
             entity.latest_file_id,
+            latest_file.payload_json,
             entity.file_count,
             state.attempts,
             state.max_attempts,
@@ -381,6 +386,8 @@ pub fn list_entity_table_page(
             entity.updated_at,
             entity.last_seen_at
         FROM entities entity
+        LEFT JOIN entity_files latest_file
+          ON latest_file.id = entity.latest_file_id
         LEFT JOIN entity_stage_states state
           ON state.entity_id = entity.entity_id
          AND state.stage_id = entity.current_stage_id
@@ -791,6 +798,7 @@ pub fn get_workspace_explorer(
         .collect();
 
     let entity_trails = build_workspace_entity_trails(
+        workdir_path,
         &files,
         &state_by_file_id,
         &stage_order,
@@ -986,6 +994,7 @@ fn stage_state_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityStage
 }
 
 fn build_workspace_entity_trails(
+    workdir_path: &Path,
     files: &[EntityFileRecord],
     state_by_file_id: &HashMap<i64, EntityStageStateRecord>,
     stage_order: &HashMap<String, usize>,
@@ -1011,16 +1020,25 @@ fn build_workspace_entity_trails(
         });
         let nodes = entity_files
             .iter()
-            .map(|file| WorkspaceEntityTrailNode {
-                entity_file_id: file.id,
-                stage_id: file.stage_id.clone(),
-                file_name: file.file_name.clone(),
-                file_path: file.file_path.clone(),
-                file_exists: file.file_exists,
-                runtime_status: state_by_file_id
-                    .get(&file.id)
-                    .map(|state| state.status.clone()),
-                is_managed_copy: file.is_managed_copy,
+            .map(|file| {
+                let absolute_path = workdir_path.join(&file.file_path);
+                let parent_exists = absolute_path
+                    .parent()
+                    .map(|parent| parent.exists())
+                    .unwrap_or(false);
+                WorkspaceEntityTrailNode {
+                    entity_file_id: file.id,
+                    stage_id: file.stage_id.clone(),
+                    file_name: file.file_name.clone(),
+                    file_path: file.file_path.clone(),
+                    file_exists: file.file_exists,
+                    runtime_status: state_by_file_id
+                        .get(&file.id)
+                        .map(|state| state.status.clone()),
+                    is_managed_copy: file.is_managed_copy,
+                    can_open_file: file.file_exists && absolute_path.exists(),
+                    can_open_folder: parent_exists,
+                }
             })
             .collect::<Vec<_>>();
 
@@ -3920,24 +3938,37 @@ fn entity_table_sort_expression(sort_by: Option<&str>) -> &'static str {
 }
 
 fn entity_table_row_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityTableRow> {
+    let payload_json: Option<String> = row.get(5)?;
     Ok(EntityTableRow {
         entity_id: row.get(0)?,
+        display_name: entity_display_name_from_payload(payload_json.as_deref()),
         current_stage_id: row.get(1)?,
         current_status: row.get(2)?,
         latest_file_path: row.get(3)?,
         latest_file_id: row.get(4)?,
-        file_count: row.get::<_, i64>(5)? as u64,
-        attempts: row.get::<_, Option<i64>>(6)?.map(|value| value as u64),
-        max_attempts: row.get::<_, Option<i64>>(7)?.map(|value| value as u64),
-        last_error: row.get(8)?,
-        last_http_status: row.get(9)?,
-        next_retry_at: row.get(10)?,
-        last_started_at: row.get(11)?,
-        last_finished_at: row.get(12)?,
-        validation_status: parse_validation_status(&row.get::<_, String>(13)?)?,
-        updated_at: row.get(14)?,
-        last_seen_at: row.get(15)?,
+        file_count: row.get::<_, i64>(6)? as u64,
+        attempts: row.get::<_, Option<i64>>(7)?.map(|value| value as u64),
+        max_attempts: row.get::<_, Option<i64>>(8)?.map(|value| value as u64),
+        last_error: row.get(9)?,
+        last_http_status: row.get(10)?,
+        next_retry_at: row.get(11)?,
+        last_started_at: row.get(12)?,
+        last_finished_at: row.get(13)?,
+        validation_status: parse_validation_status(&row.get::<_, String>(14)?)?,
+        updated_at: row.get(15)?,
+        last_seen_at: row.get(16)?,
     })
+}
+
+fn entity_display_name_from_payload(payload_json: Option<&str>) -> Option<String> {
+    let payload = payload_json?;
+    let value = serde_json::from_str::<Value>(payload).ok()?;
+    let name = value.get("entity_name")?.as_str()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 fn load_available_entity_statuses(connection: &Connection) -> Result<Vec<String>, String> {
@@ -4518,12 +4549,12 @@ mod tests {
         fs::create_dir_all(&incoming).expect("incoming");
         fs::write(
             incoming.join("entity-a.json"),
-            r#"{"id":"entity-a","payload":{"value":1},"status":"pending"}"#,
+            r#"{"id":"entity-a","payload":{"entity_name":"alpha","value":1},"status":"pending"}"#,
         )
         .expect("entity a");
         fs::write(
             incoming.join("entity-b.json"),
-            r#"{"id":"entity-b","payload":{"value":2},"status":"pending"}"#,
+            r#"{"id":"entity-b","payload":{"entity_name":"керамика","value":2},"status":"pending"}"#,
         )
         .expect("entity b");
         scan_workspace(&workdir, &database_path).expect("scan");
@@ -4549,7 +4580,7 @@ mod tests {
         let filtered = list_entity_table_page(
             &database_path,
             &EntityListQuery {
-                search: Some("entity-b".to_string()),
+                search: Some("керамика".to_string()),
                 status: Some("failed".to_string()),
                 sort_by: Some("attempts".to_string()),
                 sort_direction: Some("desc".to_string()),
@@ -4573,6 +4604,10 @@ mod tests {
 
         assert_eq!(filtered.total, 1);
         assert_eq!(filtered.entities[0].entity_id, "entity-b");
+        assert_eq!(
+            filtered.entities[0].display_name.as_deref(),
+            Some("керамика")
+        );
         assert_eq!(filtered.entities[0].attempts, Some(2));
         assert_eq!(
             filtered.entities[0].last_error.as_deref(),

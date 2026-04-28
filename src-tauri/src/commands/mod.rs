@@ -6,13 +6,15 @@ use crate::dashboard;
 use crate::database;
 use crate::discovery;
 use crate::domain::{
-    AppEventsResult, BootstrapResult, CommandErrorInfo, DashboardOverviewResult,
-    EntityDetailResult, EntityFilesResult, EntityListQuery, EntityListResult, FileCopyResult,
-    ManualEntityStageActionResult, OpenEntityPathPayload, OpenEntityPathResult,
-    PipelineConfigDraft, PipelineEditorStateResult, ReconcileStuckTasksResult, RunDueTasksResult,
-    RunEntityStageResult, RuntimeSummaryResult, SaveEntityFileJsonResult, SavePipelineConfigResult,
-    ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult, StageRunsResult,
-    ValidatePipelineConfigDraftResult, WorkspaceExplorerResult, WorkspaceExplorerTotals,
+    AppEventsResult, BootstrapResult, CommandErrorInfo, ConfigValidationIssue,
+    DashboardOverviewResult, EntityDetailResult, EntityFilesResult, EntityListQuery,
+    EntityListResult, FileCopyResult, ManualEntityStageActionResult, OpenEntityPathPayload,
+    OpenEntityPathResult, PipelineConfigDraft, PipelineEditorStateResult,
+    ReconcileStuckTasksResult, RunDueTasksResult, RunEntityStageResult, RuntimeSummaryResult,
+    SaveEntityFileJsonResult, SavePipelineConfigResult, ScanWorkspaceResult,
+    StageDirectoryProvisionResult, StageListResult, StageRunsResult,
+    ValidatePipelineConfigDraftResult, ValidationSeverity, WorkspaceExplorerResult,
+    WorkspaceExplorerTotals,
 };
 use crate::executor;
 use crate::file_open::{self, OpenEntityPathKind};
@@ -171,7 +173,14 @@ pub fn validate_pipeline_config_draft(
     match pipeline_editor::validate_pipeline_config_draft(&path, &draft) {
         Ok(result) => result,
         Err(message) => ValidatePipelineConfigDraftResult {
-            validation: crate::domain::ConfigValidationResult::from_issues(Vec::new()),
+            validation: crate::domain::ConfigValidationResult::from_issues(vec![
+                ConfigValidationIssue {
+                    severity: ValidationSeverity::Error,
+                    code: "pipeline_draft_validation_failed".to_string(),
+                    path: "pipeline".to_string(),
+                    message: message.clone(),
+                },
+            ]),
             normalized_config: None,
             yaml_preview: None,
             stage_usages: Vec::new(),

@@ -35,7 +35,7 @@ export function EntityFilters({
             value={query.search ?? ""}
             disabled={disabled}
             onChange={(event) => onChange({ search: event.target.value, page: 1 })}
-            placeholder="Entity ID or file path"
+            placeholder="Entity ID, business name, or file path"
           />
         </div>
         <div className="form-row">
@@ -95,4 +95,3 @@ export function EntityFilters({
     </section>
   );
 }
-

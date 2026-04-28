@@ -1,0 +1,31 @@
+project:
+  name: beehive-demo
+  workdir: .
+runtime:
+  scan_interval_sec: 5
+  max_parallel_tasks: 3
+  stuck_task_timeout_sec: 120
+  request_timeout_sec: 60
+  file_stability_delay_ms: 300
+stages:
+- id: semantic_split
+  input_folder: stages/incoming
+  output_folder: stages/n8n_output
+  workflow_url: https://n8n-dev.steos.io/webhook/b0c81347-5f51-4142-b1d9-18451d8c4ecf
+  max_attempts: 2
+  retry_delay_sec: 5
+  next_stage: review
+- id: review
+  input_folder: stages/n8n_output
+  output_folder: ''
+  workflow_url: https://n8n-dev.steos.io/webhook/b0c81347-5f51-4142-b1d9-18451d8c4ecf
+  max_attempts: 2
+  retry_delay_sec: 5
+  next_stage: null
+- id: test_stage
+  input_folder: stages/new_stage
+  output_folder: stages/new_stage_out
+  workflow_url: http://localhost:5678/webhook/new_stage
+  max_attempts: 3
+  retry_delay_sec: 10
+  next_stage: semantic_split

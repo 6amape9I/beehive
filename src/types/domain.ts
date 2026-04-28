@@ -249,6 +249,7 @@ export interface EntityListQuery {
 
 export interface EntityTableRow {
   entity_id: string;
+  display_name: string | null;
   current_stage_id: string | null;
   current_status: string;
   latest_file_path: string | null;
@@ -678,6 +679,8 @@ export interface WorkspaceEntityTrailNode {
   file_exists: boolean;
   runtime_status: string | null;
   is_managed_copy: boolean;
+  can_open_file: boolean;
+  can_open_folder: boolean;
 }
 
 export interface WorkspaceEntityTrailEdge {

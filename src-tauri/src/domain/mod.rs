@@ -321,6 +321,7 @@ pub struct EntityListQuery {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityTableRow {
     pub entity_id: String,
+    pub display_name: Option<String>,
     pub current_stage_id: Option<String>,
     pub current_status: String,
     pub latest_file_path: Option<String>,
@@ -781,6 +782,8 @@ pub struct WorkspaceEntityTrailNode {
     pub file_exists: bool,
     pub runtime_status: Option<String>,
     pub is_managed_copy: bool,
+    pub can_open_file: bool,
+    pub can_open_folder: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

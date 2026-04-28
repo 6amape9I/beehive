@@ -68,13 +68,15 @@ export function WorkspaceExplorerPage() {
       const result = await getWorkspaceExplorer(workdirPath);
       setExplorer(result);
       setErrors(result.errors);
-      if (selectedFileId && !result.stages.some((stage) => stage.files.some((file) => file.entity_file_id === selectedFileId))) {
-        setSelectedFileId(null);
-      }
+      setSelectedFileId((current) =>
+        current && !result.stages.some((stage) => stage.files.some((file) => file.entity_file_id === current))
+          ? null
+          : current,
+      );
     } finally {
       setIsLoading(false);
     }
-  }, [canQueryRuntime, selectedFileId, workdirPath]);
+  }, [canQueryRuntime, workdirPath]);
 
   useEffect(() => {
     void loadExplorer();
@@ -650,7 +652,7 @@ function TrailPanel({
                   <button
                     type="button"
                     className="button secondary"
-                    disabled={busy || !node.file_exists}
+                    disabled={busy || !node.can_open_file}
                     onClick={() => onOpenFile(node.entity_file_id)}
                   >
                     File
@@ -658,7 +660,7 @@ function TrailPanel({
                   <button
                     type="button"
                     className="button secondary"
-                    disabled={busy}
+                    disabled={busy || !node.can_open_folder}
                     onClick={() => onOpenFolder(node.entity_file_id)}
                   >
                     Folder

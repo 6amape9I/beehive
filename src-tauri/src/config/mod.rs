@@ -507,4 +507,59 @@ stages:
             .iter()
             .any(|issue| issue.code == "missing_stage_output_folder"));
     }
+
+    #[test]
+    fn stage9_demo_workdir_fixture_is_valid() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let workdir = repo_root.join("demo").join("workdir");
+        let pipeline_path = workdir.join("pipeline.yaml");
+        let loaded = load_pipeline_config(&pipeline_path);
+        let config = loaded.config.expect("demo config should parse");
+
+        assert!(loaded.validation.is_valid, "{:?}", loaded.validation.issues);
+        assert_eq!(config.project.name, "beehive-demo");
+        assert!(config
+            .stages
+            .iter()
+            .any(|stage| stage.id == "semantic_split"
+                && stage.workflow_url
+                    == "https://n8n-dev.steos.io/webhook/b0c81347-5f51-4142-b1d9-18451d8c4ecf"));
+        assert!(config
+            .stages
+            .iter()
+            .any(|stage| stage.id == "review" && stage.next_stage.is_none()));
+
+        let incoming = workdir.join("stages").join("incoming");
+        let files = std::fs::read_dir(&incoming)
+            .expect("demo incoming dir")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .collect::<Vec<_>>();
+        assert!(files.len() >= 10);
+
+        for file in files {
+            let value = serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(file.path()).expect("demo json bytes"),
+            )
+            .expect("demo json parses");
+            assert!(value
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some());
+            assert_eq!(
+                value
+                    .get("current_stage")
+                    .and_then(serde_json::Value::as_str),
+                Some("semantic_split")
+            );
+            let payload = value
+                .get("payload")
+                .and_then(serde_json::Value::as_object)
+                .expect("payload object");
+            assert!(payload.get("entity_name").is_some());
+            assert!(payload.get("beehive").is_none());
+        }
+    }
 }

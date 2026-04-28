@@ -634,9 +634,13 @@ fn write_pipeline_yaml_atomic(pipeline_path: &Path, yaml_text: &str) -> Result<P
     let parent = pipeline_path
         .parent()
         .ok_or_else(|| format!("Pipeline path '{}' has no parent.", pipeline_path.display()))?;
-    let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ");
-    let backup_path = parent.join(format!("pipeline.yaml.bak.{timestamp}"));
-    let temp_path = parent.join(format!(".pipeline.yaml.tmp.{timestamp}"));
+    let now = Utc::now();
+    let timestamp = now.format("%Y%m%dT%H%M%S%.3fZ");
+    let unique_suffix = now
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| now.timestamp_micros() * 1000);
+    let backup_path = parent.join(format!("pipeline.yaml.bak.{timestamp}.{unique_suffix}"));
+    let temp_path = parent.join(format!(".pipeline.yaml.tmp.{timestamp}.{unique_suffix}"));
 
     {
         let mut file = File::create(&temp_path).map_err(|error| {

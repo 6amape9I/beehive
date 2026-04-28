@@ -24,6 +24,11 @@ const columns: ColumnDef<EntityTableRow>[] = [
     cell: ({ row }) => <strong>{row.original.entity_id}</strong>,
   },
   {
+    id: "display_name",
+    header: "Name",
+    cell: ({ row }) => row.original.display_name ?? "Not available",
+  },
+  {
     id: "current_stage",
     header: "Current stage",
     cell: ({ row }) => row.original.current_stage_id ?? "Not available",
@@ -169,4 +174,3 @@ export function EntitiesTable({
     </div>
   );
 }
-

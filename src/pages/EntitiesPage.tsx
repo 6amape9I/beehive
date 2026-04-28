@@ -6,7 +6,7 @@ import { CommandErrorsPanel } from "../components/CommandErrorsPanel";
 import { EntitiesTable } from "../components/entities/EntitiesTable";
 import { EntityFilters } from "../components/entities/EntityFilters";
 import { PaginationControls } from "../components/entities/PaginationControls";
-import { listEntities } from "../lib/runtimeApi";
+import { listEntities, scanWorkspace } from "../lib/runtimeApi";
 import type {
   CommandErrorInfo,
   EntityListQuery,
@@ -60,6 +60,8 @@ export function EntitiesPage() {
   const [total, setTotal] = useState(0);
   const [errors, setErrors] = useState<CommandErrorInfo[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   const query = useMemo(() => queryFromSearchParams(searchParams), [searchParams]);
   const workdirPath = state.selected_workdir_path;
@@ -100,6 +102,33 @@ export function EntitiesPage() {
     }
   }, [canQueryRuntime, query, workdirPath]);
 
+  const hasActiveFilters = Boolean(
+    query.search || query.stage_id || query.status || query.validation_status,
+  );
+
+  const handleScanWorkspace = useCallback(async () => {
+    if (!canQueryRuntime || !workdirPath) {
+      return;
+    }
+
+    setIsScanning(true);
+    setActionMessage(null);
+    try {
+      const result = await scanWorkspace(workdirPath);
+      if (result.summary) {
+        setActionMessage(
+          `Scan finished: ${result.summary.registered_entity_count} entities, ${result.summary.registered_file_count} files, ${result.summary.invalid_count} invalid.`,
+        );
+      } else {
+        setActionMessage("Scan finished without a summary.");
+      }
+      setErrors(result.errors);
+      await loadEntities();
+    } finally {
+      setIsScanning(false);
+    }
+  }, [canQueryRuntime, loadEntities, workdirPath]);
+
   useEffect(() => {
     void loadEntities();
   }, [loadEntities]);
@@ -111,26 +140,37 @@ export function EntitiesPage() {
           <span className="eyebrow">Runtime</span>
           <h1>Entities</h1>
         </div>
-        <button
-          type="button"
-          className="button secondary"
-          disabled={!canQueryRuntime || isLoading}
-          onClick={() => void loadEntities()}
-        >
-          Refresh
-        </button>
+        <div className="button-row">
+          <button
+            type="button"
+            className="button secondary"
+            disabled={!canQueryRuntime || isLoading || isScanning}
+            onClick={() => void loadEntities()}
+          >
+            Refresh
+          </button>
+          <button
+            type="button"
+            className="button"
+            disabled={!canQueryRuntime || isLoading || isScanning}
+            onClick={() => void handleScanWorkspace()}
+          >
+            {isScanning ? "Scanning..." : "Scan workspace"}
+          </button>
+        </div>
       </div>
 
       <EntityFilters
         query={query}
         availableStages={availableStages}
         availableStatuses={availableStatuses}
-        disabled={!canQueryRuntime || isLoading}
+        disabled={!canQueryRuntime || isLoading || isScanning}
         onChange={setQuery}
         onClear={clearFilters}
       />
 
       <CommandErrorsPanel title="Entity Query Errors" errors={errors} />
+      {actionMessage ? <p className="empty-text">{actionMessage}</p> : null}
 
       <section className="panel">
         <div className="panel-heading">
@@ -146,7 +186,23 @@ export function EntitiesPage() {
         {!canQueryRuntime ? (
           <p className="empty-text">Open or initialize a valid workdir to view registered entities.</p>
         ) : entities.length === 0 ? (
-          <p className="empty-text">No entities match the current filters.</p>
+          <div className="empty-text">
+            <p>
+              {hasActiveFilters
+                ? "No entities match the current filters."
+                : "No entities are registered yet. Run Scan workspace to register JSON files from active stage folders."}
+            </p>
+            {!hasActiveFilters ? (
+              <button
+                type="button"
+                className="button"
+                disabled={isScanning}
+                onClick={() => void handleScanWorkspace()}
+              >
+                {isScanning ? "Scanning..." : "Scan workspace"}
+              </button>
+            ) : null}
+          </div>
         ) : (
           <>
             <EntitiesTable
@@ -172,4 +228,3 @@ export function EntitiesPage() {
     </div>
   );
 }
-

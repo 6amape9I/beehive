@@ -1,0 +1,11 @@
+{
+  "current_stage": "semantic_split",
+  "next_stage": "review",
+  "status": "pending",
+  "payload": {
+    "entity_name": "invalid sample without id"
+  },
+  "meta": {
+    "source": "demo-invalid"
+  }
+}

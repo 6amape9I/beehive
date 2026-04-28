@@ -4,7 +4,7 @@ use std::time::Instant;
 use chrono::{DateTime, Duration, Utc};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -264,20 +264,42 @@ fn execute_task(
     match http_result {
         Ok(success) => {
             let mut created_child_path = None;
+            let mut created_child_paths = Vec::new();
+            let output_count = success.output_payloads.len();
             if success.next_stage_required {
-                let copy = file_ops::create_next_stage_copy_from_response(
+                let copy = match file_ops::create_next_stage_copies_from_response(
                     workdir_path,
                     database_path,
                     &task.entity_id,
                     &task.stage_id,
-                    success.payload.unwrap_or_else(|| Value::Object(Map::new())),
+                    &success.output_payloads,
                     success.meta,
                     &run_id,
-                )?;
+                ) {
+                    Ok(copy) => copy,
+                    Err(message) => {
+                        let outcome = finish_failure(
+                            &connection,
+                            &task,
+                            &run_id,
+                            attempt_no,
+                            AttemptFailure {
+                                error_type: "copy_failed".to_string(),
+                                message,
+                                http_status: Some(success.http_status),
+                                response_json: Some(success.response_json),
+                            },
+                            finished_at,
+                            duration_ms,
+                        )?;
+                        return Ok(outcome);
+                    }
+                };
                 match copy.status {
                     crate::domain::FileCopyStatus::Created
                     | crate::domain::FileCopyStatus::AlreadyExists => {
-                        created_child_path = copy.target_file_path.clone();
+                        created_child_path = copy.target_file_paths.first().cloned();
+                        created_child_paths = copy.target_file_paths.clone();
                     }
                     crate::domain::FileCopyStatus::Blocked => {
                         finish_copy_blocked(
@@ -340,9 +362,13 @@ fn execute_task(
                     "Entity '{}' succeeded on stage '{}'.",
                     task.entity_id, task.stage_id
                 ),
-                Some(
-                    json!({"entity_id": task.entity_id, "stage_id": task.stage_id, "run_id": run_id}),
-                ),
+                Some(json!({
+                    "entity_id": task.entity_id,
+                    "stage_id": task.stage_id,
+                    "run_id": run_id,
+                    "output_count": output_count,
+                    "created_child_paths": created_child_paths,
+                })),
                 &finished_at.to_rfc3339(),
             )?;
             Ok(TaskOutcome::Succeeded)
@@ -545,7 +571,7 @@ struct HttpResponse {
 struct SuccessfulResponse {
     http_status: i64,
     response_json: String,
-    payload: Option<Value>,
+    output_payloads: Vec<Value>,
     meta: Option<Value>,
     next_stage_required: bool,
 }
@@ -568,28 +594,60 @@ fn validate_response(
         http_status: Some(response.status),
         response_json: Some(response.body.clone()),
     })?;
-    let Some(root) = value.as_object() else {
-        return Err(AttemptFailure {
-            error_type: "contract".to_string(),
-            message: "n8n response JSON must be an object.".to_string(),
-            http_status: Some(response.status),
-            response_json: Some(response.body),
-        });
-    };
-    if root.get("success").and_then(Value::as_bool) == Some(false) {
-        return Err(AttemptFailure {
-            error_type: "contract".to_string(),
-            message: "n8n response declared success=false.".to_string(),
-            http_status: Some(response.status),
-            response_json: Some(response.body),
-        });
-    }
     let next_stage_required = resolved_next_stage.is_some();
-    let payload = root.get("payload").cloned();
-    if next_stage_required && !payload.as_ref().is_some_and(Value::is_object) {
+    let mut meta = None;
+    let output_payloads = match &value {
+        Value::Array(items) => validate_output_items(items, response.status, &response.body)?,
+        Value::Object(root) => {
+            if root.get("success").and_then(Value::as_bool) == Some(false) {
+                return Err(AttemptFailure {
+                    error_type: "contract".to_string(),
+                    message: "n8n response declared success=false.".to_string(),
+                    http_status: Some(response.status),
+                    response_json: Some(response.body),
+                });
+            }
+            meta = root.get("meta").cloned();
+            match root.get("payload") {
+                Some(Value::Array(items)) => {
+                    validate_output_items(items, response.status, &response.body)?
+                }
+                Some(Value::Object(_)) => vec![root.get("payload").cloned().unwrap()],
+                Some(_) => {
+                    return Err(AttemptFailure {
+                        error_type: "contract".to_string(),
+                        message: "n8n response payload must be an object or an array of objects."
+                            .to_string(),
+                        http_status: Some(response.status),
+                        response_json: Some(response.body),
+                    });
+                }
+                None if next_stage_required => {
+                    return Err(AttemptFailure {
+                        error_type: "contract".to_string(),
+                        message: "n8n response payload is required when next_stage exists."
+                            .to_string(),
+                        http_status: Some(response.status),
+                        response_json: Some(response.body),
+                    });
+                }
+                None => Vec::new(),
+            }
+        }
+        _ => {
+            return Err(AttemptFailure {
+                error_type: "contract".to_string(),
+                message: "n8n response JSON must be an object or an array of objects.".to_string(),
+                http_status: Some(response.status),
+                response_json: Some(response.body),
+            });
+        }
+    };
+    if next_stage_required && output_payloads.is_empty() {
         return Err(AttemptFailure {
             error_type: "contract".to_string(),
-            message: "n8n response payload must be an object when next_stage exists.".to_string(),
+            message: "n8n response must contain at least one output object when next_stage exists."
+                .to_string(),
             http_status: Some(response.status),
             response_json: Some(response.body),
         });
@@ -597,10 +655,30 @@ fn validate_response(
     Ok(SuccessfulResponse {
         http_status: response.status,
         response_json: response.body,
-        payload,
-        meta: root.get("meta").cloned(),
+        output_payloads,
+        meta,
         next_stage_required,
     })
+}
+
+fn validate_output_items(
+    items: &[Value],
+    http_status: i64,
+    response_body: &str,
+) -> Result<Vec<Value>, AttemptFailure> {
+    let mut outputs = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        if !item.is_object() {
+            return Err(AttemptFailure {
+                error_type: "contract".to_string(),
+                message: format!("n8n response output item at index {index} must be an object."),
+                http_status: Some(http_status),
+                response_json: Some(response_body.to_string()),
+            });
+        }
+        outputs.push(item.clone());
+    }
+    Ok(outputs)
 }
 
 fn build_request_json(
@@ -795,8 +873,8 @@ mod tests {
     use std::thread;
 
     use crate::database::{
-        bootstrap_database, claim_eligible_runtime_tasks, get_entity_detail, list_stage_runs,
-        open_connection, start_claimed_stage_run, NewStageRunInput,
+        bootstrap_database, claim_eligible_runtime_tasks, get_entity_detail, list_entity_files,
+        list_stage_runs, open_connection, start_claimed_stage_run, NewStageRunInput,
     };
     use crate::discovery::scan_workspace;
     use crate::domain::{PipelineConfig, ProjectConfig, RuntimeConfig, StageDefinition};
@@ -967,6 +1045,38 @@ mod tests {
             .expect("state exists")
     }
 
+    fn files_for_stage(
+        database_path: &std::path::Path,
+        stage_id: &str,
+    ) -> Vec<crate::domain::EntityFileRecord> {
+        list_entity_files(database_path, None)
+            .expect("files")
+            .into_iter()
+            .filter(|file| file.stage_id == stage_id)
+            .collect()
+    }
+
+    fn canonical_hash8(value: &Value) -> String {
+        fn normalize(value: &Value) -> Value {
+            match value {
+                Value::Array(items) => Value::Array(items.iter().map(normalize).collect()),
+                Value::Object(object) => {
+                    let mut entries = object.iter().collect::<Vec<_>>();
+                    entries.sort_by(|left, right| left.0.cmp(right.0));
+                    let mut normalized = serde_json::Map::new();
+                    for (key, value) in entries {
+                        normalized.insert(key.clone(), normalize(value));
+                    }
+                    Value::Object(normalized)
+                }
+                other => other.clone(),
+            }
+        }
+        let bytes = serde_json::to_vec(&normalize(value)).expect("canonical payload");
+        let hash = format!("{:x}", sha2::Sha256::digest(&bytes));
+        hash[..8].to_string()
+    }
+
     fn stage_run_input(run_id: &str, attempt_no: u64) -> NewStageRunInput {
         NewStageRunInput {
             run_id: run_id.to_string(),
@@ -1027,22 +1137,19 @@ mod tests {
         let source_before = std::fs::read(&source_path).expect("read source before");
 
         let summary = run_due_tasks(&workdir, &database_path, 3, 5, 1, 0).expect("run tasks");
-        let detail = get_entity_detail(&database_path, "entity-1")
-            .expect("detail result")
-            .expect("detail exists");
         let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
-        let target_path = workdir
-            .join("stages")
-            .join("normalized")
-            .join("entity-1.json");
+        let files = list_entity_files(&database_path, None).expect("files");
+        let target_file = files
+            .iter()
+            .find(|file| file.stage_id == "normalized" && file.copy_source_file_id.is_some())
+            .expect("target db file");
+        let target_path = std::path::PathBuf::from(&target_file.file_path);
         let target_json =
             serde_json::from_slice::<Value>(&std::fs::read(&target_path).expect("read target"))
                 .expect("parse target");
-        let target_file = detail
-            .files
-            .iter()
-            .find(|file| file.stage_id == "normalized")
-            .expect("target db file");
+        let target_detail = get_entity_detail(&database_path, &target_file.entity_id)
+            .expect("target detail result")
+            .expect("target detail exists");
         let target_checksum = format!(
             "{:x}",
             sha2::Sha256::digest(&std::fs::read(&target_path).expect("target bytes"))
@@ -1051,7 +1158,18 @@ mod tests {
         assert_eq!(summary.claimed, 1);
         assert_eq!(summary.succeeded, 1);
         assert_eq!(stage_status(&database_path, "incoming"), "done");
-        assert_eq!(stage_status(&database_path, "normalized"), "pending");
+        assert_eq!(
+            target_detail
+                .stage_states
+                .iter()
+                .find(|state| state.stage_id == "normalized")
+                .map(|state| state.status.as_str()),
+            Some("pending")
+        );
+        assert_ne!(
+            target_json.get("id").and_then(Value::as_str),
+            Some("entity-1")
+        );
         assert_eq!(
             target_json
                 .get("payload")
@@ -1067,7 +1185,17 @@ mod tests {
                 .and_then(Value::as_object)
                 .and_then(|beehive| beehive.get("created_by"))
                 .and_then(Value::as_str),
-            Some("stage4_n8n_execution")
+            Some("n8n_response")
+        );
+        assert_eq!(
+            target_json
+                .get("meta")
+                .and_then(Value::as_object)
+                .and_then(|meta| meta.get("beehive"))
+                .and_then(Value::as_object)
+                .and_then(|beehive| beehive.get("source_entity_id"))
+                .and_then(Value::as_str),
+            Some("entity-1")
         );
         assert_eq!(
             std::fs::read(&source_path).expect("read source after"),
@@ -1080,6 +1208,171 @@ mod tests {
         assert!(runs[0].request_json.contains("\"entity_file_id\""));
         assert_eq!(target_file.checksum, target_checksum);
         assert_eq!(server.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[test]
+    fn root_array_response_creates_multiple_child_entities() {
+        let server = mock_server(vec![(
+            200,
+            r#"[{"entity_name":"child one"},{"entity_name":"child two"},{"entity_name":"child three"}]"#,
+        )]);
+        let (_tempdir, workdir, database_path, _source_path) = prepare_workdir(&server.url, 3, 0);
+
+        let summary = run_due_tasks(&workdir, &database_path, 3, 5, 1, 0).expect("run tasks");
+        let target_files = files_for_stage(&database_path, "normalized");
+
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(stage_status(&database_path, "incoming"), "done");
+        assert_eq!(target_files.len(), 3);
+        let ids = target_files
+            .iter()
+            .map(|file| file.entity_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), 3);
+        for (index, file) in target_files.iter().enumerate() {
+            let target_json =
+                serde_json::from_slice::<Value>(&std::fs::read(&file.file_path).expect("target"))
+                    .expect("target json");
+            assert_eq!(
+                target_json.get("id").and_then(Value::as_str),
+                Some(file.entity_id.as_str())
+            );
+            assert_eq!(
+                target_json.get("current_stage").and_then(Value::as_str),
+                Some("normalized")
+            );
+            assert_eq!(
+                target_json.get("status").and_then(Value::as_str),
+                Some("pending")
+            );
+            assert!(target_json.get("payload").is_some_and(Value::is_object));
+            let beehive = target_json
+                .get("meta")
+                .and_then(Value::as_object)
+                .and_then(|meta| meta.get("beehive"))
+                .and_then(Value::as_object)
+                .expect("beehive meta");
+            assert_eq!(
+                beehive.get("created_by").and_then(Value::as_str),
+                Some("n8n_response")
+            );
+            assert_eq!(
+                beehive.get("source_entity_id").and_then(Value::as_str),
+                Some("entity-1")
+            );
+            assert_eq!(beehive.get("output_count").and_then(Value::as_u64), Some(3));
+            assert!(beehive
+                .get("output_index")
+                .and_then(Value::as_u64)
+                .is_some_and(|value| value < 3));
+            assert!(
+                file.copy_source_file_id.is_some(),
+                "target {index} should be managed"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapper_payload_array_response_creates_multiple_child_entities() {
+        let server = mock_server(vec![(
+            200,
+            r#"{"success":true,"payload":[{"id":"explicit-child","entity_name":"child one"},{"entity_name":"child two"}],"meta":{"workflow":"mock-array"}}"#,
+        )]);
+        let (_tempdir, workdir, database_path, _source_path) = prepare_workdir(&server.url, 3, 0);
+
+        let summary = run_due_tasks(&workdir, &database_path, 3, 5, 1, 0).expect("run tasks");
+        let target_files = files_for_stage(&database_path, "normalized");
+
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(target_files.len(), 2);
+        assert!(target_files
+            .iter()
+            .any(|file| file.entity_id == "explicit-child"));
+        assert!(target_files
+            .iter()
+            .all(|file| file.copy_source_file_id.is_some()));
+    }
+
+    #[test]
+    fn invalid_output_item_fails_without_creating_target_files() {
+        let server = mock_server(vec![(200, r#"[{"entity_name":"ok"}, 5]"#)]);
+        let (_tempdir, workdir, database_path, _source_path) = prepare_workdir(&server.url, 1, 0);
+
+        let summary = run_due_tasks(&workdir, &database_path, 3, 5, 1, 0).expect("run tasks");
+        let target_files = files_for_stage(&database_path, "normalized");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+
+        assert_eq!(summary.failed, 1);
+        assert_eq!(stage_status(&database_path, "incoming"), "failed");
+        assert!(target_files.is_empty());
+        assert_eq!(runs[0].error_type.as_deref(), Some("contract"));
+    }
+
+    #[test]
+    fn duplicate_multi_output_rerun_reuses_compatible_existing_files() {
+        let response = r#"[{"entity_name":"child one"},{"entity_name":"child two"}]"#;
+        let server = mock_server(vec![(200, response), (200, response)]);
+        let (_tempdir, workdir, database_path, _source_path) = prepare_workdir(&server.url, 3, 0);
+
+        let first = run_due_tasks(&workdir, &database_path, 3, 5, 1, 0).expect("first run");
+        let first_targets = files_for_stage(&database_path, "normalized");
+        let first_paths = first_targets
+            .iter()
+            .map(|file| file.file_path.clone())
+            .collect::<Vec<_>>();
+        let connection = open_connection(&database_path).expect("open db");
+        connection
+            .execute(
+                "UPDATE entity_stage_states SET status = 'pending', attempts = 0, next_retry_at = NULL WHERE entity_id = 'entity-1' AND stage_id = 'incoming'",
+                [],
+            )
+            .expect("reset source");
+
+        let second = run_due_tasks(&workdir, &database_path, 3, 5, 1, 0).expect("second run");
+        let second_targets = files_for_stage(&database_path, "normalized");
+        let second_paths = second_targets
+            .iter()
+            .map(|file| file.file_path.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(first.succeeded, 1);
+        assert_eq!(second.succeeded, 1);
+        assert_eq!(first_targets.len(), 2);
+        assert_eq!(second_targets.len(), 2);
+        assert_eq!(first_paths, second_paths);
+        assert_eq!(server.requests.lock().expect("requests").len(), 2);
+    }
+
+    #[test]
+    fn incompatible_generated_target_collision_fails_without_marking_source_done() {
+        let payload = json!({"entity_name":"collision"});
+        let child_id = format!("entity-1__normalized__0_{}", canonical_hash8(&payload));
+        let server = mock_server(vec![(
+            200,
+            r#"{"success":true,"payload":{"entity_name":"collision"},"meta":{}}"#,
+        )]);
+        let (_tempdir, workdir, database_path, _source_path) = prepare_workdir(&server.url, 1, 0);
+        let collision_path = workdir
+            .join("stages")
+            .join("normalized")
+            .join(format!("{child_id}.json"));
+        std::fs::create_dir_all(collision_path.parent().expect("collision parent"))
+            .expect("collision parent");
+        std::fs::write(
+            &collision_path,
+            format!(
+                r#"{{"id":"{child_id}","current_stage":"normalized","status":"pending","payload":{{"entity_name":"different"}},"meta":{{"beehive":{{"source_entity_id":"entity-1","source_entity_file_id":1,"source_stage_id":"incoming","target_stage_id":"normalized","output_index":0}}}}}}"#
+            ),
+        )
+        .expect("write collision");
+
+        let summary = run_due_tasks(&workdir, &database_path, 3, 5, 1, 0).expect("run tasks");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+
+        assert_eq!(summary.failed, 1);
+        assert_eq!(stage_status(&database_path, "incoming"), "failed");
+        assert_eq!(runs[0].error_type.as_deref(), Some("copy_failed"));
+        assert_eq!(files_for_stage(&database_path, "normalized").len(), 0);
     }
 
     #[test]
@@ -1523,8 +1816,8 @@ mod tests {
     }
 
     #[test]
-    fn terminal_stage_without_output_folder_succeeds_without_target_copy() {
-        let server = mock_server(vec![(200, r#"{"success":true,"meta":{}}"#)]);
+    fn terminal_stage_without_output_folder_accepts_array_response_without_target_copy() {
+        let server = mock_server(vec![(200, r#"[{"entity_name":"terminal child"}]"#)]);
         let tempdir = tempfile::tempdir().expect("tempdir");
         let workdir = tempdir.path().join("workdir");
         let database_path = workdir.join("app.db");

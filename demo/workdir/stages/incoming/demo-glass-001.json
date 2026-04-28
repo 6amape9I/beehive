@@ -1,0 +1,33 @@
+{
+  "id": "demo-glass-001",
+  "current_stage": "semantic_split",
+  "next_stage": "review",
+  "status": "pending",
+  "payload": {
+    "entity_name": "стекло",
+    "source_parent_name": "материал",
+    "source_grandparent_name": "вещество",
+    "source_entity_context": "Demo ontology sample 4",
+    "source_semantic_description": null,
+    "parent_name_candidate": null,
+    "grandparent_name_candidate": null,
+    "parent_name": "string | null",
+    "grandparent_name": "string | null",
+    "entity_weight": null,
+    "entity_fullness": null,
+    "relation_id": null,
+    "relation_weight": null,
+    "relation_truth": null,
+    "strength": null,
+    "source_entity_id": null,
+    "current_languages": [
+      "ru"
+    ],
+    "ready": null,
+    "representations": []
+  },
+  "meta": {
+    "source": "demo",
+    "created_at": "2026-04-27T00:00:00Z"
+  }
+}

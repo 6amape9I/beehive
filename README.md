@@ -2,8 +2,7 @@
 
 beehive is a local desktop operator tool for JSON stage pipelines.
 
-Stage 5.5 stabilizes the Stage 1-5 foundation with a formal runtime state machine, atomic task claiming, file-stability guards, and terminal-stage handling.
-Stage 6 adds the operator entity table and entity detail workflow on top of that foundation.
+Stage 9 prepares the app for demo and first internal use with a resettable demo workdir, one-action launch scripts, multi-output n8n support, release verification, and operator documentation.
 
 `eligible stage state -> queued -> in_progress -> n8n webhook -> stage_runs -> done/retry_wait/failed -> next-stage file`
 
@@ -28,12 +27,37 @@ In this PowerShell environment use `npm.cmd`, not `npm`.
 ## Run
 
 ```powershell
-npm.cmd run tauri dev
+npm.cmd run app
 ```
 
 On Windows, Rust/Tauri builds require Visual Studio C++ tools and a Windows SDK.
 
 If the shell cannot find `link.exe` or `kernel32.lib`, run from a Developer Command Prompt or load MSVC/SDK paths with `vcvars64.bat`.
+
+## Demo
+
+```powershell
+npm.cmd run demo:reset
+npm.cmd run app
+```
+
+Then open `demo/workdir` in the app.
+
+Useful Stage 9 scripts:
+
+- `npm.cmd run app` starts the desktop app in dev/demo mode.
+- `npm.cmd run demo:reset` restores the demo workdir baseline.
+- `npm.cmd run demo` resets demo and starts the app.
+- `npm.cmd run demo:generate -- --count 1000` generates volume demo files for manual load testing.
+- `npm.cmd run verify` runs local verification helper commands.
+- `npm.cmd run release` runs the Tauri release build.
+
+Operator docs:
+
+- [User Guide](docs/user_guide.md)
+- [Demo Guide](docs/demo_guide.md)
+- [Release Checklist](docs/release_checklist.md)
+- [Stage 9 Manual QA Checklist](docs/stage9_manual_qa_checklist.md)
 
 ## Technical Verification
 
@@ -41,6 +65,7 @@ If the shell cannot find `link.exe` or `kernel32.lib`, run from a Developer Comm
 cargo fmt --manifest-path src-tauri/Cargo.toml
 cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul && cargo test --manifest-path src-tauri\Cargo.toml'
 npm.cmd run build
+npm.cmd run release
 ```
 
 ## Workdir Rules
@@ -235,16 +260,39 @@ Execution sends:
 Success requires:
 
 - HTTP 2xx;
-- valid JSON object response;
-- response `success` is not `false`;
-- response `payload` is an object when a next stage exists.
+- valid JSON object or root array response;
+- response `success` is not `false` when using wrapper object form;
+- when a next stage exists, response output is one or more JSON payload objects.
 
 On success:
 
 - source stage state becomes `done`;
 - source JSON file is not mutated;
-- target file is created from response `payload`;
-- target stage state is `pending`.
+- every n8n output object is wrapped into a child beehive JSON file in the target stage;
+- child ids are deterministic and collision-safe;
+- target child stage states are `pending`.
+
+Supported Stage 9 response forms:
+
+```json
+[
+  { "entity_name": "child one" },
+  { "entity_name": "child two" }
+]
+```
+
+```json
+{
+  "success": true,
+  "payload": [
+    { "entity_name": "child one" },
+    { "entity_name": "child two" }
+  ],
+  "meta": {}
+}
+```
+
+The older `{ "success": true, "payload": { ... } }` form is still accepted as one output item.
 
 For terminal stages with no `next_stage`, success marks the source state `done` and does not create a target file.
 
@@ -300,7 +348,7 @@ Operator actions remain manual:
 
 Stage 6 provides an operator-oriented Entities table and Entity Detail page.
 
-The Entities table is backed by SQLite pagination, filtering, search, and sorting. It does not load JSON payloads for table rows and it does not scan files, run n8n, or mutate runtime state.
+The Entities table is backed by SQLite pagination, filtering, search, and sorting. It shows a lightweight business name from the latest registered file payload for demo/operator recognition, and search covers entity id, file path/name, and that payload text. It does not run n8n or mutate runtime state; `Scan workspace` is still an explicit operator action.
 
 Entity Detail shows:
 
@@ -364,3 +412,4 @@ Stage 4 does not implement:
 - n8n execution polling
 - rich JSON diff/version history or low-code editor
 - advanced UI polish
+- config repair mode

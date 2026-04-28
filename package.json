@@ -4,9 +4,15 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "app": "tauri dev",
     "dev": "vite",
     "build": "tsc && vite build",
+    "demo:reset": "node scripts/reset-demo.mjs",
+    "demo:generate": "node scripts/generate-demo-data.mjs",
+    "demo": "npm run demo:reset && npm run app",
     "preview": "vite preview",
+    "release": "tauri build",
+    "verify": "node scripts/verify.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

@@ -1,0 +1,9 @@
+{
+  "id": "invalid-missing-payload",
+  "current_stage": "semantic_split",
+  "next_stage": "review",
+  "status": "pending",
+  "meta": {
+    "source": "demo-invalid"
+  }
+}
