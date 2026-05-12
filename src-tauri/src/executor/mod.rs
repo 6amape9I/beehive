@@ -226,7 +226,7 @@ fn execute_task(
     let run_id = Uuid::new_v4().to_string();
     let started_at = Utc::now();
     let started_at_text = started_at.to_rfc3339();
-    let request_json = build_request_json(&task, &source_file, attempt_no, &run_id)?;
+    let request_json = build_request_json(&source_file)?;
     let stage_run_input = NewStageRunInput {
         run_id: run_id.clone(),
         entity_id: task.entity_id.clone(),
@@ -266,7 +266,7 @@ fn execute_task(
             let mut created_child_path = None;
             let mut created_child_paths = Vec::new();
             let output_count = success.output_payloads.len();
-            if success.next_stage_required {
+            if !success.output_payloads.is_empty() {
                 let copy = match file_ops::create_next_stage_copies_from_response(
                     workdir_path,
                     database_path,
@@ -573,7 +573,6 @@ struct SuccessfulResponse {
     response_json: String,
     output_payloads: Vec<Value>,
     meta: Option<Value>,
-    next_stage_required: bool,
 }
 
 fn validate_response(
@@ -622,16 +621,8 @@ fn validate_response(
                         response_json: Some(response.body),
                     });
                 }
-                None if next_stage_required => {
-                    return Err(AttemptFailure {
-                        error_type: "contract".to_string(),
-                        message: "n8n response payload is required when next_stage exists."
-                            .to_string(),
-                        http_status: Some(response.status),
-                        response_json: Some(response.body),
-                    });
-                }
-                None => Vec::new(),
+                None if root.contains_key("success") => Vec::new(),
+                None => vec![Value::Object(root.clone())],
             }
         }
         _ => {
@@ -657,7 +648,6 @@ fn validate_response(
         response_json: response.body,
         output_payloads,
         meta,
-        next_stage_required,
     })
 }
 
@@ -681,43 +671,9 @@ fn validate_output_items(
     Ok(outputs)
 }
 
-fn build_request_json(
-    task: &RuntimeTaskRecord,
-    source_file: &crate::domain::EntityFileRecord,
-    attempt_no: u64,
-    run_id: &str,
-) -> Result<Value, String> {
-    let payload = serde_json::from_str::<Value>(&source_file.payload_json)
-        .map_err(|error| format!("Failed to parse source payload JSON from DB: {error}"))?;
-    let mut meta = serde_json::from_str::<Value>(&source_file.meta_json)
-        .map_err(|error| format!("Failed to parse source meta JSON from DB: {error}"))?
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    let mut beehive = meta
-        .remove("beehive")
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
-    beehive.insert("app".to_string(), Value::String("beehive".to_string()));
-    beehive.insert("stage_id".to_string(), Value::String(task.stage_id.clone()));
-    beehive.insert(
-        "entity_file_id".to_string(),
-        Value::Number(source_file.id.into()),
-    );
-    beehive.insert("attempt".to_string(), Value::Number(attempt_no.into()));
-    beehive.insert("run_id".to_string(), Value::String(run_id.to_string()));
-    meta.insert("beehive".to_string(), Value::Object(beehive));
-
-    Ok(json!({
-        "entity_id": task.entity_id,
-        "stage_id": task.stage_id,
-        "entity_file_id": source_file.id,
-        "source_file_path": source_file.file_path,
-        "attempt": attempt_no,
-        "run_id": run_id,
-        "payload": payload,
-        "meta": meta,
-    }))
+fn build_request_json(source_file: &crate::domain::EntityFileRecord) -> Result<Value, String> {
+    serde_json::from_str::<Value>(&source_file.payload_json)
+        .map_err(|error| format!("Failed to parse source payload JSON from DB: {error}"))
 }
 
 fn source_file_preflight_error(
@@ -1019,6 +975,40 @@ mod tests {
         (tempdir, workdir, database_path, source_path)
     }
 
+    fn prepare_workdir_with_config(
+        config: PipelineConfig,
+        source_input_folder: &str,
+        source_json: &str,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        let source_path = workdir.join(source_input_folder).join("entity-1.json");
+        bootstrap_database(&database_path, &config).expect("bootstrap");
+        std::fs::create_dir_all(source_path.parent().expect("source parent"))
+            .expect("create source parent");
+        std::fs::write(&source_path, source_json).expect("write source");
+        scan_workspace(&workdir, &database_path).expect("scan");
+        (tempdir, workdir, database_path, source_path)
+    }
+
+    fn request_body(request: &str) -> &str {
+        request.split("\r\n\r\n").nth(1).unwrap_or_default()
+    }
+
+    fn captured_request_json(server: &MockServer, index: usize) -> Value {
+        let requests = server.requests.lock().expect("requests");
+        serde_json::from_str(request_body(
+            requests.get(index).expect("captured request"),
+        ))
+        .expect("request body json")
+    }
+
     fn stage_status(database_path: &std::path::Path, stage_id: &str) -> String {
         let detail = get_entity_detail(database_path, "entity-1")
             .expect("detail result")
@@ -1205,7 +1195,27 @@ mod tests {
         assert!(runs[0].success);
         assert_eq!(runs[0].attempt_no, 1);
         assert_eq!(runs[0].http_status, Some(200));
-        assert!(runs[0].request_json.contains("\"entity_file_id\""));
+        let stored_request_json =
+            serde_json::from_str::<Value>(&runs[0].request_json).expect("stored request json");
+        assert_eq!(stored_request_json, json!({"title": "hello beehive"}));
+        assert_eq!(captured_request_json(&server, 0), stored_request_json);
+        let captured_body = {
+            let requests = server.requests.lock().expect("requests");
+            request_body(requests.first().expect("first request")).to_string()
+        };
+        for forbidden in [
+            "entity_id",
+            "stage_id",
+            "entity_file_id",
+            "attempt",
+            "run_id",
+            "beehive",
+        ] {
+            assert!(
+                !captured_body.contains(forbidden),
+                "payload-only body should not contain {forbidden}"
+            );
+        }
         assert_eq!(target_file.checksum, target_checksum);
         assert_eq!(server.requests.lock().expect("requests").len(), 1);
     }
@@ -1291,6 +1301,204 @@ mod tests {
         assert!(target_files
             .iter()
             .all(|file| file.copy_source_file_id.is_some()));
+    }
+
+    #[test]
+    fn save_path_routes_array_outputs_to_multiple_stages() {
+        let server = mock_server(vec![(
+            200,
+            r#"[
+                {"entity_name":"castle","save_path":"main_dir/processed/raw_entities"},
+                {"target_entity_name":"phone","save_path":"main_dir/processed/raw_representations"}
+            ]"#,
+        )]);
+        let config = PipelineConfig {
+            project: ProjectConfig {
+                name: "beehive".to_string(),
+                workdir: ".".to_string(),
+            },
+            runtime: RuntimeConfig::default(),
+            stages: vec![
+                stage("incoming", &server.url, None, "stages/incoming"),
+                stage(
+                    "raw_entities",
+                    &server.url,
+                    None,
+                    "main_dir/processed/raw_entities",
+                ),
+                stage(
+                    "raw_representations",
+                    &server.url,
+                    None,
+                    "main_dir/processed/raw_representations",
+                ),
+            ],
+        };
+        let (_tempdir, workdir, database_path, _source_path) = prepare_workdir_with_config(
+            config,
+            "stages/incoming",
+            r#"{"id":"entity-1","current_stage":"incoming","status":"pending","payload":{"title":"route me"},"meta":{"source":"manual"}}"#,
+        );
+
+        let summary = run_due_tasks(&workdir, &database_path, 3, 5, 1, 0).expect("run tasks");
+        let entity_files = files_for_stage(&database_path, "raw_entities");
+        let representation_files = files_for_stage(&database_path, "raw_representations");
+        let entity_json = serde_json::from_slice::<Value>(
+            &std::fs::read(&entity_files[0].file_path).expect("entity target"),
+        )
+        .expect("entity json");
+        let representation_json = serde_json::from_slice::<Value>(
+            &std::fs::read(&representation_files[0].file_path).expect("representation target"),
+        )
+        .expect("representation json");
+
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(stage_status(&database_path, "incoming"), "done");
+        assert_eq!(entity_files.len(), 1);
+        assert_eq!(representation_files.len(), 1);
+        assert_eq!(
+            entity_json.get("current_stage").and_then(Value::as_str),
+            Some("raw_entities")
+        );
+        assert_eq!(
+            representation_json
+                .get("current_stage")
+                .and_then(Value::as_str),
+            Some("raw_representations")
+        );
+        assert_eq!(
+            entity_json
+                .get("payload")
+                .and_then(|payload| payload.get("save_path"))
+                .and_then(Value::as_str),
+            Some("main_dir/processed/raw_entities")
+        );
+        assert_eq!(
+            get_entity_detail(&database_path, &entity_files[0].entity_id)
+                .expect("target detail")
+                .expect("target exists")
+                .stage_states
+                .iter()
+                .find(|state| state.stage_id == "raw_entities")
+                .map(|state| state.status.as_str()),
+            Some("pending")
+        );
+    }
+
+    #[test]
+    fn save_path_routes_direct_object_response() {
+        let server = mock_server(vec![(
+            200,
+            r#"{"entity_name":"castle","save_path":"main_dir/processed/raw_entities"}"#,
+        )]);
+        let config = PipelineConfig {
+            project: ProjectConfig {
+                name: "beehive".to_string(),
+                workdir: ".".to_string(),
+            },
+            runtime: RuntimeConfig::default(),
+            stages: vec![
+                stage("incoming", &server.url, None, "stages/incoming"),
+                stage(
+                    "raw_entities",
+                    &server.url,
+                    None,
+                    "main_dir/processed/raw_entities",
+                ),
+            ],
+        };
+        let (_tempdir, workdir, database_path, _source_path) = prepare_workdir_with_config(
+            config,
+            "stages/incoming",
+            r#"{"id":"entity-1","current_stage":"incoming","status":"pending","payload":{"title":"direct"},"meta":{}}"#,
+        );
+
+        let summary = run_due_tasks(&workdir, &database_path, 3, 5, 1, 0).expect("run tasks");
+        let target_files = files_for_stage(&database_path, "raw_entities");
+
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(target_files.len(), 1);
+        assert_eq!(stage_status(&database_path, "incoming"), "done");
+    }
+
+    #[test]
+    fn legacy_main_dir_save_path_is_logical_not_os_absolute() {
+        let server = mock_server(vec![(
+            200,
+            r#"{"entity_name":"castle","save_path":"/main_dir/processed/raw_entities"}"#,
+        )]);
+        let config = PipelineConfig {
+            project: ProjectConfig {
+                name: "beehive".to_string(),
+                workdir: ".".to_string(),
+            },
+            runtime: RuntimeConfig::default(),
+            stages: vec![
+                stage("incoming", &server.url, None, "stages/incoming"),
+                stage(
+                    "raw_entities",
+                    &server.url,
+                    None,
+                    "main_dir/processed/raw_entities",
+                ),
+            ],
+        };
+        let (_tempdir, workdir, database_path, _source_path) = prepare_workdir_with_config(
+            config,
+            "stages/incoming",
+            r#"{"id":"entity-1","current_stage":"incoming","status":"pending","payload":{"title":"legacy"},"meta":{}}"#,
+        );
+
+        let summary = run_due_tasks(&workdir, &database_path, 3, 5, 1, 0).expect("run tasks");
+        let target_files = files_for_stage(&database_path, "raw_entities");
+
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(target_files.len(), 1);
+        assert!(std::path::Path::new(&target_files[0].file_path).starts_with(&workdir));
+    }
+
+    #[test]
+    fn unsafe_save_path_is_rejected_without_target_writes() {
+        for save_path in [
+            "",
+            "../outside",
+            "/etc/passwd",
+            "C:\\Users\\bad\\file",
+            "\\\\server\\share",
+        ] {
+            let response = json!({"entity_name": "bad", "save_path": save_path}).to_string();
+            let leaked_response: &'static str = Box::leak(response.into_boxed_str());
+            let server = mock_server(vec![(200, leaked_response)]);
+            let config = PipelineConfig {
+                project: ProjectConfig {
+                    name: "beehive".to_string(),
+                    workdir: ".".to_string(),
+                },
+                runtime: RuntimeConfig::default(),
+                stages: vec![
+                    stage("incoming", &server.url, None, "stages/incoming"),
+                    stage("raw_entities", &server.url, None, "stages/raw_entities"),
+                ],
+            };
+            let (tempdir, workdir, database_path, _source_path) = prepare_workdir_with_config(
+                config,
+                "stages/incoming",
+                r#"{"id":"entity-1","current_stage":"incoming","status":"pending","payload":{"title":"unsafe"},"meta":{}}"#,
+            );
+
+            let summary = run_due_tasks(&workdir, &database_path, 3, 5, 1, 0).unwrap_or_else(
+                |error| panic!("run tasks for save_path {save_path:?}: {error}"),
+            );
+            let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+
+            assert_eq!(summary.blocked, 1, "save_path {save_path:?}");
+            assert_eq!(stage_status(&database_path, "incoming"), "blocked");
+            assert_eq!(files_for_stage(&database_path, "raw_entities").len(), 0);
+            assert!(!tempdir.path().join("outside").exists());
+            assert!(!workdir.join("etc").exists());
+            assert!(!runs[0].success);
+            assert_eq!(runs[0].error_type.as_deref(), Some("copy_blocked"));
+        }
     }
 
     #[test]
@@ -1816,7 +2024,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_stage_without_output_folder_accepts_array_response_without_target_copy() {
+    fn output_without_route_is_not_silently_lost() {
         let server = mock_server(vec![(200, r#"[{"entity_name":"terminal child"}]"#)]);
         let tempdir = tempfile::tempdir().expect("tempdir");
         let workdir = tempdir.path().join("workdir");
@@ -1857,11 +2065,12 @@ mod tests {
         let state = stage_state(&database_path, "incoming");
         let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
 
-        assert_eq!(summary.succeeded, 1);
-        assert_eq!(state.status, "done");
+        assert_eq!(summary.blocked, 1);
+        assert_eq!(state.status, "blocked");
         assert!(state.created_child_path.is_none());
         assert_eq!(runs.len(), 1);
-        assert!(runs[0].success);
+        assert!(!runs[0].success);
+        assert_eq!(runs[0].error_type.as_deref(), Some("copy_blocked"));
         assert_eq!(server.requests.lock().expect("requests").len(), 1);
     }
 }

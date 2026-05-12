@@ -10,9 +10,10 @@ use sha2::{Digest, Sha256};
 use crate::database::{
     ensure_entity_stub, evaluate_entity_file_allowed_actions, find_entity_file_by_id,
     find_latest_entity_file_for_stage, find_stage_by_id, get_entity_detail_with_selection,
-    insert_app_event, open_connection, recompute_entity_summaries,
-    record_entity_file_json_edit_rejected, system_time_to_rfc3339, upsert_entity_file,
-    upsert_entity_stage_state, PersistEntityFileInput, PersistEntityStageStateInput,
+    insert_app_event, load_active_stages_from_connection, open_connection,
+    recompute_entity_summaries, record_entity_file_json_edit_rejected, system_time_to_rfc3339,
+    upsert_entity_file, upsert_entity_stage_state, PersistEntityFileInput,
+    PersistEntityStageStateInput,
 };
 use crate::discovery::ensure_stage_directories_for_stage_ids;
 use crate::domain::{
@@ -20,6 +21,7 @@ use crate::domain::{
     StageStatus,
 };
 use crate::file_safety::read_stable_file;
+use crate::save_path::{resolve_save_path_route, route_for_stage_input_folder, SavePathRoute};
 use crate::state_machine::parse_status;
 use crate::workdir::path_string;
 
@@ -382,6 +384,8 @@ pub struct ResponseCopyPayload {
 }
 
 struct PlannedResponseTarget {
+    target_stage_id: String,
+    target_stage_next_stage: Option<String>,
     child_entity_id: String,
     file_name: String,
     target_path: PathBuf,
@@ -411,72 +415,25 @@ pub fn create_next_stage_copies_from_response(
                     source_entity_id, source_stage_id
                 )
             })?;
-
-    let Some(target_stage_id) = source_file
+    let active_stages = load_active_stages_from_connection(&connection)?;
+    let fallback_target_stage_id = source_file
         .next_stage
         .clone()
-        .or_else(|| source_stage.next_stage.clone())
-    else {
-        return Ok(ResponseCopyPayload {
-            status: FileCopyStatus::Blocked,
-            source_entity_id: source_entity_id.to_string(),
-            source_stage_id: source_stage_id.to_string(),
-            target_stage_id: None,
-            source_file_path: Some(source_file.file_path),
-            target_file_paths: Vec::new(),
-            target_files: Vec::new(),
-            output_count: response_payloads.len(),
-            message: "No next stage is configured for this source stage.".to_string(),
-        });
-    };
-
-    let Some(target_stage) = find_stage_by_id(&connection, &target_stage_id)? else {
-        return Ok(ResponseCopyPayload {
-            status: FileCopyStatus::Blocked,
-            source_entity_id: source_entity_id.to_string(),
-            source_stage_id: source_stage_id.to_string(),
-            target_stage_id: Some(target_stage_id),
-            source_file_path: Some(source_file.file_path),
-            target_file_paths: Vec::new(),
-            target_files: Vec::new(),
-            output_count: response_payloads.len(),
-            message: "The resolved next stage does not exist.".to_string(),
-        });
-    };
-
-    if !target_stage.is_active {
-        return Ok(ResponseCopyPayload {
-            status: FileCopyStatus::Blocked,
-            source_entity_id: source_entity_id.to_string(),
-            source_stage_id: source_stage_id.to_string(),
-            target_stage_id: Some(target_stage.id),
-            source_file_path: Some(source_file.file_path),
-            target_file_paths: Vec::new(),
-            target_files: Vec::new(),
-            output_count: response_payloads.len(),
-            message: "The resolved next stage is inactive.".to_string(),
-        });
-    }
+        .or_else(|| source_stage.next_stage.clone());
 
     if response_payloads.is_empty() {
         return Ok(ResponseCopyPayload {
             status: FileCopyStatus::Failed,
             source_entity_id: source_entity_id.to_string(),
             source_stage_id: source_stage_id.to_string(),
-            target_stage_id: Some(target_stage.id),
-            source_file_path: Some(source_file.file_path),
+            target_stage_id: fallback_target_stage_id,
+            source_file_path: Some(source_file.file_path.clone()),
             target_file_paths: Vec::new(),
             target_files: Vec::new(),
             output_count: 0,
             message: "n8n response did not contain any output payload objects.".to_string(),
         });
     }
-
-    ensure_stage_directories_for_stage_ids(
-        workdir_path,
-        database_path,
-        &[target_stage.id.clone()],
-    )?;
 
     let source_path = PathBuf::from(&source_file.file_path);
     let source_bytes = fs::read(&source_path).map_err(|error| {
@@ -499,28 +456,116 @@ pub fn create_next_stage_copies_from_response(
     let now = Utc::now().to_rfc3339();
     let mut planned_paths = HashSet::new();
     let mut plans = Vec::new();
+    let mut target_stage_ids = Vec::<String>::new();
     let output_count = response_payloads.len();
     for (index, payload) in response_payloads.iter().enumerate() {
-        let Some(_) = payload.as_object() else {
+        let Some(payload_object) = payload.as_object() else {
             return Ok(ResponseCopyPayload {
                 status: FileCopyStatus::Failed,
                 source_entity_id: source_entity_id.to_string(),
                 source_stage_id: source_stage_id.to_string(),
-                target_stage_id: Some(target_stage.id),
-                source_file_path: Some(source_file.file_path),
+                target_stage_id: None,
+                source_file_path: Some(source_file.file_path.clone()),
                 target_file_paths: Vec::new(),
                 target_files: Vec::new(),
                 output_count,
                 message: format!("n8n output item at index {index} is not a JSON object."),
             });
         };
+
+        let route = match payload_object.get("save_path") {
+            Some(Value::String(save_path)) => {
+                match resolve_save_path_route(save_path, workdir_path, &active_stages) {
+                    Ok(route) => route,
+                    Err(error) => {
+                        return Ok(ResponseCopyPayload {
+                            status: FileCopyStatus::Blocked,
+                            source_entity_id: source_entity_id.to_string(),
+                            source_stage_id: source_stage_id.to_string(),
+                            target_stage_id: None,
+                            source_file_path: Some(source_file.file_path.clone()),
+                            target_file_paths: Vec::new(),
+                            target_files: Vec::new(),
+                            output_count,
+                            message: error.message,
+                        });
+                    }
+                }
+            }
+            Some(_) => {
+                return Ok(ResponseCopyPayload {
+                    status: FileCopyStatus::Blocked,
+                    source_entity_id: source_entity_id.to_string(),
+                    source_stage_id: source_stage_id.to_string(),
+                    target_stage_id: None,
+                    source_file_path: Some(source_file.file_path.clone()),
+                    target_file_paths: Vec::new(),
+                    target_files: Vec::new(),
+                    output_count,
+                    message: format!(
+                        "n8n output item at index {index} has a non-string save_path."
+                    ),
+                });
+            }
+            None => {
+                let Some(target_stage_id) = fallback_target_stage_id.as_deref() else {
+                    return Ok(ResponseCopyPayload {
+                        status: FileCopyStatus::Blocked,
+                        source_entity_id: source_entity_id.to_string(),
+                        source_stage_id: source_stage_id.to_string(),
+                        target_stage_id: None,
+                        source_file_path: Some(source_file.file_path.clone()),
+                        target_file_paths: Vec::new(),
+                        target_files: Vec::new(),
+                        output_count,
+                        message: format!(
+                            "n8n output item at index {index} has no save_path and no next_stage is configured."
+                        ),
+                    });
+                };
+                let Some(target_stage) =
+                    active_stages.iter().find(|stage| stage.id == target_stage_id)
+                else {
+                    return Ok(ResponseCopyPayload {
+                        status: FileCopyStatus::Blocked,
+                        source_entity_id: source_entity_id.to_string(),
+                        source_stage_id: source_stage_id.to_string(),
+                        target_stage_id: Some(target_stage_id.to_string()),
+                        source_file_path: Some(source_file.file_path.clone()),
+                        target_file_paths: Vec::new(),
+                        target_files: Vec::new(),
+                        output_count,
+                        message: "The resolved next stage does not exist or is inactive."
+                            .to_string(),
+                    });
+                };
+                match route_for_stage_input_folder(workdir_path, target_stage) {
+                    Ok(route) => route,
+                    Err(error) => {
+                        return Ok(ResponseCopyPayload {
+                            status: FileCopyStatus::Blocked,
+                            source_entity_id: source_entity_id.to_string(),
+                            source_stage_id: source_stage_id.to_string(),
+                            target_stage_id: Some(target_stage.id.clone()),
+                            source_file_path: Some(source_file.file_path.clone()),
+                            target_file_paths: Vec::new(),
+                            target_files: Vec::new(),
+                            output_count,
+                            message: error.message,
+                        });
+                    }
+                }
+            }
+        };
+
+        if !target_stage_ids.iter().any(|stage_id| stage_id == &route.stage.id) {
+            target_stage_ids.push(route.stage.id.clone());
+        }
         let plan = match choose_response_target_plan(
-            workdir_path,
             source_root,
             source_entity_id,
             source_stage_id,
-            &target_stage.id,
-            target_stage.next_stage.as_deref(),
+            &route,
             payload,
             response_meta.clone(),
             source_file.id,
@@ -528,7 +573,6 @@ pub fn create_next_stage_copies_from_response(
             index,
             output_count,
             &now,
-            &target_stage.input_folder,
             &mut planned_paths,
         ) {
             Ok(plan) => plan,
@@ -537,8 +581,8 @@ pub fn create_next_stage_copies_from_response(
                     status: FileCopyStatus::Failed,
                     source_entity_id: source_entity_id.to_string(),
                     source_stage_id: source_stage_id.to_string(),
-                    target_stage_id: Some(target_stage.id),
-                    source_file_path: Some(source_file.file_path),
+                    target_stage_id: Some(route.stage.id),
+                    source_file_path: Some(source_file.file_path.clone()),
                     target_file_paths: Vec::new(),
                     target_files: Vec::new(),
                     output_count,
@@ -547,6 +591,22 @@ pub fn create_next_stage_copies_from_response(
             }
         };
         plans.push(plan);
+    }
+
+    ensure_stage_directories_for_stage_ids(workdir_path, database_path, &target_stage_ids)?;
+    for plan in &plans {
+        let Some(parent) = plan.target_path.parent() else {
+            return Err(format!(
+                "Target path '{}' does not have a parent directory.",
+                plan.target_path.display()
+            ));
+        };
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create target directory '{}': {error}",
+                parent.display()
+            )
+        })?;
     }
 
     let mut target_files = Vec::new();
@@ -566,8 +626,8 @@ pub fn create_next_stage_copies_from_response(
         };
         let target_file = register_target_file(
             database_path,
-            &target_stage.id,
-            &target_stage.next_stage,
+            &plan.target_stage_id,
+            &plan.target_stage_next_stage,
             &plan.child_entity_id,
             &plan.target_path,
             &plan.file_name,
@@ -581,20 +641,28 @@ pub fn create_next_stage_copies_from_response(
     }
 
     let connection = open_connection(database_path)?;
+    let response_target_stage_id = if target_stage_ids.len() == 1 {
+        Some(target_stage_ids[0].clone())
+    } else {
+        None
+    };
     insert_app_event(
         &connection,
         AppEventLevel::Info,
         "managed_copy_created",
         &format!(
-            "Registered {} n8n output artifact(s) from entity '{}' into stage '{}'.",
-            output_count, source_entity_id, target_stage.id
+            "Registered {} n8n output artifact(s) from entity '{}' into {} stage(s).",
+            output_count,
+            source_entity_id,
+            target_stage_ids.len()
         ),
         Some(json!({
             "source_entity_id": source_entity_id,
             "source_stage_id": source_stage_id,
             "source_file_id": source_file.id,
             "source_file_path": &source_file.file_path,
-            "target_stage_id": &target_stage.id,
+            "target_stage_id": response_target_stage_id.clone(),
+            "target_stage_ids": &target_stage_ids,
             "stage_run_id": stage_run_id,
             "output_count": output_count,
             "created_count": created_count,
@@ -612,7 +680,7 @@ pub fn create_next_stage_copies_from_response(
         },
         source_entity_id: source_entity_id.to_string(),
         source_stage_id: source_stage_id.to_string(),
-        target_stage_id: Some(target_stage.id),
+        target_stage_id: response_target_stage_id,
         source_file_path: Some(source_file.file_path),
         target_file_paths: target_paths,
         target_files,
@@ -855,12 +923,10 @@ fn build_target_json(
 
 #[allow(clippy::too_many_arguments)]
 fn choose_response_target_plan(
-    workdir_path: &Path,
     source_root: &Map<String, Value>,
     source_entity_id: &str,
     source_stage_id: &str,
-    target_stage_id: &str,
-    next_stage: Option<&str>,
+    route: &SavePathRoute,
     response_payload: &Value,
     response_meta: Option<Value>,
     source_file_id: i64,
@@ -868,9 +934,10 @@ fn choose_response_target_plan(
     output_index: usize,
     output_count: usize,
     now: &str,
-    target_input_folder: &str,
     planned_paths: &mut HashSet<String>,
 ) -> Result<PlannedResponseTarget, String> {
+    let target_stage_id = route.stage.id.as_str();
+    let next_stage = route.stage.next_stage.as_deref();
     let generated_id = generated_child_entity_id(
         source_entity_id,
         target_stage_id,
@@ -896,7 +963,7 @@ fn choose_response_target_plan(
     let mut last_rejection = None;
     for child_entity_id in candidate_ids {
         let file_name = format!("{child_entity_id}.json");
-        let target_path = workdir_path.join(target_input_folder).join(&file_name);
+        let target_path = route.target_dir.join(&file_name);
         let target_path_string = path_string(&target_path);
         if planned_paths.contains(&target_path_string) {
             last_rejection = Some(format!(
@@ -966,6 +1033,8 @@ fn choose_response_target_plan(
 
         planned_paths.insert(target_path_string);
         return Ok(PlannedResponseTarget {
+            target_stage_id: route.stage.id.clone(),
+            target_stage_next_stage: route.stage.next_stage.clone(),
             child_entity_id,
             file_name,
             target_path,

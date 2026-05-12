@@ -10,6 +10,7 @@ mod file_open;
 mod file_ops;
 mod file_safety;
 mod pipeline_editor;
+mod save_path;
 mod state_machine;
 mod workdir;
 
