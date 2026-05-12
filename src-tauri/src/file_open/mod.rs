@@ -80,15 +80,18 @@ mod tests {
                 name: "beehive".to_string(),
                 workdir: ".".to_string(),
             },
+            storage: None,
             runtime: RuntimeConfig::default(),
             stages: vec![StageDefinition {
                 id: "incoming".to_string(),
                 input_folder: "stages/incoming".to_string(),
+                input_uri: None,
                 output_folder: "stages/out".to_string(),
                 workflow_url: "http://localhost/webhook".to_string(),
                 max_attempts: 3,
                 retry_delay_sec: 10,
                 next_stage: None,
+                save_path_aliases: Vec::new(),
             }],
         }
     }

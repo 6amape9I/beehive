@@ -18,7 +18,7 @@ use crate::database::{
 use crate::discovery::ensure_stage_directories_for_stage_ids;
 use crate::domain::{
     AppEventLevel, EntityDetailPayload, EntityValidationStatus, FileCopyPayload, FileCopyStatus,
-    StageStatus,
+    StageStatus, StorageProvider,
 };
 use crate::file_safety::read_stable_file;
 use crate::save_path::{resolve_save_path_route, route_for_stage_input_folder, SavePathRoute};
@@ -523,8 +523,9 @@ pub fn create_next_stage_copies_from_response(
                         ),
                     });
                 };
-                let Some(target_stage) =
-                    active_stages.iter().find(|stage| stage.id == target_stage_id)
+                let Some(target_stage) = active_stages
+                    .iter()
+                    .find(|stage| stage.id == target_stage_id)
                 else {
                     return Ok(ResponseCopyPayload {
                         status: FileCopyStatus::Blocked,
@@ -558,7 +559,10 @@ pub fn create_next_stage_copies_from_response(
             }
         };
 
-        if !target_stage_ids.iter().any(|stage_id| stage_id == &route.stage.id) {
+        if !target_stage_ids
+            .iter()
+            .any(|stage_id| stage_id == &route.stage.id)
+        {
             target_stage_ids.push(route.stage.id.clone());
         }
         let plan = match choose_response_target_plan(
@@ -828,9 +832,16 @@ pub fn save_entity_file_business_json(
             stage_id: file.stage_id.clone(),
             file_path: file.file_path.clone(),
             file_name: file.file_name.clone(),
+            storage_provider: file.storage_provider.clone(),
+            bucket: file.bucket.clone(),
+            key: file.key.clone(),
+            version_id: file.version_id.clone(),
+            etag: file.etag.clone(),
+            checksum_sha256: file.checksum_sha256.clone(),
             checksum: updated_checksum,
             file_mtime: system_time_to_rfc3339(modified),
             file_size: metadata.len(),
+            artifact_size: file.artifact_size,
             payload_json: serde_json::to_string(&payload)
                 .map_err(|error| format!("Failed to store payload JSON: {error}"))?,
             meta_json: serde_json::to_string(&meta)
@@ -842,6 +853,7 @@ pub fn save_entity_file_business_json(
             validation_errors: file.validation_errors.clone(),
             is_managed_copy: file.is_managed_copy,
             copy_source_file_id: file.copy_source_file_id,
+            producer_run_id: file.producer_run_id.clone(),
             first_seen_at: file.first_seen_at.clone(),
             last_seen_at: now.clone(),
             updated_at: now.clone(),
@@ -1442,9 +1454,16 @@ fn register_target_file(
             stage_id: target_stage_id.to_string(),
             file_path: path_string(target_path),
             file_name: file_name.to_string(),
+            storage_provider: StorageProvider::Local,
+            bucket: None,
+            key: None,
+            version_id: None,
+            etag: None,
+            checksum_sha256: None,
             checksum: checksum.to_string(),
             file_mtime,
             file_size,
+            artifact_size: None,
             payload_json,
             meta_json,
             current_stage: Some(target_stage_id.to_string()),
@@ -1454,6 +1473,7 @@ fn register_target_file(
             validation_errors: Vec::new(),
             is_managed_copy: true,
             copy_source_file_id,
+            producer_run_id: None,
             first_seen_at: now.to_string(),
             last_seen_at: now.to_string(),
             updated_at: now.to_string(),
@@ -1514,6 +1534,7 @@ mod tests {
                 name: "beehive".to_string(),
                 workdir: ".".to_string(),
             },
+            storage: None,
             runtime: RuntimeConfig::default(),
             stages,
         }
@@ -1528,11 +1549,13 @@ mod tests {
         StageDefinition {
             id: id.to_string(),
             input_folder: input_folder.to_string(),
+            input_uri: None,
             output_folder: output_folder.to_string(),
             workflow_url: format!("http://localhost:5678/webhook/{id}"),
             max_attempts: 3,
             retry_delay_sec: 10,
             next_stage: next_stage.map(ToOwned::to_owned),
+            save_path_aliases: Vec::new(),
         }
     }
 

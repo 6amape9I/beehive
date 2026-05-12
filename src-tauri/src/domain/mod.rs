@@ -81,19 +81,93 @@ impl Default for RuntimeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageProvider {
+    Local,
+    S3,
+}
+
+impl StorageProvider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::S3 => "s3",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactLocation {
+    pub provider: StorageProvider,
+    pub local_path: Option<String>,
+    pub bucket: Option<String>,
+    pub key: Option<String>,
+    pub version_id: Option<String>,
+    pub etag: Option<String>,
+    pub checksum_sha256: Option<String>,
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct S3StorageConfig {
+    pub bucket: String,
+    pub workspace_prefix: String,
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StorageConfig {
+    pub provider: StorageProvider,
+    pub bucket: Option<String>,
+    pub workspace_prefix: Option<String>,
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
+}
+
+impl StorageConfig {
+    pub fn s3_config(&self) -> Option<S3StorageConfig> {
+        if self.provider != StorageProvider::S3 {
+            return None;
+        }
+        Some(S3StorageConfig {
+            bucket: self.bucket.clone()?,
+            workspace_prefix: self.workspace_prefix.clone()?,
+            region: self.region.clone(),
+            endpoint: self.endpoint.clone(),
+        })
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageStorageConfig {
+    pub stage_id: String,
+    pub input_uri: Option<String>,
+    pub input_folder: Option<String>,
+    pub save_path_aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StageDefinition {
     pub id: String,
     pub input_folder: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_uri: Option<String>,
     pub output_folder: String,
     pub workflow_url: String,
     pub max_attempts: u64,
     pub retry_delay_sec: u64,
     pub next_stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub save_path_aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PipelineConfig {
     pub project: ProjectConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageConfig>,
     pub runtime: RuntimeConfig,
     pub stages: Vec<StageDefinition>,
 }
@@ -117,11 +191,15 @@ pub struct RuntimeConfigDraft {
 pub struct StageDefinitionDraft {
     pub id: String,
     pub input_folder: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_uri: Option<String>,
     pub output_folder: String,
     pub workflow_url: String,
     pub max_attempts: i64,
     pub retry_delay_sec: i64,
     pub next_stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub save_path_aliases: Vec<String>,
     pub original_stage_id: Option<String>,
     pub is_new: bool,
 }
@@ -129,6 +207,8 @@ pub struct StageDefinitionDraft {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PipelineConfigDraft {
     pub project: ProjectConfigDraft,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageConfig>,
     pub runtime: RuntimeConfigDraft,
     pub stages: Vec<StageDefinitionDraft>,
 }
@@ -270,11 +350,13 @@ pub struct BootstrapResult {
 pub struct StageRecord {
     pub id: String,
     pub input_folder: String,
+    pub input_uri: Option<String>,
     pub output_folder: String,
     pub workflow_url: String,
     pub max_attempts: u64,
     pub retry_delay_sec: u64,
     pub next_stage: Option<String>,
+    pub save_path_aliases: Vec<String>,
     pub is_active: bool,
     pub archived_at: Option<String>,
     pub last_seen_in_config_at: Option<String>,
@@ -346,9 +428,16 @@ pub struct EntityFileRecord {
     pub stage_id: String,
     pub file_path: String,
     pub file_name: String,
+    pub storage_provider: StorageProvider,
+    pub bucket: Option<String>,
+    pub key: Option<String>,
+    pub version_id: Option<String>,
+    pub etag: Option<String>,
+    pub checksum_sha256: Option<String>,
     pub checksum: String,
     pub file_mtime: String,
     pub file_size: u64,
+    pub artifact_size: Option<u64>,
     pub payload_json: String,
     pub meta_json: String,
     pub current_stage: Option<String>,
@@ -358,6 +447,7 @@ pub struct EntityFileRecord {
     pub validation_errors: Vec<ConfigValidationIssue>,
     pub is_managed_copy: bool,
     pub copy_source_file_id: Option<i64>,
+    pub producer_run_id: Option<String>,
     pub file_exists: bool,
     pub missing_since: Option<String>,
     pub first_seen_at: String,

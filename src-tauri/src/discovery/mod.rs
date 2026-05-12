@@ -17,7 +17,7 @@ use crate::database::{
 };
 use crate::domain::{
     AppEventLevel, ConfigValidationIssue, EntityValidationStatus, ScanSummary,
-    StageDirectoryProvisionSummary, StageRecord, StageStatus, ValidationSeverity,
+    StageDirectoryProvisionSummary, StageRecord, StageStatus, StorageProvider, ValidationSeverity,
 };
 use crate::file_safety::{read_stable_file, FileStabilityIssue};
 use crate::workdir::path_string;
@@ -516,9 +516,16 @@ fn process_json_file(
         stage_id: stage.id.clone(),
         file_path: file_path_string.clone(),
         file_name,
+        storage_provider: StorageProvider::Local,
+        bucket: None,
+        key: None,
+        version_id: None,
+        etag: None,
+        checksum_sha256: None,
         checksum,
         file_mtime,
         file_size,
+        artifact_size: None,
         payload_json: serialize_json(payload_value)?,
         meta_json: serialize_json(
             &root
@@ -533,6 +540,7 @@ fn process_json_file(
         validation_errors,
         is_managed_copy: extract_is_managed_copy(root),
         copy_source_file_id: None,
+        producer_run_id: None,
         first_seen_at: now.clone(),
         last_seen_at: now.clone(),
         updated_at: now.clone(),
@@ -799,6 +807,7 @@ mod tests {
                 name: "beehive".to_string(),
                 workdir: ".".to_string(),
             },
+            storage: None,
             runtime: RuntimeConfig::default(),
             stages,
         }
@@ -813,11 +822,13 @@ mod tests {
         StageDefinition {
             id: id.to_string(),
             input_folder: input_folder.to_string(),
+            input_uri: None,
             output_folder: output_folder.to_string(),
             workflow_url: format!("http://localhost:5678/webhook/{id}"),
             max_attempts: 3,
             retry_delay_sec: 10,
             next_stage: next_stage.map(ToOwned::to_owned),
+            save_path_aliases: Vec::new(),
         }
     }
 

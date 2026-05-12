@@ -10,14 +10,23 @@ use uuid::Uuid;
 
 use crate::database::{
     block_stage_state, claim_eligible_runtime_tasks, claim_specific_runtime_task,
-    find_latest_entity_file_for_stage, finish_stage_run, insert_app_event, open_connection,
-    reconcile_orphan_stage_runs_for_queued_state, release_queued_claim, start_claimed_stage_run,
-    update_stage_state_failure, update_stage_state_failure_with_reason, update_stage_state_success,
-    FinishStageRunInput, NewStageRunInput, RuntimeTaskRecord,
+    find_latest_entity_file_for_stage, find_stage_by_id, finish_stage_run, insert_app_event,
+    load_active_stages_from_connection, load_setting, open_connection,
+    reconcile_orphan_stage_runs_for_queued_state, register_s3_artifact_pointer,
+    release_queued_claim, start_claimed_stage_run, update_stage_state_failure,
+    update_stage_state_failure_with_reason, update_stage_state_success, FinishStageRunInput,
+    NewStageRunInput, RegisterS3ArtifactPointerInput, RuntimeTaskRecord,
 };
-use crate::domain::{AppEventLevel, CommandErrorInfo, RunDueTasksSummary, StageStatus};
+use crate::domain::{
+    AppEventLevel, ArtifactLocation, CommandErrorInfo, EntityFileRecord, RunDueTasksSummary,
+    S3StorageConfig, StageStatus, StorageProvider,
+};
 use crate::file_ops;
 use crate::file_safety::read_stable_file;
+use crate::s3_manifest::{
+    parse_and_validate_s3_manifest, S3ManifestStatus, S3ManifestValidationContext,
+    S3ManifestValidationErrorKind,
+};
 use crate::state_machine::RuntimeTransitionReason;
 
 pub fn run_due_tasks(
@@ -198,6 +207,10 @@ fn execute_task(
                     task.entity_id, task.stage_id
                 )
             })?;
+    if source_file.storage_provider == StorageProvider::S3 {
+        drop(connection);
+        return execute_s3_task(database_path, task, source_file, request_timeout_sec);
+    }
     if let Some(message) =
         source_file_preflight_error(workdir_path, &source_file, file_stability_delay_ms)
     {
@@ -385,6 +398,331 @@ fn execute_task(
     }
 }
 
+fn execute_s3_task(
+    database_path: &Path,
+    task: RuntimeTaskRecord,
+    source_file: EntityFileRecord,
+    request_timeout_sec: u64,
+) -> Result<TaskOutcome, String> {
+    let Some(source_bucket) = source_file.bucket.clone() else {
+        return block_task(
+            database_path,
+            &task,
+            "S3 source artifact is missing bucket metadata.",
+        );
+    };
+    let Some(source_key) = source_file.key.clone() else {
+        return block_task(
+            database_path,
+            &task,
+            "S3 source artifact is missing key metadata.",
+        );
+    };
+
+    let attempt_no = task.attempts + 1;
+    let run_id = Uuid::new_v4().to_string();
+    let started_at = Utc::now();
+    let started_at_text = started_at.to_rfc3339();
+    let mut connection = open_connection(database_path)?;
+    let workspace_id = load_setting(&connection, "project_name")?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "beehive".to_string());
+    let storage_bucket = load_setting(&connection, "storage_bucket")?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| source_bucket.clone());
+    let workspace_prefix = load_setting(&connection, "storage_workspace_prefix")?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            source_key
+                .split('/')
+                .next()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("workspace")
+                .to_string()
+        });
+    let storage = S3StorageConfig {
+        bucket: storage_bucket,
+        workspace_prefix,
+        region: None,
+        endpoint: None,
+    };
+    let manifest_prefix = format!(
+        "{}/runs/{}/",
+        storage.workspace_prefix.trim_end_matches('/'),
+        run_id
+    );
+    let source_stage = find_stage_by_id(&connection, &task.stage_id)?
+        .ok_or_else(|| format!("Source stage '{}' was not found.", task.stage_id))?;
+    let active_stages = load_active_stages_from_connection(&connection)?;
+    let request_json = json!({
+        "mode": "s3_artifact_pointer",
+        "workspace_id": workspace_id.clone(),
+        "run_id": run_id.clone(),
+        "stage_id": task.stage_id.clone(),
+        "source": {
+            "bucket": source_bucket.clone(),
+            "key": source_key.clone(),
+            "version_id": source_file.version_id.clone(),
+            "etag": source_file.etag.clone(),
+        },
+        "manifest_prefix": manifest_prefix.clone(),
+    });
+    let stage_run_input = NewStageRunInput {
+        run_id: run_id.clone(),
+        entity_id: task.entity_id.clone(),
+        entity_file_id: source_file.id,
+        stage_id: task.stage_id.clone(),
+        attempt_no,
+        workflow_url: task.workflow_url.clone(),
+        request_json: serde_json::to_string(&request_json)
+            .map_err(|error| format!("Failed to serialize S3 n8n request audit JSON: {error}"))?,
+        started_at: started_at_text.clone(),
+    };
+    start_claimed_stage_run(&mut connection, task.state_id, &stage_run_input)?;
+    insert_app_event(
+        &connection,
+        AppEventLevel::Info,
+        "task_started",
+        &format!(
+            "Started S3 artifact '{}' on stage '{}'.",
+            source_file.file_path, task.stage_id
+        ),
+        Some(json!({
+            "entity_id": task.entity_id.clone(),
+            "stage_id": task.stage_id.clone(),
+            "run_id": run_id.clone(),
+            "source_bucket": source_file.bucket.clone(),
+            "source_key": source_file.key.clone(),
+        })),
+        &started_at_text,
+    )?;
+    drop(connection);
+
+    let timer = Instant::now();
+    let http_result = call_s3_webhook(
+        &task.workflow_url,
+        &S3WebhookPointer {
+            workspace_id: request_json["workspace_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            run_id: run_id.clone(),
+            stage_id: task.stage_id.clone(),
+            source_bucket: request_json["source"]["bucket"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            source_key: request_json["source"]["key"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            source_version_id: source_file.version_id.clone(),
+            source_etag: source_file.etag.clone(),
+            manifest_prefix: manifest_prefix.clone(),
+        },
+        request_timeout_sec,
+    );
+    let finished_at = Utc::now();
+    let duration_ms = timer.elapsed().as_millis() as u64;
+    let connection = open_connection(database_path)?;
+
+    let response = match http_result {
+        Ok(response) => response,
+        Err(failure) => {
+            return finish_failure(
+                &connection,
+                &task,
+                &run_id,
+                attempt_no,
+                failure,
+                finished_at,
+                duration_ms,
+            );
+        }
+    };
+    if !(200..=299).contains(&response.status) {
+        return finish_failure(
+            &connection,
+            &task,
+            &run_id,
+            attempt_no,
+            AttemptFailure {
+                error_type: "http_status".to_string(),
+                message: format!("n8n webhook returned HTTP status {}.", response.status),
+                http_status: Some(response.status),
+                response_json: Some(response.body),
+            },
+            finished_at,
+            duration_ms,
+        );
+    }
+
+    let context = S3ManifestValidationContext {
+        workspace_id: request_json["workspace_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        run_id: run_id.clone(),
+        source: ArtifactLocation {
+            provider: StorageProvider::S3,
+            local_path: None,
+            bucket: source_file.bucket.clone(),
+            key: source_file.key.clone(),
+            version_id: source_file.version_id.clone(),
+            etag: source_file.etag.clone(),
+            checksum_sha256: source_file.checksum_sha256.clone(),
+            size: source_file.artifact_size,
+        },
+        storage,
+        source_stage,
+        active_stages,
+    };
+    let validated = match parse_and_validate_s3_manifest(&response.body, &context) {
+        Ok(validated) => validated,
+        Err(error) if error.kind == S3ManifestValidationErrorKind::BlockedRoute => {
+            finish_manifest_blocked(
+                &connection,
+                &task,
+                &run_id,
+                error.message,
+                response.status,
+                response.body,
+                finished_at,
+                duration_ms,
+            )?;
+            return Ok(TaskOutcome::Blocked);
+        }
+        Err(error) => {
+            return finish_failure(
+                &connection,
+                &task,
+                &run_id,
+                attempt_no,
+                AttemptFailure {
+                    error_type: "manifest_invalid".to_string(),
+                    message: error.message,
+                    http_status: Some(response.status),
+                    response_json: Some(response.body),
+                },
+                finished_at,
+                duration_ms,
+            );
+        }
+    };
+
+    if validated.manifest.status == S3ManifestStatus::Error {
+        return finish_failure(
+            &connection,
+            &task,
+            &run_id,
+            attempt_no,
+            AttemptFailure {
+                error_type: validated
+                    .manifest
+                    .error_type
+                    .clone()
+                    .unwrap_or_else(|| "s3_manifest_error".to_string()),
+                message: validated
+                    .manifest
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "n8n returned an error manifest.".to_string()),
+                http_status: Some(response.status),
+                response_json: Some(response.body),
+            },
+            finished_at,
+            duration_ms,
+        );
+    }
+
+    let mut created_child_paths = Vec::new();
+    for output in &validated.outputs {
+        let file = match register_s3_artifact_pointer(
+            database_path,
+            &RegisterS3ArtifactPointerInput {
+                entity_id: output.output.artifact_id.clone(),
+                artifact_id: output.output.artifact_id.clone(),
+                stage_id: output.target_stage.id.clone(),
+                bucket: output
+                    .location
+                    .bucket
+                    .clone()
+                    .unwrap_or_else(|| output.output.bucket.clone()),
+                key: output
+                    .location
+                    .key
+                    .clone()
+                    .unwrap_or_else(|| output.output.key.clone()),
+                version_id: output.location.version_id.clone(),
+                etag: output.location.etag.clone(),
+                checksum_sha256: output.location.checksum_sha256.clone(),
+                size: output.location.size,
+                source_file_id: Some(source_file.id),
+                producer_run_id: Some(run_id.clone()),
+                status: StageStatus::Pending,
+            },
+        ) {
+            Ok(file) => file,
+            Err(message) => {
+                return finish_failure(
+                    &connection,
+                    &task,
+                    &run_id,
+                    attempt_no,
+                    AttemptFailure {
+                        error_type: "artifact_registration_failed".to_string(),
+                        message,
+                        http_status: Some(response.status),
+                        response_json: Some(response.body),
+                    },
+                    finished_at,
+                    duration_ms,
+                );
+            }
+        };
+        created_child_paths.push(file.file_path);
+    }
+
+    finish_stage_run(
+        &connection,
+        &FinishStageRunInput {
+            run_id: run_id.clone(),
+            response_json: Some(response.body),
+            http_status: Some(response.status),
+            success: true,
+            error_type: None,
+            error_message: None,
+            finished_at: finished_at.to_rfc3339(),
+            duration_ms,
+        },
+    )?;
+    update_stage_state_success(
+        &connection,
+        task.state_id,
+        Some(response.status),
+        &finished_at.to_rfc3339(),
+        created_child_paths.first().map(String::as_str),
+    )?;
+    insert_app_event(
+        &connection,
+        AppEventLevel::Info,
+        "task_succeeded",
+        &format!(
+            "S3 artifact '{}' succeeded on stage '{}'.",
+            source_file.file_path, task.stage_id
+        ),
+        Some(json!({
+            "entity_id": task.entity_id,
+            "stage_id": task.stage_id,
+            "run_id": run_id,
+            "output_count": created_child_paths.len(),
+            "created_child_paths": created_child_paths,
+        })),
+        &finished_at.to_rfc3339(),
+    )?;
+    Ok(TaskOutcome::Succeeded)
+}
+
 fn finish_copy_blocked(
     connection: &rusqlite::Connection,
     task: &RuntimeTaskRecord,
@@ -427,6 +765,54 @@ fn finish_copy_blocked(
             "stage_id": task.stage_id,
             "run_id": run_id,
             "error_type": "copy_blocked",
+        })),
+        &finished_at.to_rfc3339(),
+    )?;
+    Ok(())
+}
+
+fn finish_manifest_blocked(
+    connection: &rusqlite::Connection,
+    task: &RuntimeTaskRecord,
+    run_id: &str,
+    message: String,
+    http_status: i64,
+    response_json: String,
+    finished_at: DateTime<Utc>,
+    duration_ms: u64,
+) -> Result<(), String> {
+    finish_stage_run(
+        connection,
+        &FinishStageRunInput {
+            run_id: run_id.to_string(),
+            response_json: Some(response_json),
+            http_status: Some(http_status),
+            success: false,
+            error_type: Some("manifest_blocked".to_string()),
+            error_message: Some(message.clone()),
+            finished_at: finished_at.to_rfc3339(),
+            duration_ms,
+        },
+    )?;
+    block_stage_state(
+        connection,
+        task.state_id,
+        &message,
+        &finished_at.to_rfc3339(),
+    )?;
+    insert_app_event(
+        connection,
+        AppEventLevel::Error,
+        "task_blocked",
+        &format!(
+            "S3 entity '{}' on stage '{}' was blocked by manifest routing: {}",
+            task.entity_id, task.stage_id, message
+        ),
+        Some(json!({
+            "entity_id": task.entity_id,
+            "stage_id": task.stage_id,
+            "run_id": run_id,
+            "error_type": "manifest_blocked",
         })),
         &finished_at.to_rfc3339(),
     )?;
@@ -541,6 +927,71 @@ fn call_webhook(
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json")
         .json(request_json)
+        .send()
+        .map_err(|error| AttemptFailure {
+            error_type: if error.is_timeout() {
+                "timeout"
+            } else {
+                "network"
+            }
+            .to_string(),
+            message: error.to_string(),
+            http_status: None,
+            response_json: None,
+        })?;
+    let status = response.status().as_u16() as i64;
+    let body = response.text().map_err(|error| AttemptFailure {
+        error_type: "network".to_string(),
+        message: format!("Failed to read HTTP response body: {error}"),
+        http_status: Some(status),
+        response_json: None,
+    })?;
+    Ok(HttpResponse { status, body })
+}
+
+struct S3WebhookPointer {
+    workspace_id: String,
+    run_id: String,
+    stage_id: String,
+    source_bucket: String,
+    source_key: String,
+    source_version_id: Option<String>,
+    source_etag: Option<String>,
+    manifest_prefix: String,
+}
+
+fn call_s3_webhook(
+    workflow_url: &str,
+    pointer: &S3WebhookPointer,
+    timeout_sec: u64,
+) -> Result<HttpResponse, AttemptFailure> {
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_sec.max(1)))
+        .build()
+        .map_err(|error| AttemptFailure {
+            error_type: "network".to_string(),
+            message: format!("Failed to build HTTP client: {error}"),
+            http_status: None,
+            response_json: None,
+        })?;
+    let mut request = client
+        .post(workflow_url)
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .header(ACCEPT, "application/json")
+        .header("X-Beehive-Workspace-Id", &pointer.workspace_id)
+        .header("X-Beehive-Run-Id", &pointer.run_id)
+        .header("X-Beehive-Stage-Id", &pointer.stage_id)
+        .header("X-Beehive-Source-Bucket", &pointer.source_bucket)
+        .header("X-Beehive-Source-Key", &pointer.source_key)
+        .header("X-Beehive-Manifest-Prefix", &pointer.manifest_prefix);
+    if let Some(version_id) = pointer.source_version_id.as_deref() {
+        request = request.header("X-Beehive-Source-Version-Id", version_id);
+    }
+    if let Some(etag) = pointer.source_etag.as_deref() {
+        request = request.header("X-Beehive-Source-Etag", etag);
+    }
+    let response = request
+        .body(Vec::new())
         .send()
         .map_err(|error| AttemptFailure {
             error_type: if error.is_timeout() {
@@ -830,10 +1281,14 @@ mod tests {
 
     use crate::database::{
         bootstrap_database, claim_eligible_runtime_tasks, get_entity_detail, list_entity_files,
-        list_stage_runs, open_connection, start_claimed_stage_run, NewStageRunInput,
+        list_stage_runs, open_connection, register_s3_artifact_pointer, start_claimed_stage_run,
+        NewStageRunInput, RegisterS3ArtifactPointerInput,
     };
     use crate::discovery::scan_workspace;
-    use crate::domain::{PipelineConfig, ProjectConfig, RuntimeConfig, StageDefinition};
+    use crate::domain::{
+        PipelineConfig, ProjectConfig, RuntimeConfig, StageDefinition, StorageConfig,
+        StorageProvider,
+    };
     use sha2::Digest;
 
     struct MockServer {
@@ -889,12 +1344,55 @@ mod tests {
         }
     }
 
+    fn mock_server_dynamic<F>(request_count: usize, handler: F) -> MockServer
+    where
+        F: Fn(&str) -> (u16, String) + Send + Sync + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let url = format!(
+            "http://{}/webhook/test",
+            listener.local_addr().expect("addr")
+        );
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        let handler = Arc::new(handler);
+        let handle = thread::spawn(move || {
+            for _ in 0..request_count {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let mut buffer = [0_u8; 8192];
+                let read = stream.read(&mut buffer).expect("read request");
+                let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                let (status, body) = handler(&request);
+                captured.lock().expect("lock requests").push(request);
+                let status_text = if (200..=299).contains(&status) {
+                    "OK"
+                } else {
+                    "ERROR"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+        MockServer {
+            url,
+            requests,
+            handle: Some(handle),
+        }
+    }
+
     fn test_config(workflow_url: &str, max_attempts: u64, retry_delay_sec: u64) -> PipelineConfig {
         PipelineConfig {
             project: ProjectConfig {
                 name: "beehive".to_string(),
                 workdir: ".".to_string(),
             },
+            storage: None,
             runtime: RuntimeConfig {
                 scan_interval_sec: 5,
                 max_parallel_tasks: 3,
@@ -906,20 +1404,24 @@ mod tests {
                 StageDefinition {
                     id: "incoming".to_string(),
                     input_folder: "stages/incoming".to_string(),
+                    input_uri: None,
                     output_folder: "stages/incoming-out".to_string(),
                     workflow_url: workflow_url.to_string(),
                     max_attempts,
                     retry_delay_sec,
                     next_stage: Some("normalized".to_string()),
+                    save_path_aliases: Vec::new(),
                 },
                 StageDefinition {
                     id: "normalized".to_string(),
                     input_folder: "stages/normalized".to_string(),
+                    input_uri: None,
                     output_folder: "stages/normalized-out".to_string(),
                     workflow_url: workflow_url.to_string(),
                     max_attempts,
                     retry_delay_sec,
                     next_stage: None,
+                    save_path_aliases: Vec::new(),
                 },
             ],
         }
@@ -934,11 +1436,13 @@ mod tests {
         StageDefinition {
             id: id.to_string(),
             input_folder: active_input.to_string(),
+            input_uri: None,
             output_folder: format!("{active_input}-out"),
             workflow_url: workflow_url.to_string(),
             max_attempts: 3,
             retry_delay_sec: 0,
             next_stage: next_stage.map(ToOwned::to_owned),
+            save_path_aliases: Vec::new(),
         }
     }
 
@@ -1001,12 +1505,21 @@ mod tests {
         request.split("\r\n\r\n").nth(1).unwrap_or_default()
     }
 
+    fn header_value(request: &str, name: &str) -> Option<String> {
+        request.lines().find_map(|line| {
+            let (header, value) = line.split_once(':')?;
+            if header.eq_ignore_ascii_case(name) {
+                Some(value.trim().to_string())
+            } else {
+                None
+            }
+        })
+    }
+
     fn captured_request_json(server: &MockServer, index: usize) -> Value {
         let requests = server.requests.lock().expect("requests");
-        serde_json::from_str(request_body(
-            requests.get(index).expect("captured request"),
-        ))
-        .expect("request body json")
+        serde_json::from_str(request_body(requests.get(index).expect("captured request")))
+            .expect("request body json")
     }
 
     fn stage_status(database_path: &std::path::Path, stage_id: &str) -> String {
@@ -1044,6 +1557,229 @@ mod tests {
             .into_iter()
             .filter(|file| file.stage_id == stage_id)
             .collect()
+    }
+
+    fn s3_test_config(workflow_url: &str, raw_next_stage: Option<&str>) -> PipelineConfig {
+        PipelineConfig {
+            project: ProjectConfig {
+                name: "beehive-s3-dev".to_string(),
+                workdir: ".".to_string(),
+            },
+            storage: Some(StorageConfig {
+                provider: StorageProvider::S3,
+                bucket: Some("steos-s3-data".to_string()),
+                workspace_prefix: Some("main_dir".to_string()),
+                region: None,
+                endpoint: None,
+            }),
+            runtime: RuntimeConfig::default(),
+            stages: vec![
+                StageDefinition {
+                    id: "raw".to_string(),
+                    input_folder: String::new(),
+                    input_uri: Some("s3://steos-s3-data/main_dir/raw".to_string()),
+                    output_folder: String::new(),
+                    workflow_url: workflow_url.to_string(),
+                    max_attempts: 1,
+                    retry_delay_sec: 0,
+                    next_stage: raw_next_stage.map(ToOwned::to_owned),
+                    save_path_aliases: vec![
+                        "main_dir/raw".to_string(),
+                        "/main_dir/raw".to_string(),
+                    ],
+                },
+                StageDefinition {
+                    id: "raw_entities".to_string(),
+                    input_folder: String::new(),
+                    input_uri: Some(
+                        "s3://steos-s3-data/main_dir/processed/raw_entities".to_string(),
+                    ),
+                    output_folder: String::new(),
+                    workflow_url: workflow_url.to_string(),
+                    max_attempts: 1,
+                    retry_delay_sec: 0,
+                    next_stage: None,
+                    save_path_aliases: vec![
+                        "main_dir/processed/raw_entities".to_string(),
+                        "/main_dir/processed/raw_entities".to_string(),
+                    ],
+                },
+            ],
+        }
+    }
+
+    fn prepare_s3_workdir(
+        workflow_url: &str,
+        raw_next_stage: Option<&str>,
+    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        let config = s3_test_config(workflow_url, raw_next_stage);
+        bootstrap_database(&database_path, &config).expect("bootstrap");
+        register_s3_artifact_pointer(
+            &database_path,
+            &RegisterS3ArtifactPointerInput {
+                entity_id: "entity-1".to_string(),
+                artifact_id: "source-001".to_string(),
+                stage_id: "raw".to_string(),
+                bucket: "steos-s3-data".to_string(),
+                key: "main_dir/raw/input_001.json".to_string(),
+                version_id: None,
+                etag: Some("etag-source".to_string()),
+                checksum_sha256: None,
+                size: Some(123),
+                source_file_id: None,
+                producer_run_id: None,
+                status: StageStatus::Pending,
+            },
+        )
+        .expect("register source");
+        (tempdir, workdir, database_path)
+    }
+
+    fn s3_success_manifest(run_id: &str, save_path: &str, key: &str) -> String {
+        format!(
+            r#"{{
+  "schema":"beehive.s3_artifact_manifest.v1",
+  "workspace_id":"beehive-s3-dev",
+  "run_id":"{run_id}",
+  "source":{{"bucket":"steos-s3-data","key":"main_dir/raw/input_001.json","version_id":null,"etag":"etag-source"}},
+  "status":"success",
+  "outputs":[{{"artifact_id":"art_001","bucket":"steos-s3-data","key":"{key}","save_path":"{save_path}","content_type":"application/json","checksum_sha256":null,"size":456}}],
+  "created_at":"2026-05-12T00:00:00Z"
+}}"#
+        )
+    }
+
+    #[test]
+    fn s3_mode_sends_empty_body_headers_and_registers_output_pointer() {
+        let server = mock_server_dynamic(1, |request| {
+            let run_id = header_value(request, "X-Beehive-Run-Id").expect("run header");
+            (
+                200,
+                s3_success_manifest(
+                    &run_id,
+                    "main_dir/processed/raw_entities",
+                    "main_dir/processed/raw_entities/art_001.json",
+                ),
+            )
+        });
+        let (_tempdir, workdir, database_path) =
+            prepare_s3_workdir(&server.url, Some("raw_entities"));
+
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run");
+        let requests = server.requests.lock().expect("requests");
+        let request = requests.first().expect("request");
+        let target_files = files_for_stage(&database_path, "raw_entities");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+
+        assert_eq!(summary.succeeded, 1);
+        assert!(request_body(request).is_empty());
+        assert_eq!(
+            header_value(request, "X-Beehive-Source-Bucket").as_deref(),
+            Some("steos-s3-data")
+        );
+        assert_eq!(
+            header_value(request, "X-Beehive-Source-Key").as_deref(),
+            Some("main_dir/raw/input_001.json")
+        );
+        assert_eq!(target_files.len(), 1);
+        assert_eq!(target_files[0].storage_provider, StorageProvider::S3);
+        assert_eq!(
+            target_files[0].key.as_deref(),
+            Some("main_dir/processed/raw_entities/art_001.json")
+        );
+        assert!(target_files[0].producer_run_id.is_some());
+        assert_eq!(stage_status(&database_path, "raw"), "done");
+        assert!(runs[0].request_json.contains("s3_artifact_pointer"));
+        assert!(!runs[0].request_json.contains("hello beehive"));
+    }
+
+    #[test]
+    fn s3_error_manifest_fails_without_child_outputs() {
+        let server = mock_server_dynamic(1, |request| {
+            let run_id = header_value(request, "X-Beehive-Run-Id").expect("run header");
+            (
+                200,
+                format!(
+                    r#"{{
+  "schema":"beehive.s3_artifact_manifest.v1",
+  "workspace_id":"beehive-s3-dev",
+  "run_id":"{run_id}",
+  "source":{{"bucket":"steos-s3-data","key":"main_dir/raw/input_001.json"}},
+  "status":"error",
+  "error_type":"llm_invalid_json",
+  "error_message":"Model returned invalid JSON",
+  "outputs":[],
+  "created_at":"2026-05-12T00:00:00Z"
+}}"#
+                ),
+            )
+        });
+        let (_tempdir, workdir, database_path) =
+            prepare_s3_workdir(&server.url, Some("raw_entities"));
+
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+
+        assert_eq!(summary.failed, 1);
+        assert_eq!(stage_status(&database_path, "raw"), "failed");
+        assert_eq!(runs[0].error_type.as_deref(), Some("llm_invalid_json"));
+        assert!(files_for_stage(&database_path, "raw_entities").is_empty());
+    }
+
+    #[test]
+    fn s3_invalid_save_path_manifest_blocks_run() {
+        let server = mock_server_dynamic(1, |request| {
+            let run_id = header_value(request, "X-Beehive-Run-Id").expect("run header");
+            (
+                200,
+                s3_success_manifest(
+                    &run_id,
+                    "main_dir/processed/unknown",
+                    "main_dir/processed/unknown/art_001.json",
+                ),
+            )
+        });
+        let (_tempdir, workdir, database_path) =
+            prepare_s3_workdir(&server.url, Some("raw_entities"));
+
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+
+        assert_eq!(summary.blocked, 1);
+        assert_eq!(stage_status(&database_path, "raw"), "blocked");
+        assert_eq!(runs[0].error_type.as_deref(), Some("manifest_blocked"));
+        assert!(files_for_stage(&database_path, "raw_entities").is_empty());
+    }
+
+    #[test]
+    fn s3_terminal_success_with_no_outputs_marks_done() {
+        let server = mock_server_dynamic(1, |request| {
+            let run_id = header_value(request, "X-Beehive-Run-Id").expect("run header");
+            (
+                200,
+                format!(
+                    r#"{{
+  "schema":"beehive.s3_artifact_manifest.v1",
+  "workspace_id":"beehive-s3-dev",
+  "run_id":"{run_id}",
+  "source":{{"bucket":"steos-s3-data","key":"main_dir/raw/input_001.json"}},
+  "status":"success",
+  "outputs":[],
+  "created_at":"2026-05-12T00:00:00Z"
+}}"#
+                ),
+            )
+        });
+        let (_tempdir, workdir, database_path) = prepare_s3_workdir(&server.url, None);
+
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run");
+
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(stage_status(&database_path, "raw"), "done");
+        assert!(files_for_stage(&database_path, "raw_entities").is_empty());
     }
 
     fn canonical_hash8(value: &Value) -> String {
@@ -1209,7 +1945,6 @@ mod tests {
             "entity_file_id",
             "attempt",
             "run_id",
-            "beehive",
         ] {
             assert!(
                 !captured_body.contains(forbidden),
@@ -1317,6 +2052,7 @@ mod tests {
                 name: "beehive".to_string(),
                 workdir: ".".to_string(),
             },
+            storage: None,
             runtime: RuntimeConfig::default(),
             stages: vec![
                 stage("incoming", &server.url, None, "stages/incoming"),
@@ -1396,6 +2132,7 @@ mod tests {
                 name: "beehive".to_string(),
                 workdir: ".".to_string(),
             },
+            storage: None,
             runtime: RuntimeConfig::default(),
             stages: vec![
                 stage("incoming", &server.url, None, "stages/incoming"),
@@ -1432,6 +2169,7 @@ mod tests {
                 name: "beehive".to_string(),
                 workdir: ".".to_string(),
             },
+            storage: None,
             runtime: RuntimeConfig::default(),
             stages: vec![
                 stage("incoming", &server.url, None, "stages/incoming"),
@@ -1474,6 +2212,7 @@ mod tests {
                     name: "beehive".to_string(),
                     workdir: ".".to_string(),
                 },
+                storage: None,
                 runtime: RuntimeConfig::default(),
                 stages: vec![
                     stage("incoming", &server.url, None, "stages/incoming"),
@@ -1486,9 +2225,8 @@ mod tests {
                 r#"{"id":"entity-1","current_stage":"incoming","status":"pending","payload":{"title":"unsafe"},"meta":{}}"#,
             );
 
-            let summary = run_due_tasks(&workdir, &database_path, 3, 5, 1, 0).unwrap_or_else(
-                |error| panic!("run tasks for save_path {save_path:?}: {error}"),
-            );
+            let summary = run_due_tasks(&workdir, &database_path, 3, 5, 1, 0)
+                .unwrap_or_else(|error| panic!("run tasks for save_path {save_path:?}: {error}"));
             let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
 
             assert_eq!(summary.blocked, 1, "save_path {save_path:?}");
@@ -1600,6 +2338,7 @@ mod tests {
                     name: "beehive".to_string(),
                     workdir: ".".to_string(),
                 },
+                storage: None,
                 runtime: RuntimeConfig::default(),
                 stages: vec![stage("incoming", &server.url, None, "stages/incoming")],
             },
@@ -1888,6 +2627,7 @@ mod tests {
                 name: "beehive".to_string(),
                 workdir: ".".to_string(),
             },
+            storage: None,
             runtime: RuntimeConfig::default(),
             stages: vec![stage(
                 "incoming",
@@ -1934,6 +2674,7 @@ mod tests {
                 name: "beehive".to_string(),
                 workdir: ".".to_string(),
             },
+            storage: None,
             runtime: RuntimeConfig::default(),
             stages: vec![
                 stage(
@@ -2040,15 +2781,18 @@ mod tests {
                     name: "beehive".to_string(),
                     workdir: ".".to_string(),
                 },
+                storage: None,
                 runtime: RuntimeConfig::default(),
                 stages: vec![StageDefinition {
                     id: "incoming".to_string(),
                     input_folder: "stages/incoming".to_string(),
+                    input_uri: None,
                     output_folder: String::new(),
                     workflow_url: server.url.clone(),
                     max_attempts: 3,
                     retry_delay_sec: 0,
                     next_stage: None,
+                    save_path_aliases: Vec::new(),
                 }],
             },
         )

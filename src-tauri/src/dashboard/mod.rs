@@ -153,11 +153,13 @@ fn load_dashboard_stages(connection: &Connection) -> Result<Vec<StageRecord>, St
             SELECT
                 stage.stage_id,
                 stage.input_folder,
+                stage.input_uri,
                 stage.output_folder,
                 stage.workflow_url,
                 stage.max_attempts,
                 stage.retry_delay_sec,
                 stage.next_stage,
+                stage.save_path_aliases_json,
                 stage.is_active,
                 stage.archived_at,
                 stage.last_seen_in_config_at,
@@ -173,20 +175,31 @@ fn load_dashboard_stages(connection: &Connection) -> Result<Vec<StageRecord>, St
         .map_err(|error| format!("Failed to prepare dashboard stage query: {error}"))?;
     let rows = statement
         .query_map([], |row| {
+            let save_path_aliases_json: String = row.get(8)?;
+            let save_path_aliases = serde_json::from_str::<Vec<String>>(&save_path_aliases_json)
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+                    )
+                })?;
             Ok(StageRecord {
                 id: row.get(0)?,
                 input_folder: row.get(1)?,
-                output_folder: row.get(2)?,
-                workflow_url: row.get(3)?,
-                max_attempts: row.get::<_, i64>(4)? as u64,
-                retry_delay_sec: row.get::<_, i64>(5)? as u64,
-                next_stage: row.get(6)?,
-                is_active: row.get::<_, i64>(7)? == 1,
-                archived_at: row.get(8)?,
-                last_seen_in_config_at: row.get(9)?,
-                created_at: row.get(10)?,
-                updated_at: row.get(11)?,
-                entity_count: row.get::<_, i64>(12)? as u64,
+                input_uri: row.get(2)?,
+                output_folder: row.get(3)?,
+                workflow_url: row.get(4)?,
+                max_attempts: row.get::<_, i64>(5)? as u64,
+                retry_delay_sec: row.get::<_, i64>(6)? as u64,
+                next_stage: row.get(7)?,
+                save_path_aliases,
+                is_active: row.get::<_, i64>(9)? == 1,
+                archived_at: row.get(10)?,
+                last_seen_in_config_at: row.get(11)?,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
+                entity_count: row.get::<_, i64>(14)? as u64,
             })
         })
         .map_err(|error| format!("Failed to query dashboard stages: {error}"))?;
@@ -631,6 +644,7 @@ mod tests {
                 name: "beehive".to_string(),
                 workdir: ".".to_string(),
             },
+            storage: None,
             runtime: RuntimeConfig::default(),
             stages,
         }
@@ -640,11 +654,13 @@ mod tests {
         StageDefinition {
             id: id.to_string(),
             input_folder: format!("stages/{id}"),
+            input_uri: None,
             output_folder: format!("stages/{id}-out"),
             workflow_url: format!("http://localhost:5678/webhook/{id}"),
             max_attempts: 3,
             retry_delay_sec: 10,
             next_stage: next_stage.map(ToOwned::to_owned),
+            save_path_aliases: Vec::new(),
         }
     }
 

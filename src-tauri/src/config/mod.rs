@@ -6,12 +6,13 @@ use serde::Deserialize;
 
 use crate::domain::{
     ConfigValidationIssue, ConfigValidationResult, PipelineConfig, ProjectConfig, RuntimeConfig,
-    StageDefinition, ValidationSeverity,
+    StageDefinition, StorageConfig, StorageProvider, ValidationSeverity,
 };
 
 #[derive(Debug, Deserialize)]
 struct RawPipelineConfig {
     project: Option<RawProjectConfig>,
+    storage: Option<RawStorageConfig>,
     runtime: Option<RawRuntimeConfig>,
     stages: Option<Vec<RawStageDefinition>>,
 }
@@ -32,14 +33,25 @@ struct RawRuntimeConfig {
 }
 
 #[derive(Debug, Deserialize)]
+struct RawStorageConfig {
+    provider: Option<String>,
+    bucket: Option<String>,
+    workspace_prefix: Option<String>,
+    region: Option<String>,
+    endpoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RawStageDefinition {
     id: Option<String>,
     input_folder: Option<String>,
+    input_uri: Option<String>,
     output_folder: Option<String>,
     workflow_url: Option<String>,
     max_attempts: Option<i64>,
     retry_delay_sec: Option<i64>,
     next_stage: Option<String>,
+    save_path_aliases: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +171,14 @@ fn validate_and_build(raw: RawPipelineConfig) -> (Option<PipelineConfig>, Config
         }
     };
 
+    let storage = build_storage_config(raw.storage, &mut issues);
+    let is_s3_mode = storage
+        .as_ref()
+        .is_some_and(|storage| storage.provider == StorageProvider::S3);
+    let s3_bucket = storage
+        .as_ref()
+        .and_then(|storage| storage.bucket.as_deref());
+
     let runtime = match raw.runtime {
         Some(runtime) => {
             let request_timeout_sec = runtime.request_timeout_sec.unwrap_or(30);
@@ -190,7 +210,7 @@ fn validate_and_build(raw: RawPipelineConfig) -> (Option<PipelineConfig>, Config
     };
 
     let stages = match raw.stages {
-        Some(stages) => build_stages(stages, &mut issues),
+        Some(stages) => build_stages(stages, is_s3_mode, s3_bucket, &mut issues),
         None => {
             issues.push(issue(
                 ValidationSeverity::Error,
@@ -209,6 +229,7 @@ fn validate_and_build(raw: RawPipelineConfig) -> (Option<PipelineConfig>, Config
             return (
                 Some(PipelineConfig {
                     project,
+                    storage,
                     runtime,
                     stages,
                 }),
@@ -220,8 +241,77 @@ fn validate_and_build(raw: RawPipelineConfig) -> (Option<PipelineConfig>, Config
     (None, validation)
 }
 
+fn build_storage_config(
+    raw_storage: Option<RawStorageConfig>,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> Option<StorageConfig> {
+    let Some(raw_storage) = raw_storage else {
+        return None;
+    };
+    let provider_text = normalize_optional_string(raw_storage.provider)
+        .unwrap_or_else(|| "local".to_string())
+        .to_lowercase();
+    let provider = match provider_text.as_str() {
+        "local" => StorageProvider::Local,
+        "s3" => StorageProvider::S3,
+        _ => {
+            issues.push(issue(
+                ValidationSeverity::Error,
+                "invalid_storage_provider",
+                "storage.provider",
+                "storage.provider must be 'local' or 's3'.",
+            ));
+            StorageProvider::Local
+        }
+    };
+
+    let bucket = normalize_optional_string(raw_storage.bucket);
+    let workspace_prefix = normalize_optional_string(raw_storage.workspace_prefix);
+    let region = normalize_optional_string(raw_storage.region);
+    let endpoint = normalize_optional_string(raw_storage.endpoint);
+
+    if provider == StorageProvider::S3 {
+        if bucket.is_none() {
+            issues.push(issue(
+                ValidationSeverity::Error,
+                "missing_storage_bucket",
+                "storage.bucket",
+                "storage.bucket is required when storage.provider is s3.",
+            ));
+        }
+        match workspace_prefix.as_deref() {
+            Some(prefix) => {
+                if normalize_logical_route(prefix, "storage.workspace_prefix").is_err() {
+                    issues.push(issue(
+                        ValidationSeverity::Error,
+                        "invalid_storage_workspace_prefix",
+                        "storage.workspace_prefix",
+                        "storage.workspace_prefix must be a safe slash-separated logical prefix.",
+                    ));
+                }
+            }
+            None => issues.push(issue(
+                ValidationSeverity::Error,
+                "missing_storage_workspace_prefix",
+                "storage.workspace_prefix",
+                "storage.workspace_prefix is required when storage.provider is s3.",
+            )),
+        }
+    }
+
+    Some(StorageConfig {
+        provider,
+        bucket,
+        workspace_prefix,
+        region,
+        endpoint,
+    })
+}
+
 fn build_stages(
     raw_stages: Vec<RawStageDefinition>,
+    is_s3_mode: bool,
+    s3_bucket: Option<&str>,
     issues: &mut Vec<ConfigValidationIssue>,
 ) -> Vec<StageDefinition> {
     let mut stage_ids = HashSet::new();
@@ -235,15 +325,41 @@ fn build_stages(
             &format!("{prefix}.id"),
             issues,
         );
-        let input_folder = required_string(
-            raw_stage.input_folder,
-            "missing_stage_input_folder",
-            &format!("{prefix}.input_folder"),
-            issues,
-        );
+        let input_folder = if is_s3_mode {
+            normalize_optional_string(raw_stage.input_folder).unwrap_or_default()
+        } else {
+            required_string(
+                raw_stage.input_folder,
+                "missing_stage_input_folder",
+                &format!("{prefix}.input_folder"),
+                issues,
+            )
+            .unwrap_or_default()
+        };
+        let input_uri = normalize_optional_string(raw_stage.input_uri);
+        if is_s3_mode {
+            match input_uri.as_deref() {
+                Some(uri) => {
+                    if let Err(message) = validate_s3_uri(uri, s3_bucket) {
+                        issues.push(issue(
+                            ValidationSeverity::Error,
+                            "invalid_stage_input_uri",
+                            format!("{prefix}.input_uri"),
+                            message,
+                        ));
+                    }
+                }
+                None => issues.push(issue(
+                    ValidationSeverity::Error,
+                    "missing_stage_input_uri",
+                    format!("{prefix}.input_uri"),
+                    "input_uri is required for S3 stages in B1.",
+                )),
+            }
+        }
         let output_folder = normalize_optional_string(raw_stage.output_folder);
         let next_stage = normalize_optional_string(raw_stage.next_stage);
-        if next_stage.is_some() && output_folder.is_none() {
+        if !is_s3_mode && next_stage.is_some() && output_folder.is_none() {
             issues.push(issue(
                 ValidationSeverity::Error,
                 "missing_stage_output_folder",
@@ -299,16 +415,33 @@ fn build_stages(
             ));
         }
 
-        if let (Some(id), Some(input_folder), Some(workflow_url)) = (id, input_folder, workflow_url)
-        {
+        let mut save_path_aliases = Vec::new();
+        for alias in raw_stage.save_path_aliases.unwrap_or_default() {
+            let Some(alias) = normalize_optional_string(Some(alias)) else {
+                continue;
+            };
+            if normalize_logical_route(&alias, "save_path_aliases").is_err() {
+                issues.push(issue(
+                    ValidationSeverity::Error,
+                    "invalid_stage_save_path_alias",
+                    format!("{prefix}.save_path_aliases"),
+                    "save_path_aliases must contain only safe logical routes.",
+                ));
+            }
+            save_path_aliases.push(alias);
+        }
+
+        if let (Some(id), Some(workflow_url)) = (id, workflow_url) {
             stages.push(StageDefinition {
                 id,
                 input_folder,
+                input_uri,
                 output_folder: output_folder.unwrap_or_default(),
                 workflow_url,
                 max_attempts: max_attempts.max(1) as u64,
                 retry_delay_sec: retry_delay_sec.max(0) as u64,
                 next_stage,
+                save_path_aliases,
             });
         }
     }
@@ -334,6 +467,65 @@ fn validate_stage_links(stages: &[StageDefinition], issues: &mut Vec<ConfigValid
 
 fn is_allowed_workflow_url(value: &str) -> bool {
     value.starts_with("https://") || value.starts_with("http://")
+}
+
+fn validate_s3_uri(value: &str, expected_bucket: Option<&str>) -> Result<(), String> {
+    let Some(without_scheme) = value.strip_prefix("s3://") else {
+        return Err("input_uri must start with s3://.".to_string());
+    };
+    let Some((bucket, key)) = without_scheme.split_once('/') else {
+        return Err("input_uri must include bucket and key prefix.".to_string());
+    };
+    if bucket.trim().is_empty() || key.trim().is_empty() {
+        return Err("input_uri must include non-empty bucket and key prefix.".to_string());
+    }
+    if let Some(expected_bucket) = expected_bucket {
+        if bucket != expected_bucket {
+            return Err(format!(
+                "input_uri bucket '{bucket}' must match configured storage.bucket '{expected_bucket}'."
+            ));
+        }
+    }
+    normalize_logical_route(key, "input_uri key").map(|_| ())
+}
+
+fn normalize_logical_route(value: &str, label: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label} is empty."));
+    }
+    let normalized = trimmed.replace('\\', "/");
+    if trimmed.starts_with("\\\\") || normalized.starts_with("//") {
+        return Err(format!("{label} must not be a UNC path."));
+    }
+    let bytes = normalized.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return Err(format!("{label} must not contain a Windows drive prefix."));
+    }
+    if normalized.contains(':') {
+        return Err(format!("{label} must not contain ':' characters."));
+    }
+    let logical = if normalized.starts_with('/') {
+        if normalized == "/main_dir" || normalized.starts_with("/main_dir/") {
+            normalized.trim_start_matches('/').to_string()
+        } else {
+            return Err(format!("{label} must not be an absolute OS path."));
+        }
+    } else {
+        normalized
+    };
+    let mut parts = Vec::new();
+    for component in logical.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => return Err(format!("{label} must not contain '..' components.")),
+            part => parts.push(part),
+        }
+    }
+    if parts.is_empty() {
+        return Err(format!("{label} does not contain a path."));
+    }
+    Ok(parts.join("/"))
 }
 
 fn required_string(
@@ -480,6 +672,107 @@ stages:
         assert!(loaded.validation.is_valid);
         assert_eq!(config.stages[0].output_folder, "");
         assert_eq!(config.stages[0].next_stage, None);
+    }
+
+    #[test]
+    fn s3_pipeline_config_is_valid_without_stage_input_folder() {
+        let yaml = r#"
+project:
+  name: beehive-s3-dev
+  workdir: .
+storage:
+  provider: s3
+  bucket: steos-s3-data
+  workspace_prefix: main_dir
+runtime:
+  request_timeout_sec: 300
+stages:
+  - id: raw
+    input_uri: s3://steos-s3-data/main_dir/raw
+    workflow_url: http://localhost:5678/webhook/raw
+    next_stage: raw_entities
+    save_path_aliases:
+      - main_dir/raw
+      - /main_dir/raw
+  - id: raw_entities
+    input_uri: s3://steos-s3-data/main_dir/processed/raw_entities
+    workflow_url: http://localhost:5678/webhook/raw_entities
+    save_path_aliases:
+      - main_dir/processed/raw_entities
+"#;
+
+        let loaded = parse_pipeline_config(yaml, "now".to_string());
+        let config = loaded.config.expect("s3 config");
+
+        assert!(loaded.validation.is_valid, "{:?}", loaded.validation.issues);
+        assert_eq!(
+            config.storage.as_ref().map(|storage| &storage.provider),
+            Some(&StorageProvider::S3)
+        );
+        assert_eq!(config.stages[0].input_folder, "");
+        assert_eq!(
+            config.stages[1].input_uri.as_deref(),
+            Some("s3://steos-s3-data/main_dir/processed/raw_entities")
+        );
+        assert_eq!(config.stages[1].save_path_aliases.len(), 1);
+    }
+
+    #[test]
+    fn s3_pipeline_rejects_missing_bucket_invalid_input_uri_and_unsafe_alias() {
+        let missing_bucket = r#"
+project:
+  name: beehive-s3-dev
+  workdir: .
+storage:
+  provider: s3
+  workspace_prefix: main_dir
+stages:
+  - id: raw
+    input_uri: s3://steos-s3-data/main_dir/raw
+    workflow_url: http://localhost:5678/webhook/raw
+"#;
+        let invalid_uri = r#"
+project:
+  name: beehive-s3-dev
+  workdir: .
+storage:
+  provider: s3
+  bucket: steos-s3-data
+  workspace_prefix: main_dir
+stages:
+  - id: raw
+    input_uri: file://main_dir/raw
+    workflow_url: http://localhost:5678/webhook/raw
+"#;
+        let unsafe_alias = r#"
+project:
+  name: beehive-s3-dev
+  workdir: .
+storage:
+  provider: s3
+  bucket: steos-s3-data
+  workspace_prefix: main_dir
+stages:
+  - id: raw
+    input_uri: s3://steos-s3-data/main_dir/raw
+    workflow_url: http://localhost:5678/webhook/raw
+    save_path_aliases:
+      - ../outside
+"#;
+
+        for (yaml, code) in [
+            (missing_bucket, "missing_storage_bucket"),
+            (invalid_uri, "invalid_stage_input_uri"),
+            (unsafe_alias, "invalid_stage_save_path_alias"),
+        ] {
+            let loaded = parse_pipeline_config(yaml, "now".to_string());
+            assert!(!loaded.validation.is_valid);
+            assert!(loaded
+                .validation
+                .issues
+                .iter()
+                .any(|issue| issue.code == code));
+        }
     }
 
     #[test]

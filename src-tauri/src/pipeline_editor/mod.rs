@@ -103,6 +103,7 @@ pub fn save_pipeline_config(
         .config
         .unwrap_or_else(|| PipelineConfig {
             project: config.project.clone(),
+            storage: config.storage.clone(),
             runtime: config.runtime.clone(),
             stages: Vec::new(),
         });
@@ -258,6 +259,7 @@ fn validate_draft(
             name: project_name.unwrap_or_default(),
             workdir: project_workdir.unwrap_or_else(|| ".".to_string()),
         },
+        storage: draft.storage.clone(),
         runtime: RuntimeConfig {
             scan_interval_sec: draft.runtime.scan_interval_sec as u64,
             max_parallel_tasks: draft.runtime.max_parallel_tasks as u64,
@@ -271,6 +273,7 @@ fn validate_draft(
             .map(|stage| StageDefinition {
                 id: stage.id.trim().to_string(),
                 input_folder: stage.input_folder.trim().to_string(),
+                input_uri: stage.input_uri.clone(),
                 output_folder: if normalize_optional(&stage.next_stage).is_some() {
                     stage.output_folder.trim().to_string()
                 } else {
@@ -280,6 +283,7 @@ fn validate_draft(
                 max_attempts: stage.max_attempts as u64,
                 retry_delay_sec: stage.retry_delay_sec as u64,
                 next_stage: normalize_optional(&stage.next_stage),
+                save_path_aliases: stage.save_path_aliases.clone(),
             })
             .collect(),
     };
@@ -697,6 +701,7 @@ fn draft_from_config(config: &PipelineConfig) -> PipelineConfigDraft {
             name: config.project.name.clone(),
             workdir: config.project.workdir.clone(),
         },
+        storage: config.storage.clone(),
         runtime: RuntimeConfigDraft {
             scan_interval_sec: config.runtime.scan_interval_sec as i64,
             max_parallel_tasks: config.runtime.max_parallel_tasks as i64,
@@ -710,11 +715,13 @@ fn draft_from_config(config: &PipelineConfig) -> PipelineConfigDraft {
             .map(|stage| StageDefinitionDraft {
                 id: stage.id.clone(),
                 input_folder: stage.input_folder.clone(),
+                input_uri: stage.input_uri.clone(),
                 output_folder: stage.output_folder.clone(),
                 workflow_url: stage.workflow_url.clone(),
                 max_attempts: stage.max_attempts as i64,
                 retry_delay_sec: stage.retry_delay_sec as i64,
                 next_stage: stage.next_stage.clone(),
+                save_path_aliases: stage.save_path_aliases.clone(),
                 original_stage_id: Some(stage.id.clone()),
                 is_new: false,
             })
@@ -854,6 +861,7 @@ mod tests {
                 name: "beehive".to_string(),
                 workdir: ".".to_string(),
             },
+            storage: None,
             runtime: RuntimeConfig::default(),
             stages,
         }
@@ -863,6 +871,7 @@ mod tests {
         StageDefinition {
             id: id.to_string(),
             input_folder: format!("stages/{id}"),
+            input_uri: None,
             output_folder: next_stage
                 .map(|_| format!("stages/{id}_out"))
                 .unwrap_or_default(),
@@ -870,6 +879,7 @@ mod tests {
             max_attempts: 3,
             retry_delay_sec: 10,
             next_stage: next_stage.map(ToOwned::to_owned),
+            save_path_aliases: Vec::new(),
         }
     }
 
@@ -891,6 +901,7 @@ mod tests {
                 name: "beehive".to_string(),
                 workdir: ".".to_string(),
             },
+            storage: None,
             runtime: RuntimeConfigDraft {
                 scan_interval_sec: 5,
                 max_parallel_tasks: 3,
@@ -906,6 +917,7 @@ mod tests {
         StageDefinitionDraft {
             id: id.to_string(),
             input_folder: format!("stages/{id}"),
+            input_uri: None,
             output_folder: next_stage
                 .map(|_| format!("stages/{id}_out"))
                 .unwrap_or_default(),
@@ -913,6 +925,7 @@ mod tests {
             max_attempts: 3,
             retry_delay_sec: 10,
             next_stage: next_stage.map(ToOwned::to_owned),
+            save_path_aliases: Vec::new(),
             original_stage_id: None,
             is_new: true,
         }

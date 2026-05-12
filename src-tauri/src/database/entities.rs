@@ -6,7 +6,7 @@ use serde_json::json;
 
 use crate::domain::{
     AppEventLevel, EntityFileAllowedActions, EntityFileRecord, EntityStageAllowedActions,
-    EntityStageStateRecord,
+    EntityStageStateRecord, StorageProvider,
 };
 
 pub(crate) fn build_stage_allowed_actions(
@@ -127,6 +127,13 @@ fn build_file_policy(
         can_edit_business_json = false;
         reasons.push("File is marked missing; business JSON cannot be edited.".to_string());
     }
+    if file.storage_provider == StorageProvider::S3 {
+        can_edit_business_json = false;
+        reasons.push(
+            "S3 artifact pointers are read-only in B1; Beehive does not edit S3 business JSON."
+                .to_string(),
+        );
+    }
 
     match runtime_status {
         Some("pending" | "retry_wait" | "failed" | "blocked" | "skipped") => {
@@ -176,8 +183,9 @@ fn build_file_policy(
     EntityFileAllowedActions {
         entity_file_id: file.id,
         can_edit_business_json,
-        can_open_file: file.file_exists,
-        can_open_folder: !file.file_path.trim().is_empty(),
+        can_open_file: file.file_exists && file.storage_provider == StorageProvider::Local,
+        can_open_folder: !file.file_path.trim().is_empty()
+            && file.storage_provider == StorageProvider::Local,
         reasons,
     }
 }

@@ -12,9 +12,9 @@ use crate::domain::{
     EntityFileRecord, EntityFilters, EntityListQuery, EntityRecord, EntityStageStateRecord,
     EntityTableRow, EntityTimelineItem, EntityValidationStatus, InvalidDiscoveryRecord,
     PipelineConfig, RuntimeSummary, StageDefinition, StageRecord, StageRunRecord, StageStatus,
-    StatusCount, WorkspaceEntityTrail, WorkspaceEntityTrailEdge, WorkspaceEntityTrailNode,
-    WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceFileNode, WorkspaceStageTree,
-    WorkspaceStageTreeCounters,
+    StatusCount, StorageProvider, WorkspaceEntityTrail, WorkspaceEntityTrailEdge,
+    WorkspaceEntityTrailNode, WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceFileNode,
+    WorkspaceStageTree, WorkspaceStageTreeCounters,
 };
 use crate::state_machine::{
     parse_status as parse_runtime_status, status_value as runtime_status_value,
@@ -27,16 +27,23 @@ pub(crate) use entities::{
     evaluate_entity_file_allowed_actions, record_entity_file_json_edit_rejected,
 };
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 pub(crate) struct PersistEntityFileInput {
     pub entity_id: String,
     pub stage_id: String,
     pub file_path: String,
     pub file_name: String,
+    pub storage_provider: StorageProvider,
+    pub bucket: Option<String>,
+    pub key: Option<String>,
+    pub version_id: Option<String>,
+    pub etag: Option<String>,
+    pub checksum_sha256: Option<String>,
     pub checksum: String,
     pub file_mtime: String,
     pub file_size: u64,
+    pub artifact_size: Option<u64>,
     pub payload_json: String,
     pub meta_json: String,
     pub current_stage: Option<String>,
@@ -46,6 +53,7 @@ pub(crate) struct PersistEntityFileInput {
     pub validation_errors: Vec<ConfigValidationIssue>,
     pub is_managed_copy: bool,
     pub copy_source_file_id: Option<i64>,
+    pub producer_run_id: Option<String>,
     pub first_seen_at: String,
     pub last_seen_at: String,
     pub updated_at: String,
@@ -118,6 +126,21 @@ pub(crate) struct FinishStageRunInput {
     pub duration_ms: u64,
 }
 
+pub(crate) struct RegisterS3ArtifactPointerInput {
+    pub entity_id: String,
+    pub artifact_id: String,
+    pub stage_id: String,
+    pub bucket: String,
+    pub key: String,
+    pub version_id: Option<String>,
+    pub etag: Option<String>,
+    pub checksum_sha256: Option<String>,
+    pub size: Option<u64>,
+    pub source_file_id: Option<i64>,
+    pub producer_run_id: Option<String>,
+    pub status: StageStatus,
+}
+
 struct StageStateTransitionContext {
     status: String,
     entity_id: String,
@@ -133,6 +156,7 @@ pub fn bootstrap_database(path: &Path, config: &PipelineConfig) -> Result<Databa
     let mut connection = open_connection(path)?;
     ensure_schema(&mut connection)?;
     sync_stages(&mut connection, &config.stages)?;
+    sync_storage_settings(&connection, config)?;
 
     let stages = load_stage_records_from_connection(&connection)?;
     let schema_version = current_schema_version(&connection)?;
@@ -148,6 +172,40 @@ pub fn bootstrap_database(path: &Path, config: &PipelineConfig) -> Result<Databa
         active_stage_count,
         inactive_stage_count,
     })
+}
+
+fn sync_storage_settings(connection: &Connection, config: &PipelineConfig) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    set_setting(connection, "project_name", &config.project.name, &now)?;
+    let provider = config
+        .storage
+        .as_ref()
+        .map(|storage| storage.provider.as_str())
+        .unwrap_or("local");
+    let s3_config = config
+        .storage
+        .as_ref()
+        .and_then(|storage| storage.s3_config());
+    set_setting(connection, "storage_provider", provider, &now)?;
+    set_setting(
+        connection,
+        "storage_bucket",
+        s3_config
+            .as_ref()
+            .map(|storage| storage.bucket.as_str())
+            .unwrap_or(""),
+        &now,
+    )?;
+    set_setting(
+        connection,
+        "storage_workspace_prefix",
+        s3_config
+            .as_ref()
+            .map(|storage| storage.workspace_prefix.as_str())
+            .unwrap_or(""),
+        &now,
+    )?;
+    Ok(())
 }
 
 pub fn open_connection(path: &Path) -> Result<Connection, String> {
@@ -1803,13 +1861,21 @@ pub(crate) fn upsert_entity_file(
                 && existing.current_stage == file.current_stage
                 && existing.next_stage == file.next_stage
                 && existing.status == status
+                && existing.storage_provider == file.storage_provider
+                && existing.bucket == file.bucket
+                && existing.key == file.key
+                && existing.version_id == file.version_id
+                && existing.etag == file.etag
+                && existing.checksum_sha256 == file.checksum_sha256
+                && existing.artifact_size == file.artifact_size
                 && existing.payload_json == file.payload_json
                 && existing.meta_json == file.meta_json
                 && existing.validation_status == file.validation_status
                 && existing.validation_errors == file.validation_errors
                 && existing.file_exists
                 && existing.is_managed_copy == file.is_managed_copy
-                && existing.copy_source_file_id == file.copy_source_file_id =>
+                && existing.copy_source_file_id == file.copy_source_file_id
+                && existing.producer_run_id == file.producer_run_id =>
         {
             transaction
                 .execute(
@@ -1833,22 +1899,30 @@ pub(crate) fn upsert_entity_file(
                         entity_id = ?2,
                         stage_id = ?3,
                         file_name = ?4,
-                        checksum = ?5,
-                        file_mtime = ?6,
-                        file_size = ?7,
-                        payload_json = ?8,
-                        meta_json = ?9,
-                        current_stage = ?10,
-                        next_stage = ?11,
-                        status = ?12,
-                        validation_status = ?13,
-                        validation_errors_json = ?14,
-                        is_managed_copy = ?15,
-                        copy_source_file_id = ?16,
+                        storage_provider = ?5,
+                        bucket = ?6,
+                        object_key = ?7,
+                        version_id = ?8,
+                        etag = ?9,
+                        checksum_sha256 = ?10,
+                        checksum = ?11,
+                        file_mtime = ?12,
+                        file_size = ?13,
+                        artifact_size = ?14,
+                        payload_json = ?15,
+                        meta_json = ?16,
+                        current_stage = ?17,
+                        next_stage = ?18,
+                        status = ?19,
+                        validation_status = ?20,
+                        validation_errors_json = ?21,
+                        is_managed_copy = ?22,
+                        copy_source_file_id = ?23,
+                        producer_run_id = ?24,
                         file_exists = 1,
                         missing_since = NULL,
-                        last_seen_at = ?17,
-                        updated_at = ?18
+                        last_seen_at = ?25,
+                        updated_at = ?26
                     WHERE id = ?1
                     "#,
                     params![
@@ -1856,9 +1930,16 @@ pub(crate) fn upsert_entity_file(
                         file.entity_id,
                         file.stage_id,
                         file.file_name,
+                        file.storage_provider.as_str(),
+                        file.bucket,
+                        file.key,
+                        file.version_id,
+                        file.etag,
+                        file.checksum_sha256,
                         file.checksum,
                         file.file_mtime,
                         file.file_size as i64,
+                        file.artifact_size.map(|value| value as i64),
                         file.payload_json,
                         file.meta_json,
                         file.current_stage,
@@ -1868,6 +1949,7 @@ pub(crate) fn upsert_entity_file(
                         serialized_errors,
                         bool_to_i64(file.is_managed_copy),
                         file.copy_source_file_id,
+                        file.producer_run_id,
                         file.last_seen_at,
                         file.updated_at,
                     ],
@@ -1895,9 +1977,16 @@ pub(crate) fn upsert_entity_file(
                         stage_id,
                         file_path,
                         file_name,
+                        storage_provider,
+                        bucket,
+                        object_key,
+                        version_id,
+                        etag,
+                        checksum_sha256,
                         checksum,
                         file_mtime,
                         file_size,
+                        artifact_size,
                         payload_json,
                         meta_json,
                         current_stage,
@@ -1907,22 +1996,30 @@ pub(crate) fn upsert_entity_file(
                         validation_errors_json,
                         is_managed_copy,
                         copy_source_file_id,
+                        producer_run_id,
                         file_exists,
                         missing_since,
                         first_seen_at,
                         last_seen_at,
                         updated_at
                     )
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 1, NULL, ?17, ?18, ?19)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, 1, NULL, ?25, ?26, ?27)
                     "#,
                     params![
                         file.entity_id,
                         file.stage_id,
                         file.file_path,
                         file.file_name,
+                        file.storage_provider.as_str(),
+                        file.bucket,
+                        file.key,
+                        file.version_id,
+                        file.etag,
+                        file.checksum_sha256,
                         file.checksum,
                         file.file_mtime,
                         file.file_size as i64,
+                        file.artifact_size.map(|value| value as i64),
                         file.payload_json,
                         file.meta_json,
                         file.current_stage,
@@ -1932,6 +2029,7 @@ pub(crate) fn upsert_entity_file(
                         serialized_errors,
                         bool_to_i64(file.is_managed_copy),
                         file.copy_source_file_id,
+                        file.producer_run_id,
                         file.first_seen_at,
                         file.last_seen_at,
                         file.updated_at,
@@ -2003,6 +2101,98 @@ pub(crate) fn upsert_entity_stage_state(
             )
         })?;
     Ok(())
+}
+
+pub(crate) fn register_s3_artifact_pointer(
+    path: &Path,
+    input: &RegisterS3ArtifactPointerInput,
+) -> Result<EntityFileRecord, String> {
+    let mut connection = open_connection(path)?;
+    let transaction = connection.transaction().map_err(|error| {
+        format!("Failed to start S3 artifact registration transaction: {error}")
+    })?;
+    let stage = find_stage_by_id(&transaction, &input.stage_id)?
+        .ok_or_else(|| format!("Target stage '{}' was not found.", input.stage_id))?;
+    if !stage.is_active {
+        return Err(format!("Target stage '{}' is inactive.", input.stage_id));
+    }
+    let now = Utc::now().to_rfc3339();
+    ensure_entity_stub(&transaction, &input.entity_id, &now)?;
+    let file_path = format!("s3://{}/{}", input.bucket, input.key);
+    let file_name = input
+        .key
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(input.artifact_id.as_str())
+        .to_string();
+    let checksum = input
+        .checksum_sha256
+        .clone()
+        .unwrap_or_else(|| format!("s3-pointer:{}:{}", input.bucket, input.key));
+    let meta_json = serde_json::to_string(&json!({
+        "beehive": {
+            "storage_provider": "s3",
+            "artifact_id": input.artifact_id,
+            "source_file_id": input.source_file_id,
+            "producer_run_id": input.producer_run_id,
+        }
+    }))
+    .map_err(|error| format!("Failed to serialize S3 artifact metadata: {error}"))?;
+    let (_outcome, file_id) = upsert_entity_file(
+        &transaction,
+        &PersistEntityFileInput {
+            entity_id: input.entity_id.clone(),
+            stage_id: input.stage_id.clone(),
+            file_path: file_path.clone(),
+            file_name,
+            storage_provider: StorageProvider::S3,
+            bucket: Some(input.bucket.clone()),
+            key: Some(input.key.clone()),
+            version_id: input.version_id.clone(),
+            etag: input.etag.clone(),
+            checksum_sha256: input.checksum_sha256.clone(),
+            checksum,
+            file_mtime: now.clone(),
+            file_size: input.size.unwrap_or(0),
+            artifact_size: input.size,
+            payload_json: "{}".to_string(),
+            meta_json,
+            current_stage: Some(input.stage_id.clone()),
+            next_stage: stage.next_stage.clone(),
+            status: input.status.clone(),
+            validation_status: EntityValidationStatus::Valid,
+            validation_errors: Vec::new(),
+            is_managed_copy: input.source_file_id.is_some(),
+            copy_source_file_id: input.source_file_id,
+            producer_run_id: input.producer_run_id.clone(),
+            first_seen_at: now.clone(),
+            last_seen_at: now.clone(),
+            updated_at: now.clone(),
+        },
+    )?;
+    upsert_entity_stage_state(
+        &transaction,
+        &PersistEntityStageStateInput {
+            entity_id: input.entity_id.clone(),
+            stage_id: input.stage_id.clone(),
+            file_path,
+            file_instance_id: Some(file_id),
+            file_exists: true,
+            status: input.status.clone(),
+            max_attempts: stage.max_attempts,
+            discovered_at: now.clone(),
+            last_seen_at: now.clone(),
+            updated_at: now.clone(),
+        },
+    )?;
+    recompute_entity_summaries(&transaction)?;
+    let file = find_entity_file_by_id(&transaction, file_id)?
+        .ok_or_else(|| format!("Registered S3 artifact row '{}' was not found.", file_id))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("Failed to commit S3 artifact registration: {error}"))?;
+    Ok(file)
 }
 
 pub(crate) fn mark_missing_files_for_active_stages(
@@ -2250,21 +2440,27 @@ pub(crate) fn load_setting(connection: &Connection, key: &str) -> Result<Option<
 
 fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
     match current_schema_version(connection)? {
-        0 => create_schema_v4(connection)?,
+        0 => create_schema_v5(connection)?,
         1 => {
             migrate_v1_to_v2(connection)?;
             migrate_v2_to_v3(connection)?;
             migrate_v3_to_v4(connection)?;
+            migrate_v4_to_v5(connection)?;
         }
         2 => {
             migrate_v2_to_v3(connection)?;
             migrate_v3_to_v4(connection)?;
+            migrate_v4_to_v5(connection)?;
         }
-        3 => migrate_v3_to_v4(connection)?,
-        4 => {}
+        3 => {
+            migrate_v3_to_v4(connection)?;
+            migrate_v4_to_v5(connection)?;
+        }
+        4 => migrate_v4_to_v5(connection)?,
+        5 => {}
         version => {
             return Err(format!(
-                "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, or 4."
+                "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, 4, or 5."
             ))
         }
     }
@@ -2292,6 +2488,7 @@ fn ensure_query_indexes(connection: &Connection) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS idx_stage_runs_started_at ON stage_runs(started_at);
             CREATE INDEX IF NOT EXISTS idx_stage_runs_entity_stage ON stage_runs(entity_id, stage_id);
             CREATE INDEX IF NOT EXISTS idx_app_events_level_created_at ON app_events(level, created_at);
+            CREATE INDEX IF NOT EXISTS idx_entity_files_storage_key ON entity_files(storage_provider, bucket, object_key);
             "#,
         )
         .map_err(|error| format!("Failed to ensure dashboard query indexes: {error}"))?;
@@ -2304,7 +2501,7 @@ fn current_schema_version(connection: &Connection) -> Result<u32, String> {
         .map_err(|error| format!("Failed to read PRAGMA user_version: {error}"))
 }
 
-fn create_schema_v4(connection: &Connection) -> Result<(), String> {
+fn create_schema_v5(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
             r#"
@@ -2319,11 +2516,13 @@ fn create_schema_v4(connection: &Connection) -> Result<(), String> {
             CREATE TABLE IF NOT EXISTS stages (
                 stage_id TEXT PRIMARY KEY,
                 input_folder TEXT NOT NULL,
+                input_uri TEXT,
                 output_folder TEXT NOT NULL,
                 workflow_url TEXT NOT NULL,
                 max_attempts INTEGER NOT NULL CHECK (max_attempts >= 1),
                 retry_delay_sec INTEGER NOT NULL CHECK (retry_delay_sec >= 0),
                 next_stage TEXT,
+                save_path_aliases_json TEXT NOT NULL DEFAULT '[]',
                 is_active INTEGER NOT NULL DEFAULT 1,
                 archived_at TEXT,
                 last_seen_in_config_at TEXT,
@@ -2351,9 +2550,16 @@ fn create_schema_v4(connection: &Connection) -> Result<(), String> {
                 stage_id TEXT NOT NULL,
                 file_path TEXT NOT NULL UNIQUE,
                 file_name TEXT NOT NULL,
+                storage_provider TEXT NOT NULL DEFAULT 'local',
+                bucket TEXT,
+                object_key TEXT,
+                version_id TEXT,
+                etag TEXT,
+                checksum_sha256 TEXT,
                 checksum TEXT NOT NULL,
                 file_mtime TEXT NOT NULL,
                 file_size INTEGER NOT NULL,
+                artifact_size INTEGER,
                 payload_json TEXT NOT NULL DEFAULT '{}',
                 meta_json TEXT NOT NULL DEFAULT '{}',
                 current_stage TEXT,
@@ -2363,6 +2569,7 @@ fn create_schema_v4(connection: &Connection) -> Result<(), String> {
                 validation_errors_json TEXT NOT NULL DEFAULT '[]',
                 is_managed_copy INTEGER NOT NULL DEFAULT 0,
                 copy_source_file_id INTEGER,
+                producer_run_id TEXT,
                 file_exists INTEGER NOT NULL DEFAULT 1,
                 missing_since TEXT,
                 first_seen_at TEXT NOT NULL,
@@ -2434,10 +2641,10 @@ fn create_schema_v4(connection: &Connection) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS idx_stage_runs_run_id ON stage_runs(run_id);
             CREATE INDEX IF NOT EXISTS idx_entity_stage_states_status_retry ON entity_stage_states(status, next_retry_at);
 
-            PRAGMA user_version = 4;
+            PRAGMA user_version = 5;
             "#,
         )
-        .map_err(|error| format!("Failed to create SQLite schema v4: {error}"))?;
+        .map_err(|error| format!("Failed to create SQLite schema v5: {error}"))?;
     Ok(())
 }
 
@@ -2820,7 +3027,6 @@ fn migrate_v2_to_v3(connection: &mut Connection) -> Result<(), String> {
     let transaction = connection
         .transaction()
         .map_err(|error| format!("Failed to start post-migration transaction: {error}"))?;
-    recompute_entity_summaries(&transaction)?;
     let now = Utc::now().to_rfc3339();
     insert_app_event(
         &transaction,
@@ -2942,6 +3148,40 @@ fn migrate_v3_to_v4(connection: &mut Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_v4_to_v5(connection: &mut Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            r#"
+            ALTER TABLE stages ADD COLUMN input_uri TEXT;
+            ALTER TABLE stages ADD COLUMN save_path_aliases_json TEXT NOT NULL DEFAULT '[]';
+
+            ALTER TABLE entity_files ADD COLUMN storage_provider TEXT NOT NULL DEFAULT 'local';
+            ALTER TABLE entity_files ADD COLUMN bucket TEXT;
+            ALTER TABLE entity_files ADD COLUMN object_key TEXT;
+            ALTER TABLE entity_files ADD COLUMN version_id TEXT;
+            ALTER TABLE entity_files ADD COLUMN etag TEXT;
+            ALTER TABLE entity_files ADD COLUMN checksum_sha256 TEXT;
+            ALTER TABLE entity_files ADD COLUMN artifact_size INTEGER;
+            ALTER TABLE entity_files ADD COLUMN producer_run_id TEXT;
+
+            PRAGMA user_version = 5;
+            "#,
+        )
+        .map_err(|error| format!("Failed to migrate schema from v4 to v5: {error}"))?;
+
+    let now = Utc::now().to_rfc3339();
+    insert_app_event(
+        connection,
+        AppEventLevel::Info,
+        "schema_migrated_to_v5",
+        "SQLite schema migrated from version 4 to version 5.",
+        None,
+        &now,
+    )?;
+    set_setting(connection, "schema_version", "5", &now)?;
+    Ok(())
+}
+
 fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Result<(), String> {
     let now = Utc::now().to_rfc3339();
     let transaction = connection
@@ -2955,31 +3195,37 @@ fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Resul
     let existing_ids = load_existing_stage_ids(&transaction)?;
 
     for stage in stages {
+        let save_path_aliases_json = serde_json::to_string(&stage.save_path_aliases)
+            .map_err(|error| format!("Failed to serialize save_path_aliases: {error}"))?;
         transaction
             .execute(
                 r#"
                 INSERT INTO stages (
                     stage_id,
                     input_folder,
+                    input_uri,
                     output_folder,
                     workflow_url,
                     max_attempts,
                     retry_delay_sec,
                     next_stage,
+                    save_path_aliases_json,
                     is_active,
                     archived_at,
                     last_seen_in_config_at,
                     created_at,
                     updated_at
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, NULL, ?8, ?8, ?8)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, NULL, ?10, ?10, ?10)
                 ON CONFLICT(stage_id) DO UPDATE SET
                     input_folder = excluded.input_folder,
+                    input_uri = excluded.input_uri,
                     output_folder = excluded.output_folder,
                     workflow_url = excluded.workflow_url,
                     max_attempts = excluded.max_attempts,
                     retry_delay_sec = excluded.retry_delay_sec,
                     next_stage = excluded.next_stage,
+                    save_path_aliases_json = excluded.save_path_aliases_json,
                     is_active = 1,
                     archived_at = NULL,
                     last_seen_in_config_at = excluded.last_seen_in_config_at,
@@ -2988,11 +3234,13 @@ fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Resul
                 params![
                     stage.id,
                     stage.input_folder,
+                    stage.input_uri,
                     stage.output_folder,
                     stage.workflow_url,
                     stage.max_attempts as i64,
                     stage.retry_delay_sec as i64,
                     stage.next_stage,
+                    save_path_aliases_json,
                     now,
                 ],
             )
@@ -3074,11 +3322,13 @@ fn load_stage_records_from_connection(connection: &Connection) -> Result<Vec<Sta
             SELECT
                 stage.stage_id,
                 stage.input_folder,
+                stage.input_uri,
                 stage.output_folder,
                 stage.workflow_url,
                 stage.max_attempts,
                 stage.retry_delay_sec,
                 stage.next_stage,
+                stage.save_path_aliases_json,
                 stage.is_active,
                 stage.archived_at,
                 stage.last_seen_in_config_at,
@@ -3090,11 +3340,13 @@ fn load_stage_records_from_connection(connection: &Connection) -> Result<Vec<Sta
             GROUP BY
                 stage.stage_id,
                 stage.input_folder,
+                stage.input_uri,
                 stage.output_folder,
                 stage.workflow_url,
                 stage.max_attempts,
                 stage.retry_delay_sec,
                 stage.next_stage,
+                stage.save_path_aliases_json,
                 stage.is_active,
                 stage.archived_at,
                 stage.last_seen_in_config_at,
@@ -3106,20 +3358,31 @@ fn load_stage_records_from_connection(connection: &Connection) -> Result<Vec<Sta
         .map_err(|error| format!("Failed to prepare stage query: {error}"))?;
     let rows = statement
         .query_map([], |row| {
+            let save_path_aliases_json: String = row.get(8)?;
+            let save_path_aliases =
+                parse_json::<Vec<String>>(&save_path_aliases_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+                    )
+                })?;
             Ok(StageRecord {
                 id: row.get(0)?,
                 input_folder: row.get(1)?,
-                output_folder: row.get(2)?,
-                workflow_url: row.get(3)?,
-                max_attempts: row.get::<_, i64>(4)? as u64,
-                retry_delay_sec: row.get::<_, i64>(5)? as u64,
-                next_stage: row.get(6)?,
-                is_active: row.get::<_, i64>(7)? == 1,
-                archived_at: row.get(8)?,
-                last_seen_in_config_at: row.get(9)?,
-                created_at: row.get(10)?,
-                updated_at: row.get(11)?,
-                entity_count: row.get::<_, i64>(12)? as u64,
+                input_uri: row.get(2)?,
+                output_folder: row.get(3)?,
+                workflow_url: row.get(4)?,
+                max_attempts: row.get::<_, i64>(5)? as u64,
+                retry_delay_sec: row.get::<_, i64>(6)? as u64,
+                next_stage: row.get(7)?,
+                save_path_aliases,
+                is_active: row.get::<_, i64>(9)? == 1,
+                archived_at: row.get(10)?,
+                last_seen_in_config_at: row.get(11)?,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
+                entity_count: row.get::<_, i64>(14)? as u64,
             })
         })
         .map_err(|error| format!("Failed to query stages: {error}"))?;
@@ -3209,9 +3472,16 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 stage_id,
                 file_path,
                 file_name,
+                storage_provider,
+                bucket,
+                object_key,
+                version_id,
+                etag,
+                checksum_sha256,
                 checksum,
                 file_mtime,
                 file_size,
+                artifact_size,
                 payload_json,
                 meta_json,
                 current_stage,
@@ -3221,6 +3491,7 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 validation_errors_json,
                 is_managed_copy,
                 copy_source_file_id,
+                producer_run_id,
                 file_exists,
                 missing_since,
                 first_seen_at,
@@ -3240,9 +3511,16 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 stage_id,
                 file_path,
                 file_name,
+                storage_provider,
+                bucket,
+                object_key,
+                version_id,
+                etag,
+                checksum_sha256,
                 checksum,
                 file_mtime,
                 file_size,
+                artifact_size,
                 payload_json,
                 meta_json,
                 current_stage,
@@ -3252,6 +3530,7 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 validation_errors_json,
                 is_managed_copy,
                 copy_source_file_id,
+                producer_run_id,
                 file_exists,
                 missing_since,
                 first_seen_at,
@@ -3271,9 +3550,16 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 stage_id,
                 file_path,
                 file_name,
+                storage_provider,
+                bucket,
+                object_key,
+                version_id,
+                etag,
+                checksum_sha256,
                 checksum,
                 file_mtime,
                 file_size,
+                artifact_size,
                 payload_json,
                 meta_json,
                 current_stage,
@@ -3283,6 +3569,7 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 validation_errors_json,
                 is_managed_copy,
                 copy_source_file_id,
+                producer_run_id,
                 file_exists,
                 missing_since,
                 first_seen_at,
@@ -3304,9 +3591,16 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 stage_id,
                 file_path,
                 file_name,
+                storage_provider,
+                bucket,
+                object_key,
+                version_id,
+                etag,
+                checksum_sha256,
                 checksum,
                 file_mtime,
                 file_size,
+                artifact_size,
                 payload_json,
                 meta_json,
                 current_stage,
@@ -3316,6 +3610,7 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 validation_errors_json,
                 is_managed_copy,
                 copy_source_file_id,
+                producer_run_id,
                 file_exists,
                 missing_since,
                 first_seen_at,
@@ -3337,9 +3632,16 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 stage_id,
                 file_path,
                 file_name,
+                storage_provider,
+                bucket,
+                object_key,
+                version_id,
+                etag,
+                checksum_sha256,
                 checksum,
                 file_mtime,
                 file_size,
+                artifact_size,
                 payload_json,
                 meta_json,
                 current_stage,
@@ -3349,6 +3651,7 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 validation_errors_json,
                 is_managed_copy,
                 copy_source_file_id,
+                producer_run_id,
                 file_exists,
                 missing_since,
                 first_seen_at,
@@ -3369,9 +3672,16 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 stage_id,
                 file_path,
                 file_name,
+                storage_provider,
+                bucket,
+                object_key,
+                version_id,
+                etag,
+                checksum_sha256,
                 checksum,
                 file_mtime,
                 file_size,
+                artifact_size,
                 payload_json,
                 meta_json,
                 current_stage,
@@ -3381,6 +3691,7 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 validation_errors_json,
                 is_managed_copy,
                 copy_source_file_id,
+                producer_run_id,
                 file_exists,
                 missing_since,
                 first_seen_at,
@@ -4023,12 +4334,13 @@ fn entity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityRecord> {
 }
 
 fn entity_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityFileRecord> {
-    let validation_status = parse_validation_status(&row.get::<_, String>(13)?)?;
-    let validation_errors_json: String = row.get(14)?;
+    let storage_provider = parse_storage_provider(&row.get::<_, String>(5)?)?;
+    let validation_status = parse_validation_status(&row.get::<_, String>(20)?)?;
+    let validation_errors_json: String = row.get(21)?;
     let validation_errors = parse_json::<Vec<ConfigValidationIssue>>(&validation_errors_json)
         .map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                14,
+                21,
                 rusqlite::types::Type::Text,
                 Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
             )
@@ -4040,24 +4352,47 @@ fn entity_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityFileR
         stage_id: row.get(2)?,
         file_path: row.get(3)?,
         file_name: row.get(4)?,
-        checksum: row.get(5)?,
-        file_mtime: row.get(6)?,
-        file_size: row.get::<_, i64>(7)? as u64,
-        payload_json: row.get(8)?,
-        meta_json: row.get(9)?,
-        current_stage: row.get(10)?,
-        next_stage: row.get(11)?,
-        status: row.get(12)?,
+        storage_provider,
+        bucket: row.get(6)?,
+        key: row.get(7)?,
+        version_id: row.get(8)?,
+        etag: row.get(9)?,
+        checksum_sha256: row.get(10)?,
+        checksum: row.get(11)?,
+        file_mtime: row.get(12)?,
+        file_size: row.get::<_, i64>(13)? as u64,
+        artifact_size: row.get::<_, Option<i64>>(14)?.map(|value| value as u64),
+        payload_json: row.get(15)?,
+        meta_json: row.get(16)?,
+        current_stage: row.get(17)?,
+        next_stage: row.get(18)?,
+        status: row.get(19)?,
         validation_status,
         validation_errors,
-        is_managed_copy: row.get::<_, i64>(15)? == 1,
-        copy_source_file_id: row.get(16)?,
-        file_exists: row.get::<_, i64>(17)? == 1,
-        missing_since: row.get(18)?,
-        first_seen_at: row.get(19)?,
-        last_seen_at: row.get(20)?,
-        updated_at: row.get(21)?,
+        is_managed_copy: row.get::<_, i64>(22)? == 1,
+        copy_source_file_id: row.get(23)?,
+        producer_run_id: row.get(24)?,
+        file_exists: row.get::<_, i64>(25)? == 1,
+        missing_since: row.get(26)?,
+        first_seen_at: row.get(27)?,
+        last_seen_at: row.get(28)?,
+        updated_at: row.get(29)?,
     })
+}
+
+fn parse_storage_provider(value: &str) -> rusqlite::Result<StorageProvider> {
+    match value {
+        "local" => Ok(StorageProvider::Local),
+        "s3" => Ok(StorageProvider::S3),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            5,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Unknown storage provider '{other}'."),
+            )),
+        )),
+    }
 }
 
 fn app_event_level_value(level: &AppEventLevel) -> &'static str {
@@ -4173,6 +4508,7 @@ mod tests {
                 name: "beehive".to_string(),
                 workdir: ".".to_string(),
             },
+            storage: None,
             runtime: RuntimeConfig::default(),
             stages,
         }
@@ -4182,11 +4518,13 @@ mod tests {
         StageDefinition {
             id: id.to_string(),
             input_folder: format!("stages/{id}"),
+            input_uri: None,
             output_folder: format!("stages/{id}-out"),
             workflow_url: format!("http://localhost:5678/webhook/{id}"),
             max_attempts: 3,
             retry_delay_sec: 10,
             next_stage: next_stage.map(ToOwned::to_owned),
+            save_path_aliases: Vec::new(),
         }
     }
 
@@ -4366,7 +4704,7 @@ mod tests {
         let table_names = load_table_names(&connection).expect("table names");
 
         assert!(database_path.exists());
-        assert_eq!(result.schema_version, 4);
+        assert_eq!(result.schema_version, 5);
         assert!(table_names.contains(&"entity_files".to_string()));
         assert!(table_names.contains(&"entities".to_string()));
         assert!(table_names.contains(&"entity_stage_states".to_string()));
@@ -4432,7 +4770,7 @@ mod tests {
             load_entity_files_from_connection(&connection, Some("entity-1")).expect("load files");
         let events = load_app_events_from_connection(&connection, 20).expect("events");
 
-        assert_eq!(result.schema_version, 4);
+        assert_eq!(result.schema_version, 5);
         assert_eq!(entity.file_count, 1);
         assert_eq!(files.len(), 1);
         assert!(events
@@ -4454,7 +4792,7 @@ mod tests {
         let result = bootstrap_database(&database_path, &test_config(vec![stage("ingest", None)]))
             .expect("bootstrap");
 
-        assert_eq!(result.schema_version, 4);
+        assert_eq!(result.schema_version, 5);
     }
 
     #[test]

@@ -39,18 +39,31 @@ export interface RuntimeConfig {
   file_stability_delay_ms: number;
 }
 
+export type StorageProvider = "local" | "s3";
+
+export interface StorageConfig {
+  provider: StorageProvider;
+  bucket: string | null;
+  workspace_prefix: string | null;
+  region: string | null;
+  endpoint: string | null;
+}
+
 export interface StageDefinition {
   id: string;
   input_folder: string;
+  input_uri?: string | null;
   output_folder: string;
   workflow_url: string;
   max_attempts: number;
   retry_delay_sec: number;
   next_stage: string | null;
+  save_path_aliases?: string[];
 }
 
 export interface PipelineConfig {
   project: ProjectConfig;
+  storage?: StorageConfig | null;
   runtime: RuntimeConfig;
   stages: StageDefinition[];
 }
@@ -71,17 +84,20 @@ export interface RuntimeConfigDraft {
 export interface StageDefinitionDraft {
   id: string;
   input_folder: string;
+  input_uri?: string | null;
   output_folder: string;
   workflow_url: string;
   max_attempts: number;
   retry_delay_sec: number;
   next_stage: string | null;
+  save_path_aliases?: string[];
   original_stage_id: string | null;
   is_new: boolean;
 }
 
 export interface PipelineConfigDraft {
   project: ProjectConfigDraft;
+  storage?: StorageConfig | null;
   runtime: RuntimeConfigDraft;
   stages: StageDefinitionDraft[];
 }
@@ -198,11 +214,13 @@ export interface BootstrapResult {
 export interface StageRecord {
   id: string;
   input_folder: string;
+  input_uri: string | null;
   output_folder: string;
   workflow_url: string;
   max_attempts: number;
   retry_delay_sec: number;
   next_stage: string | null;
+  save_path_aliases: string[];
   is_active: boolean;
   archived_at: string | null;
   last_seen_in_config_at: string | null;
@@ -273,9 +291,16 @@ export interface EntityFileRecord {
   stage_id: string;
   file_path: string;
   file_name: string;
+  storage_provider: StorageProvider;
+  bucket: string | null;
+  key: string | null;
+  version_id: string | null;
+  etag: string | null;
+  checksum_sha256: string | null;
   checksum: string;
   file_mtime: string;
   file_size: number;
+  artifact_size: number | null;
   payload_json: string;
   meta_json: string;
   current_stage: string | null;
@@ -285,6 +310,7 @@ export interface EntityFileRecord {
   validation_errors: ConfigValidationIssue[];
   is_managed_copy: boolean;
   copy_source_file_id: number | null;
+  producer_run_id: string | null;
   file_exists: boolean;
   missing_since: string | null;
   first_seen_at: string;
