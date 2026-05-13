@@ -10,9 +10,10 @@ use crate::domain::{
     DashboardOverviewResult, EntityDetailResult, EntityFilesResult, EntityListQuery,
     EntityListResult, FileCopyResult, ManualEntityStageActionResult, OpenEntityPathPayload,
     OpenEntityPathResult, PipelineConfigDraft, PipelineEditorStateResult,
-    ReconcileStuckTasksResult, RunDueTasksResult, RunEntityStageResult, RuntimeSummaryResult,
-    SaveEntityFileJsonResult, SavePipelineConfigResult, ScanWorkspaceResult,
-    StageDirectoryProvisionResult, StageListResult, StageRunsResult,
+    ReconcileStuckTasksResult, RegisterS3SourceArtifactPayload, RegisterS3SourceArtifactRequest,
+    RegisterS3SourceArtifactResult, RunDueTasksResult, RunEntityStageResult, RuntimeSummaryResult,
+    S3ReconciliationResult, SaveEntityFileJsonResult, SavePipelineConfigResult,
+    ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult, StageRunsResult,
     ValidatePipelineConfigDraftResult, ValidationSeverity, WorkspaceExplorerResult,
     WorkspaceExplorerTotals,
 };
@@ -20,6 +21,7 @@ use crate::executor;
 use crate::file_open::{self, OpenEntityPathKind};
 use crate::file_ops;
 use crate::pipeline_editor;
+use crate::s3_reconciliation;
 use crate::workdir;
 
 #[tauri::command]
@@ -79,6 +81,58 @@ pub fn scan_workspace(path: String) -> ScanWorkspaceResult {
         }
         Err(error) => ScanWorkspaceResult {
             summary: None,
+            errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn reconcile_s3_workspace(path: String) -> S3ReconciliationResult {
+    match load_runtime_context(&path) {
+        Ok(context) => {
+            match s3_reconciliation::reconcile_s3_workspace(&context.database_path, &context.config)
+            {
+                Ok(summary) => S3ReconciliationResult {
+                    summary: Some(summary),
+                    errors: Vec::new(),
+                },
+                Err(message) => S3ReconciliationResult {
+                    summary: None,
+                    errors: vec![command_error("s3_reconciliation_failed", message, None)],
+                },
+            }
+        }
+        Err(error) => S3ReconciliationResult {
+            summary: None,
+            errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn register_s3_source_artifact(
+    path: String,
+    input: RegisterS3SourceArtifactRequest,
+) -> RegisterS3SourceArtifactResult {
+    match load_runtime_context(&path) {
+        Ok(context) => {
+            match s3_reconciliation::register_s3_source_artifact(&context.database_path, &input) {
+                Ok(file) => RegisterS3SourceArtifactResult {
+                    payload: Some(RegisterS3SourceArtifactPayload { file }),
+                    errors: Vec::new(),
+                },
+                Err(message) => RegisterS3SourceArtifactResult {
+                    payload: None,
+                    errors: vec![command_error(
+                        "register_s3_source_artifact_failed",
+                        message,
+                        None,
+                    )],
+                },
+            }
+        }
+        Err(error) => RegisterS3SourceArtifactResult {
+            payload: None,
             errors: vec![error],
         },
     }

@@ -46,6 +46,8 @@ n8n should:
 
 n8n must not use `Search bucket` / S3 list nodes to select production inputs. Those nodes are acceptable for demos and debugging only.
 
+See `docs/n8n_s3_pointer_workflow_adapter.md` for the B2 adapter checklist.
+
 ## Manifest
 
 Success:
@@ -137,3 +139,38 @@ Beehive registers all outputs from one success manifest in one SQLite transactio
 - Same `producer_run_id + artifact_id` with different bucket/key: registration conflict.
 - Same bucket/key with a different `entity_id`, `artifact_id`, or producer run: registration conflict.
 - Duplicate `artifact_id` values inside one manifest: invalid manifest.
+
+## B2 Source Reconciliation
+
+B2 source S3 objects become runnable only when Beehive can establish identity through S3 user metadata or manual operator registration.
+
+Supported S3 user metadata keys:
+
+```text
+x-amz-meta-beehive-entity-id
+x-amz-meta-beehive-artifact-id
+x-amz-meta-beehive-stage-id
+x-amz-meta-beehive-source-artifact-id
+```
+
+Objects found by listing/head that do not expose Beehive identity are recorded as unmapped and are not registered as pending runtime work.
+
+Manual source registration accepts:
+
+```text
+stage_id, entity_id, artifact_id, bucket, key, version_id?, etag?, checksum_sha256?, size?
+```
+
+The target stage must be active and S3-capable, and the source key must be under the stage `input_uri` prefix. Registration creates a pending S3 pointer without reading the object body.
+
+## B2 Smoke Shape
+
+The real one-artifact smoke path is:
+
+1. Configure S3 storage and one active S3 source stage.
+2. Ensure one source object is tagged or manually registered.
+3. Run S3 reconciliation or manual registration so Beehive has one pending source pointer.
+4. Run `run_due_tasks` or `run_entity_stage`.
+5. Confirm n8n receives empty body plus Beehive S3 pointer headers.
+6. Confirm n8n returns a synchronous `beehive.s3_artifact_manifest.v1` manifest.
+7. Confirm Beehive registers output pointers with `artifact_id`, `entity_id`, `relation_to_source`, `bucket`, `key`, and `save_path`.

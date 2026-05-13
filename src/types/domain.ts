@@ -553,6 +553,21 @@ export interface ScanSummary {
   latest_discovery_at: string;
 }
 
+export interface S3ReconciliationSummary {
+  scan_id: string;
+  stage_count: number;
+  listed_object_count: number;
+  metadata_tagged_count: number;
+  registered_file_count: number;
+  updated_file_count: number;
+  unchanged_file_count: number;
+  missing_file_count: number;
+  restored_file_count: number;
+  unmapped_object_count: number;
+  elapsed_ms: number;
+  latest_reconciliation_at: string;
+}
+
 export interface StageDirectoryProvisionSummary {
   created_paths: string[];
   created_directory_count: number;
@@ -560,6 +575,11 @@ export interface StageDirectoryProvisionSummary {
 
 export interface ScanWorkspaceResult {
   summary: ScanSummary | null;
+  errors: CommandErrorInfo[];
+}
+
+export interface S3ReconciliationResult {
+  summary: S3ReconciliationSummary | null;
   errors: CommandErrorInfo[];
 }
 
@@ -595,6 +615,27 @@ export interface EntityListResult {
 
 export interface EntityFilesResult {
   files: EntityFileRecord[];
+  errors: CommandErrorInfo[];
+}
+
+export interface RegisterS3SourceArtifactRequest {
+  stage_id: string;
+  entity_id: string;
+  artifact_id: string;
+  bucket: string;
+  key: string;
+  version_id?: string | null;
+  etag?: string | null;
+  checksum_sha256?: string | null;
+  size?: number | null;
+}
+
+export interface RegisterS3SourceArtifactPayload {
+  file: EntityFileRecord;
+}
+
+export interface RegisterS3SourceArtifactResult {
+  payload: RegisterS3SourceArtifactPayload | null;
   errors: CommandErrorInfo[];
 }
 

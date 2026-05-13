@@ -139,6 +139,7 @@ pub(crate) struct RegisterS3ArtifactPointerInput {
     pub etag: Option<String>,
     pub checksum_sha256: Option<String>,
     pub size: Option<u64>,
+    pub last_modified: Option<String>,
     pub source_file_id: Option<i64>,
     pub producer_run_id: Option<String>,
     pub status: StageStatus,
@@ -2326,6 +2327,7 @@ fn register_s3_artifact_pointer_in_transaction(
         }
     }))
     .map_err(|error| format!("Failed to serialize S3 artifact metadata: {error}"))?;
+    let file_mtime = input.last_modified.clone().unwrap_or_else(|| now.clone());
     let (_outcome, file_id) = upsert_entity_file(
         &transaction,
         &PersistEntityFileInput {
@@ -2342,7 +2344,7 @@ fn register_s3_artifact_pointer_in_transaction(
             etag: input.etag.clone(),
             checksum_sha256: input.checksum_sha256.clone(),
             checksum,
-            file_mtime: now.clone(),
+            file_mtime,
             file_size: input.size.unwrap_or(0),
             artifact_size: input.size,
             payload_json: "{}".to_string(),
@@ -2475,6 +2477,98 @@ pub(crate) fn mark_missing_files_for_active_stages(
         )?;
         missing_count += 1;
     }
+
+    Ok(missing_count)
+}
+
+pub(crate) fn mark_missing_s3_files_for_active_stages(
+    path: &Path,
+    active_stage_ids: &HashSet<String>,
+    seen_paths: &HashSet<String>,
+    scan_id: &str,
+    seen_at: &str,
+) -> Result<u64, String> {
+    let mut connection = open_connection(path)?;
+    let transaction = connection.transaction().map_err(|error| {
+        format!("Failed to start S3 missing artifact reconciliation transaction: {error}")
+    })?;
+    let existing_files = load_entity_files_from_connection(&transaction, None)?;
+    let mut missing_count = 0;
+
+    for file in existing_files {
+        if !active_stage_ids.contains(&file.stage_id) {
+            continue;
+        }
+        if file.storage_provider != StorageProvider::S3 {
+            continue;
+        }
+        if seen_paths.contains(&file.file_path) || !file.file_exists {
+            continue;
+        }
+
+        transaction
+            .execute(
+                r#"
+                UPDATE entity_files
+                SET file_exists = 0,
+                    missing_since = COALESCE(missing_since, ?2),
+                    updated_at = ?2
+                WHERE id = ?1
+                "#,
+                params![file.id, seen_at],
+            )
+            .map_err(|error| {
+                format!(
+                    "Failed to mark S3 artifact '{}' as missing: {error}",
+                    file.file_path
+                )
+            })?;
+
+        transaction
+            .execute(
+                r#"
+                UPDATE entity_stage_states
+                SET file_exists = 0,
+                    last_seen_at = ?3,
+                    updated_at = ?3
+                WHERE entity_id = ?1 AND stage_id = ?2
+                "#,
+                params![file.entity_id, file.stage_id, seen_at],
+            )
+            .map_err(|error| {
+                format!(
+                    "Failed to mark S3 stage state missing for entity '{}' on stage '{}': {error}",
+                    file.entity_id, file.stage_id
+                )
+            })?;
+
+        insert_app_event(
+            &transaction,
+            AppEventLevel::Warning,
+            "s3_artifact_missing",
+            &format!(
+                "Tracked S3 artifact '{}' was not found during reconciliation.",
+                file.file_path
+            ),
+            Some(json!({
+                "scan_id": scan_id,
+                "entity_id": file.entity_id,
+                "stage_id": file.stage_id,
+                "file_path": file.file_path,
+                "bucket": file.bucket,
+                "key": file.key,
+            })),
+            seen_at,
+        )?;
+        missing_count += 1;
+    }
+
+    if missing_count > 0 {
+        recompute_entity_summaries(&transaction)?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("Failed to commit S3 missing artifact reconciliation: {error}"))?;
 
     Ok(missing_count)
 }
@@ -4881,6 +4975,7 @@ mod tests {
             etag: None,
             checksum_sha256: None,
             size: Some(42),
+            last_modified: None,
             source_file_id: None,
             producer_run_id: Some(producer_run_id.to_string()),
             status: StageStatus::Pending,

@@ -13,9 +13,12 @@ import type {
   PipelineConfigDraft,
   PipelineEditorStateResult,
   ReconcileStuckTasksResult,
+  RegisterS3SourceArtifactRequest,
+  RegisterS3SourceArtifactResult,
   RunDueTasksResult,
   RunEntityStageResult,
   RuntimeSummaryResult,
+  S3ReconciliationResult,
   SaveEntityFileJsonResult,
   SavePipelineConfigResult,
   ScanWorkspaceResult,
@@ -32,6 +35,17 @@ export async function getDashboardOverview(path: string): Promise<DashboardOverv
 
 export async function scanWorkspace(path: string): Promise<ScanWorkspaceResult> {
   return invoke<ScanWorkspaceResult>("scan_workspace", { path });
+}
+
+export async function reconcileS3Workspace(path: string): Promise<S3ReconciliationResult> {
+  return invoke<S3ReconciliationResult>("reconcile_s3_workspace", { path });
+}
+
+export async function registerS3SourceArtifact(
+  path: string,
+  input: RegisterS3SourceArtifactRequest,
+): Promise<RegisterS3SourceArtifactResult> {
+  return invoke<RegisterS3SourceArtifactResult>("register_s3_source_artifact", { path, input });
 }
 
 export async function ensureStageDirectories(path: string): Promise<StageDirectoryProvisionResult> {

@@ -730,6 +730,22 @@ pub struct ScanSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct S3ReconciliationSummary {
+    pub scan_id: String,
+    pub stage_count: u64,
+    pub listed_object_count: u64,
+    pub metadata_tagged_count: u64,
+    pub registered_file_count: u64,
+    pub updated_file_count: u64,
+    pub unchanged_file_count: u64,
+    pub missing_file_count: u64,
+    pub restored_file_count: u64,
+    pub unmapped_object_count: u64,
+    pub elapsed_ms: u128,
+    pub latest_reconciliation_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StageDirectoryProvisionSummary {
     pub created_paths: Vec<String>,
     pub created_directory_count: u64,
@@ -738,6 +754,12 @@ pub struct StageDirectoryProvisionSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScanWorkspaceResult {
     pub summary: Option<ScanSummary>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct S3ReconciliationResult {
+    pub summary: Option<S3ReconciliationSummary>,
     pub errors: Vec<CommandErrorInfo>,
 }
 
@@ -773,6 +795,30 @@ pub struct EntityListResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityFilesResult {
     pub files: Vec<EntityFileRecord>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegisterS3SourceArtifactRequest {
+    pub stage_id: String,
+    pub entity_id: String,
+    pub artifact_id: String,
+    pub bucket: String,
+    pub key: String,
+    pub version_id: Option<String>,
+    pub etag: Option<String>,
+    pub checksum_sha256: Option<String>,
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegisterS3SourceArtifactPayload {
+    pub file: EntityFileRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegisterS3SourceArtifactResult {
+    pub payload: Option<RegisterS3SourceArtifactPayload>,
     pub errors: Vec<CommandErrorInfo>,
 }
 

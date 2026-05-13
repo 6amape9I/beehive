@@ -79,6 +79,31 @@ Zero-output success manifests are valid only when the source stage has `allow_em
 
 S3 registration is idempotent for the same `producer_run_id + artifact_id + bucket/key` and rejects conflicting replays. Duplicate `artifact_id` values inside one manifest are invalid. A `same_entity` output must use the source logical `entity_id`; child or representation outputs still need an explicit `entity_id`.
 
+## B2 S3 Reconciliation
+
+B2 adds a real metadata-only S3 reconciliation path. It uses the official AWS Rust SDK through a small internal `S3MetadataClient` trait so unit tests can run with mocks and without credentials.
+
+The reconciliation command:
+
+- loads active stages that have an S3 `input_uri`;
+- lists objects under each bucket/prefix;
+- heads objects for S3 user metadata and object metadata;
+- registers objects that expose Beehive identity metadata;
+- records objects without Beehive identity as `s3_artifact_unmapped` events;
+- marks tracked S3 artifacts missing when absent from the current prefix listing;
+- restores previously missing S3 artifacts when they reappear.
+
+Reconciliation does not read S3 business JSON bodies. Unknown S3 objects are not made runnable silently.
+
+Supported identity metadata:
+
+- `x-amz-meta-beehive-entity-id`;
+- `x-amz-meta-beehive-artifact-id`;
+- optional `x-amz-meta-beehive-stage-id`;
+- optional `x-amz-meta-beehive-source-artifact-id`.
+
+Manual source artifact registration is available for objects that are known by operator input rather than S3 metadata. The registration validates active S3 stage prefix ownership and creates a pending pointer state without reading the object body.
+
 ## Route Safety
 
 S3 `save_path` is a logical route, not an OS path. Accepted forms:
@@ -91,4 +116,6 @@ Rejected forms include empty strings, `..`, Windows drive paths, UNC paths, abso
 
 ## B1 Boundaries
 
-B1/B1.1 do not call real S3, list buckets, poll async manifests, manage n8n workflows, or implement a scheduler. B2 should add real S3 reconciliation and a one-artifact n8n smoke pipeline.
+B1/B1.1 do not call real S3, list buckets, poll async manifests, manage n8n workflows, or implement a scheduler.
+
+B2 adds real S3 list/head reconciliation and manual source artifact registration. B2 still does not manage n8n workflows through the n8n REST API, build a credential manager UI, read S3 business JSON during Beehive execution, or implement async manifest polling.

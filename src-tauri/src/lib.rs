@@ -10,7 +10,9 @@ mod file_open;
 mod file_ops;
 mod file_safety;
 mod pipeline_editor;
+mod s3_client;
 mod s3_manifest;
+mod s3_reconciliation;
 mod save_path;
 mod state_machine;
 mod workdir;
@@ -41,6 +43,8 @@ pub fn run() {
             commands::reconcile_stuck_tasks,
             commands::list_app_events,
             commands::get_workspace_explorer,
+            commands::reconcile_s3_workspace,
+            commands::register_s3_source_artifact,
             commands::retry_entity_stage_now,
             commands::reset_entity_stage_to_pending,
             commands::skip_entity_stage,

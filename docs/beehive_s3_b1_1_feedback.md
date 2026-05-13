@@ -25,6 +25,8 @@ Rust tests were run with localhost permission because executor tests bind mock H
 
 ## B2 Readiness
 
+B2 readiness: ready
+
 Ready for B2. Remaining B2 work is real S3 reconciliation/smoke execution and any S3 credentials/runtime integration beyond the current control-plane pointer contract.
 
 ТЗ перечитано на этапах: after_plan, after_empty_output_policy, after_entity_artifact_identity, after_registration_transaction, after_stage_editor_docs_visibility, after_tests, before_feedback
