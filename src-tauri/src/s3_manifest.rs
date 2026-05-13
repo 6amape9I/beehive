@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -38,12 +40,38 @@ pub(crate) enum S3ManifestStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct S3ManifestOutput {
     pub artifact_id: String,
+    pub entity_id: String,
+    pub relation_to_source: S3ManifestRelationToSource,
     pub bucket: String,
     pub key: String,
     pub save_path: String,
     pub content_type: Option<String>,
     pub checksum_sha256: Option<String>,
     pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum S3ManifestRelationToSource {
+    SameEntity,
+    ChildEntity,
+    RepresentationOf,
+    CandidateParent,
+    RelationArtifact,
+    Other,
+}
+
+impl S3ManifestRelationToSource {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::SameEntity => "same_entity",
+            Self::ChildEntity => "child_entity",
+            Self::RepresentationOf => "representation_of",
+            Self::CandidateParent => "candidate_parent",
+            Self::RelationArtifact => "relation_artifact",
+            Self::Other => "other",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +90,7 @@ pub(crate) struct S3ManifestValidationError {
 pub(crate) struct S3ManifestValidationContext {
     pub workspace_id: String,
     pub run_id: String,
+    pub source_entity_id: String,
     pub source: ArtifactLocation,
     pub storage: S3StorageConfig,
     pub source_stage: StageRecord,
@@ -130,15 +159,32 @@ fn validate_success_manifest(
     manifest: S3ArtifactManifest,
     context: &S3ManifestValidationContext,
 ) -> Result<ValidatedS3Manifest, S3ManifestValidationError> {
-    if manifest.outputs.is_empty() && context.source_stage.next_stage.is_some() {
+    if manifest.outputs.is_empty() && !context.source_stage.allow_empty_outputs {
         return Err(invalid(
-            "Success manifest may omit outputs only for terminal/no-output stages.",
+            "Success manifest may omit outputs only when source stage allow_empty_outputs is true.",
         ));
     }
     let mut outputs = Vec::new();
+    let mut artifact_ids = HashSet::new();
     for output in &manifest.outputs {
         if output.artifact_id.trim().is_empty() {
             return Err(invalid("Manifest output artifact_id is required."));
+        }
+        if !artifact_ids.insert(output.artifact_id.clone()) {
+            return Err(invalid(format!(
+                "Manifest output artifact_id '{}' appears more than once.",
+                output.artifact_id
+            )));
+        }
+        if output.entity_id.trim().is_empty() {
+            return Err(invalid("Manifest output entity_id is required."));
+        }
+        if output.relation_to_source == S3ManifestRelationToSource::SameEntity
+            && output.entity_id != context.source_entity_id
+        {
+            return Err(invalid(
+                "same_entity output must use the claimed source logical entity_id.",
+            ));
         }
         if output.bucket != context.storage.bucket {
             return Err(invalid(format!(
@@ -267,6 +313,7 @@ mod tests {
             retry_delay_sec: 0,
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
+            allow_empty_outputs: false,
             is_active: true,
             archived_at: None,
             last_seen_in_config_at: None,
@@ -290,6 +337,7 @@ mod tests {
         S3ManifestValidationContext {
             workspace_id: "beehive-s3-dev".to_string(),
             run_id: "run_123".to_string(),
+            source_entity_id: "entity-1".to_string(),
             source: ArtifactLocation {
                 provider: StorageProvider::S3,
                 local_path: None,
@@ -319,7 +367,7 @@ mod tests {
   "run_id":"run_123",
   "source":{{"bucket":"steos-s3-data","key":"main_dir/raw/input_001.json","version_id":null,"etag":null}},
   "status":"success",
-  "outputs":[{{"artifact_id":"art_001","bucket":"steos-s3-data","key":"main_dir/processed/raw_entities/art_001.json","save_path":"{save_path}","content_type":"application/json","checksum_sha256":null,"size":123}}],
+  "outputs":[{{"artifact_id":"art_001","entity_id":"entity-1-child","relation_to_source":"child_entity","bucket":"steos-s3-data","key":"main_dir/processed/raw_entities/art_001.json","save_path":"{save_path}","content_type":"application/json","checksum_sha256":null,"size":123}}],
   "created_at":"2026-05-12T00:00:00Z"
 }}"#
         )
@@ -340,6 +388,68 @@ mod tests {
             validated.outputs[0].location.key.as_deref(),
             Some("main_dir/processed/raw_entities/art_001.json")
         );
+    }
+
+    #[test]
+    fn zero_output_success_requires_explicit_stage_opt_in() {
+        let manifest = r#"{
+  "schema":"beehive.s3_artifact_manifest.v1",
+  "workspace_id":"beehive-s3-dev",
+  "run_id":"run_123",
+  "source":{"bucket":"steos-s3-data","key":"main_dir/raw/input_001.json"},
+  "status":"success",
+  "outputs":[],
+  "created_at":"2026-05-12T00:00:00Z"
+}"#;
+        let rejected = parse_and_validate_s3_manifest(manifest, &context()).expect_err("rejected");
+        assert!(rejected.message.contains("allow_empty_outputs"));
+
+        let mut allow_context = context();
+        allow_context.source_stage.allow_empty_outputs = true;
+        let accepted = parse_and_validate_s3_manifest(manifest, &allow_context).expect("accepted");
+        assert!(accepted.outputs.is_empty());
+    }
+
+    #[test]
+    fn output_identity_contracts_are_enforced() {
+        let missing_entity_id = success_manifest("main_dir/processed/raw_entities")
+            .replace("\"entity_id\":\"entity-1-child\",", "");
+        assert!(parse_and_validate_s3_manifest(&missing_entity_id, &context()).is_err());
+
+        let duplicate_artifact_id = r#"{
+  "schema":"beehive.s3_artifact_manifest.v1",
+  "workspace_id":"beehive-s3-dev",
+  "run_id":"run_123",
+  "source":{"bucket":"steos-s3-data","key":"main_dir/raw/input_001.json"},
+  "status":"success",
+  "outputs":[
+    {"artifact_id":"art_001","entity_id":"entity-1-child-a","relation_to_source":"child_entity","bucket":"steos-s3-data","key":"main_dir/processed/raw_entities/art_001.json","save_path":"main_dir/processed/raw_entities","content_type":"application/json","checksum_sha256":null,"size":123},
+    {"artifact_id":"art_001","entity_id":"entity-1-child-b","relation_to_source":"child_entity","bucket":"steos-s3-data","key":"main_dir/processed/raw_entities/art_002.json","save_path":"main_dir/processed/raw_entities","content_type":"application/json","checksum_sha256":null,"size":123}
+  ],
+  "created_at":"2026-05-12T00:00:00Z"
+}"#;
+        let duplicate_error =
+            parse_and_validate_s3_manifest(duplicate_artifact_id, &context()).expect_err("dup");
+        assert!(duplicate_error.message.contains("appears more than once"));
+
+        let same_entity_mismatch = success_manifest("main_dir/processed/raw_entities").replace(
+            "\"relation_to_source\":\"child_entity\"",
+            "\"relation_to_source\":\"same_entity\"",
+        );
+        let same_entity_error =
+            parse_and_validate_s3_manifest(&same_entity_mismatch, &context()).expect_err("same");
+        assert!(same_entity_error.message.contains("same_entity"));
+
+        let same_entity_match = success_manifest("main_dir/processed/raw_entities")
+            .replace(
+                "\"entity_id\":\"entity-1-child\"",
+                "\"entity_id\":\"entity-1\"",
+            )
+            .replace(
+                "\"relation_to_source\":\"child_entity\"",
+                "\"relation_to_source\":\"same_entity\"",
+            );
+        parse_and_validate_s3_manifest(&same_entity_match, &context()).expect("same entity");
     }
 
     #[test]

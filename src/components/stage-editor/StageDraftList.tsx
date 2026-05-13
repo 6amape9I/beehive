@@ -73,7 +73,7 @@ export function StageDraftList({
                       <strong>{stage.id || "(missing)"}</strong>
                       {stage.is_new ? <div className="muted">new</div> : null}
                     </td>
-                    <td><code>{stage.input_folder}</code></td>
+                    <td><code>{stage.input_uri ?? stage.input_folder}</code></td>
                     <td>{stage.next_stage ? <code>{stage.output_folder}</code> : "Terminal"}</td>
                     <td>{stage.next_stage ?? "End"}</td>
                     <td>{stage.max_attempts} / {stage.retry_delay_sec}s</td>

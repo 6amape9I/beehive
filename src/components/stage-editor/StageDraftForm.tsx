@@ -32,9 +32,19 @@ export function StageDraftForm({
   const currentStage = stage;
   const stageIdLocked = !currentStage.is_new;
   const terminal = !currentStage.next_stage;
+  const savePathAliases = currentStage.save_path_aliases ?? [];
 
   function update(patch: Partial<StageDefinitionDraft>) {
     onChange({ ...currentStage, ...patch });
+  }
+
+  function updateAliases(value: string) {
+    update({
+      save_path_aliases: value
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    });
   }
 
   return (
@@ -94,6 +104,15 @@ export function StageDraftForm({
           />
         </div>
         <div className="form-row">
+          <label htmlFor="stage-input-uri">Input URI</label>
+          <input
+            id="stage-input-uri"
+            value={currentStage.input_uri ?? ""}
+            disabled={disabled}
+            onChange={(event) => update({ input_uri: event.target.value || null })}
+          />
+        </div>
+        <div className="form-row">
           <label htmlFor="stage-output">
             Output folder {terminal ? "(optional for terminal stage)" : ""}
           </label>
@@ -134,6 +153,30 @@ export function StageDraftForm({
             disabled={disabled}
             onChange={(event) => update({ retry_delay_sec: Number(event.target.value) })}
           />
+        </div>
+        <div className="form-row">
+          <label htmlFor="stage-save-path-aliases">Save path aliases</label>
+          <textarea
+            id="stage-save-path-aliases"
+            className="compact-textarea"
+            value={savePathAliases.join("\n")}
+            disabled={disabled}
+            rows={3}
+            onChange={(event) => updateAliases(event.target.value)}
+          />
+        </div>
+        <div className="form-row">
+          <label htmlFor="stage-allow-empty-outputs">Allow empty outputs</label>
+          <label className="checkbox-row">
+            <input
+              id="stage-allow-empty-outputs"
+              type="checkbox"
+              checked={!!currentStage.allow_empty_outputs}
+              disabled={disabled}
+              onChange={(event) => update({ allow_empty_outputs: event.target.checked })}
+            />
+            <span>{currentStage.allow_empty_outputs ? "enabled" : "disabled"}</span>
+          </label>
         </div>
       </div>
       <StageUsageSummaryView usage={usage} />

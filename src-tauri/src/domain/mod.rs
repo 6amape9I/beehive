@@ -146,6 +146,7 @@ pub struct StageStorageConfig {
     pub input_uri: Option<String>,
     pub input_folder: Option<String>,
     pub save_path_aliases: Vec<String>,
+    pub allow_empty_outputs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -161,6 +162,8 @@ pub struct StageDefinition {
     pub next_stage: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub save_path_aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_empty_outputs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -200,6 +203,8 @@ pub struct StageDefinitionDraft {
     pub next_stage: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub save_path_aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_empty_outputs: bool,
     pub original_stage_id: Option<String>,
     pub is_new: bool,
 }
@@ -357,6 +362,7 @@ pub struct StageRecord {
     pub retry_delay_sec: u64,
     pub next_stage: Option<String>,
     pub save_path_aliases: Vec<String>,
+    pub allow_empty_outputs: bool,
     pub is_active: bool,
     pub archived_at: Option<String>,
     pub last_seen_in_config_at: Option<String>,
@@ -428,6 +434,8 @@ pub struct EntityFileRecord {
     pub stage_id: String,
     pub file_path: String,
     pub file_name: String,
+    pub artifact_id: Option<String>,
+    pub relation_to_source: Option<String>,
     pub storage_provider: StorageProvider,
     pub bucket: Option<String>,
     pub key: Option<String>,
@@ -810,6 +818,12 @@ pub struct WorkspaceFileNode {
     pub stage_id: String,
     pub file_name: String,
     pub file_path: String,
+    pub storage_provider: StorageProvider,
+    pub bucket: Option<String>,
+    pub key: Option<String>,
+    pub artifact_id: Option<String>,
+    pub relation_to_source: Option<String>,
+    pub producer_run_id: Option<String>,
     pub file_exists: bool,
     pub missing_since: Option<String>,
     pub is_managed_copy: bool,
@@ -828,6 +842,10 @@ pub struct WorkspaceFileNode {
     pub updated_at: String,
     pub can_open_file: bool,
     pub can_open_folder: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -851,6 +869,8 @@ pub struct WorkspaceStageTreeCounters {
 pub struct WorkspaceStageTree {
     pub stage_id: String,
     pub input_folder: String,
+    pub input_uri: Option<String>,
+    pub storage_provider: StorageProvider,
     pub output_folder: Option<String>,
     pub workflow_url: Option<String>,
     pub next_stage: Option<String>,

@@ -27,13 +27,15 @@ pub(crate) use entities::{
     evaluate_entity_file_allowed_actions, record_entity_file_json_edit_rejected,
 };
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 
 pub(crate) struct PersistEntityFileInput {
     pub entity_id: String,
     pub stage_id: String,
     pub file_path: String,
     pub file_name: String,
+    pub artifact_id: Option<String>,
+    pub relation_to_source: Option<String>,
     pub storage_provider: StorageProvider,
     pub bucket: Option<String>,
     pub key: Option<String>,
@@ -129,6 +131,7 @@ pub(crate) struct FinishStageRunInput {
 pub(crate) struct RegisterS3ArtifactPointerInput {
     pub entity_id: String,
     pub artifact_id: String,
+    pub relation_to_source: Option<String>,
     pub stage_id: String,
     pub bucket: String,
     pub key: String,
@@ -761,11 +764,13 @@ pub fn get_workspace_explorer(
     let mut files_by_stage: HashMap<String, Vec<WorkspaceFileNode>> = HashMap::new();
 
     for file in &files {
+        let is_local_file = file.storage_provider == StorageProvider::Local;
         let absolute_path = workdir_path.join(&file.file_path);
-        let parent_exists = absolute_path
-            .parent()
-            .map(|parent| parent.exists())
-            .unwrap_or(false);
+        let parent_exists = is_local_file
+            && absolute_path
+                .parent()
+                .map(|parent| parent.exists())
+                .unwrap_or(false);
         let source_file = file
             .copy_source_file_id
             .and_then(|source_file_id| file_lookup.get(&source_file_id));
@@ -790,6 +795,12 @@ pub fn get_workspace_explorer(
                 stage_id: file.stage_id.clone(),
                 file_name: file.file_name.clone(),
                 file_path: file.file_path.clone(),
+                storage_provider: file.storage_provider.clone(),
+                bucket: file.bucket.clone(),
+                key: file.key.clone(),
+                artifact_id: file.artifact_id.clone(),
+                relation_to_source: file.relation_to_source.clone(),
+                producer_run_id: file.producer_run_id.clone(),
                 file_exists: file.file_exists,
                 missing_since: file.missing_since.clone(),
                 is_managed_copy: file.is_managed_copy,
@@ -806,7 +817,7 @@ pub fn get_workspace_explorer(
                 file_size: file.file_size,
                 file_mtime: file.file_mtime.clone(),
                 updated_at: file.updated_at.clone(),
-                can_open_file: file.file_exists && absolute_path.exists(),
+                can_open_file: is_local_file && file.file_exists && absolute_path.exists(),
                 can_open_folder: parent_exists,
             });
     }
@@ -837,17 +848,30 @@ pub fn get_workspace_explorer(
                     .unwrap_or(&[]),
                 invalid_files.len() as u64,
             );
+            let is_s3_stage = stage
+                .input_uri
+                .as_deref()
+                .is_some_and(|uri| uri.starts_with("s3://"));
             let folder_path = workdir_path.join(&stage.input_folder);
             WorkspaceStageTree {
                 stage_id: stage.id,
                 input_folder: stage.input_folder,
+                input_uri: stage.input_uri.clone(),
+                storage_provider: if is_s3_stage {
+                    StorageProvider::S3
+                } else {
+                    StorageProvider::Local
+                },
                 output_folder: non_empty_string(stage.output_folder),
                 workflow_url: non_empty_string(stage.workflow_url),
                 next_stage: stage.next_stage,
                 is_active: stage.is_active,
                 archived_at: stage.archived_at,
-                folder_path: path_string(&folder_path),
-                folder_exists: folder_path.exists(),
+                folder_path: stage
+                    .input_uri
+                    .clone()
+                    .unwrap_or_else(|| path_string(&folder_path)),
+                folder_exists: is_s3_stage || folder_path.exists(),
                 files: stage_files,
                 invalid_files,
                 counters,
@@ -1079,11 +1103,13 @@ fn build_workspace_entity_trails(
         let nodes = entity_files
             .iter()
             .map(|file| {
+                let is_local_file = file.storage_provider == StorageProvider::Local;
                 let absolute_path = workdir_path.join(&file.file_path);
-                let parent_exists = absolute_path
-                    .parent()
-                    .map(|parent| parent.exists())
-                    .unwrap_or(false);
+                let parent_exists = is_local_file
+                    && absolute_path
+                        .parent()
+                        .map(|parent| parent.exists())
+                        .unwrap_or(false);
                 WorkspaceEntityTrailNode {
                     entity_file_id: file.id,
                     stage_id: file.stage_id.clone(),
@@ -1094,7 +1120,7 @@ fn build_workspace_entity_trails(
                         .get(&file.id)
                         .map(|state| state.status.clone()),
                     is_managed_copy: file.is_managed_copy,
-                    can_open_file: file.file_exists && absolute_path.exists(),
+                    can_open_file: is_local_file && file.file_exists && absolute_path.exists(),
                     can_open_folder: parent_exists,
                 }
             })
@@ -1861,6 +1887,8 @@ pub(crate) fn upsert_entity_file(
                 && existing.current_stage == file.current_stage
                 && existing.next_stage == file.next_stage
                 && existing.status == status
+                && existing.artifact_id == file.artifact_id
+                && existing.relation_to_source == file.relation_to_source
                 && existing.storage_provider == file.storage_provider
                 && existing.bucket == file.bucket
                 && existing.key == file.key
@@ -1899,30 +1927,32 @@ pub(crate) fn upsert_entity_file(
                         entity_id = ?2,
                         stage_id = ?3,
                         file_name = ?4,
-                        storage_provider = ?5,
-                        bucket = ?6,
-                        object_key = ?7,
-                        version_id = ?8,
-                        etag = ?9,
-                        checksum_sha256 = ?10,
-                        checksum = ?11,
-                        file_mtime = ?12,
-                        file_size = ?13,
-                        artifact_size = ?14,
-                        payload_json = ?15,
-                        meta_json = ?16,
-                        current_stage = ?17,
-                        next_stage = ?18,
-                        status = ?19,
-                        validation_status = ?20,
-                        validation_errors_json = ?21,
-                        is_managed_copy = ?22,
-                        copy_source_file_id = ?23,
-                        producer_run_id = ?24,
+                        artifact_id = ?5,
+                        relation_to_source = ?6,
+                        storage_provider = ?7,
+                        bucket = ?8,
+                        object_key = ?9,
+                        version_id = ?10,
+                        etag = ?11,
+                        checksum_sha256 = ?12,
+                        checksum = ?13,
+                        file_mtime = ?14,
+                        file_size = ?15,
+                        artifact_size = ?16,
+                        payload_json = ?17,
+                        meta_json = ?18,
+                        current_stage = ?19,
+                        next_stage = ?20,
+                        status = ?21,
+                        validation_status = ?22,
+                        validation_errors_json = ?23,
+                        is_managed_copy = ?24,
+                        copy_source_file_id = ?25,
+                        producer_run_id = ?26,
                         file_exists = 1,
                         missing_since = NULL,
-                        last_seen_at = ?25,
-                        updated_at = ?26
+                        last_seen_at = ?27,
+                        updated_at = ?28
                     WHERE id = ?1
                     "#,
                     params![
@@ -1930,6 +1960,8 @@ pub(crate) fn upsert_entity_file(
                         file.entity_id,
                         file.stage_id,
                         file.file_name,
+                        file.artifact_id,
+                        file.relation_to_source,
                         file.storage_provider.as_str(),
                         file.bucket,
                         file.key,
@@ -1977,6 +2009,8 @@ pub(crate) fn upsert_entity_file(
                         stage_id,
                         file_path,
                         file_name,
+                        artifact_id,
+                        relation_to_source,
                         storage_provider,
                         bucket,
                         object_key,
@@ -2003,13 +2037,15 @@ pub(crate) fn upsert_entity_file(
                         last_seen_at,
                         updated_at
                     )
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, 1, NULL, ?25, ?26, ?27)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, 1, NULL, ?27, ?28, ?29)
                     "#,
                     params![
                         file.entity_id,
                         file.stage_id,
                         file.file_path,
                         file.file_name,
+                        file.artifact_id,
+                        file.relation_to_source,
                         file.storage_provider.as_str(),
                         file.bucket,
                         file.key,
@@ -2103,15 +2139,165 @@ pub(crate) fn upsert_entity_stage_state(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn register_s3_artifact_pointer(
     path: &Path,
     input: &RegisterS3ArtifactPointerInput,
 ) -> Result<EntityFileRecord, String> {
+    let mut files = register_s3_artifact_pointers(path, std::slice::from_ref(input))?;
+    files
+        .pop()
+        .ok_or_else(|| "S3 artifact registration returned no rows.".to_string())
+}
+
+pub(crate) fn register_s3_artifact_pointers(
+    path: &Path,
+    inputs: &[RegisterS3ArtifactPointerInput],
+) -> Result<Vec<EntityFileRecord>, String> {
     let mut connection = open_connection(path)?;
     let transaction = connection.transaction().map_err(|error| {
         format!("Failed to start S3 artifact registration transaction: {error}")
     })?;
-    let stage = find_stage_by_id(&transaction, &input.stage_id)?
+    validate_s3_artifact_registration_batch(&transaction, inputs)?;
+
+    let mut file_ids = Vec::new();
+    for input in inputs {
+        file_ids.push(register_s3_artifact_pointer_in_transaction(
+            &transaction,
+            input,
+        )?);
+    }
+    recompute_entity_summaries(&transaction)?;
+
+    let mut files = Vec::new();
+    for file_id in file_ids {
+        files.push(
+            find_entity_file_by_id(&transaction, file_id)?.ok_or_else(|| {
+                format!("Registered S3 artifact row '{}' was not found.", file_id)
+            })?,
+        );
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| format!("Failed to commit S3 artifact registration: {error}"))?;
+    Ok(files)
+}
+
+fn validate_s3_artifact_registration_batch(
+    transaction: &Transaction<'_>,
+    inputs: &[RegisterS3ArtifactPointerInput],
+) -> Result<(), String> {
+    let mut artifact_ids = HashSet::new();
+    let mut bucket_keys = HashMap::new();
+    for input in inputs {
+        if input.artifact_id.trim().is_empty() {
+            return Err("S3 artifact registration requires non-empty artifact_id.".to_string());
+        }
+        if input.entity_id.trim().is_empty() {
+            return Err("S3 artifact registration requires non-empty entity_id.".to_string());
+        }
+        if input.bucket.trim().is_empty() || input.key.trim().is_empty() {
+            return Err("S3 artifact registration requires non-empty bucket/key.".to_string());
+        }
+        if !artifact_ids.insert(input.artifact_id.clone()) {
+            return Err(format!(
+                "S3 artifact_id '{}' appears more than once in one registration batch.",
+                input.artifact_id
+            ));
+        }
+        let bucket_key = (input.bucket.clone(), input.key.clone());
+        if bucket_keys
+            .insert(bucket_key.clone(), input.artifact_id.clone())
+            .is_some()
+        {
+            return Err(format!(
+                "S3 output key 's3://{}/{}' appears more than once in one registration batch.",
+                bucket_key.0, bucket_key.1
+            ));
+        }
+
+        let stage = find_stage_by_id(transaction, &input.stage_id)?
+            .ok_or_else(|| format!("Target stage '{}' was not found.", input.stage_id))?;
+        if !stage.is_active {
+            return Err(format!("Target stage '{}' is inactive.", input.stage_id));
+        }
+
+        if let Some(producer_run_id) = input
+            .producer_run_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            if let Some(existing) = find_s3_artifact_by_producer_and_artifact(
+                transaction,
+                producer_run_id,
+                &input.artifact_id,
+            )? {
+                let same_location = existing.bucket.as_deref() == Some(input.bucket.as_str())
+                    && existing.key.as_deref() == Some(input.key.as_str());
+                if !same_location {
+                    return Err(format!(
+                        "S3 artifact '{}' for run '{}' is already registered at a different bucket/key.",
+                        input.artifact_id, producer_run_id
+                    ));
+                }
+                if existing.entity_id != input.entity_id {
+                    return Err(format!(
+                        "S3 artifact '{}' for run '{}' is already registered for entity '{}', not '{}'.",
+                        input.artifact_id, producer_run_id, existing.entity_id, input.entity_id
+                    ));
+                }
+                if existing.stage_id != input.stage_id {
+                    return Err(format!(
+                        "S3 artifact '{}' for run '{}' is already registered for stage '{}', not '{}'.",
+                        input.artifact_id, producer_run_id, existing.stage_id, input.stage_id
+                    ));
+                }
+            }
+        }
+
+        let file_path = format!("s3://{}/{}", input.bucket, input.key);
+        if let Some(existing) = find_entity_file_by_path(transaction, &file_path)? {
+            if existing.storage_provider != StorageProvider::S3 {
+                return Err(format!(
+                    "S3 output key '{}' collides with a non-S3 entity file row.",
+                    file_path
+                ));
+            }
+            if existing.entity_id != input.entity_id {
+                return Err(format!(
+                    "S3 output key '{}' is already registered for entity '{}', not '{}'.",
+                    file_path, existing.entity_id, input.entity_id
+                ));
+            }
+            if existing.artifact_id.as_deref() != Some(input.artifact_id.as_str()) {
+                return Err(format!(
+                    "S3 output key '{}' is already registered with artifact_id '{:?}', not '{}'.",
+                    file_path, existing.artifact_id, input.artifact_id
+                ));
+            }
+            if existing.producer_run_id != input.producer_run_id {
+                return Err(format!(
+                    "S3 output key '{}' is already registered with a different producer_run_id.",
+                    file_path
+                ));
+            }
+            if existing.stage_id != input.stage_id {
+                return Err(format!(
+                    "S3 output key '{}' is already registered for stage '{}', not '{}'.",
+                    file_path, existing.stage_id, input.stage_id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn register_s3_artifact_pointer_in_transaction(
+    transaction: &Transaction<'_>,
+    input: &RegisterS3ArtifactPointerInput,
+) -> Result<i64, String> {
+    let stage = find_stage_by_id(transaction, &input.stage_id)?
         .ok_or_else(|| format!("Target stage '{}' was not found.", input.stage_id))?;
     if !stage.is_active {
         return Err(format!("Target stage '{}' is inactive.", input.stage_id));
@@ -2134,6 +2320,7 @@ pub(crate) fn register_s3_artifact_pointer(
         "beehive": {
             "storage_provider": "s3",
             "artifact_id": input.artifact_id,
+            "relation_to_source": input.relation_to_source,
             "source_file_id": input.source_file_id,
             "producer_run_id": input.producer_run_id,
         }
@@ -2146,6 +2333,8 @@ pub(crate) fn register_s3_artifact_pointer(
             stage_id: input.stage_id.clone(),
             file_path: file_path.clone(),
             file_name,
+            artifact_id: Some(input.artifact_id.clone()),
+            relation_to_source: input.relation_to_source.clone(),
             storage_provider: StorageProvider::S3,
             bucket: Some(input.bucket.clone()),
             key: Some(input.key.clone()),
@@ -2186,13 +2375,29 @@ pub(crate) fn register_s3_artifact_pointer(
             updated_at: now.clone(),
         },
     )?;
-    recompute_entity_summaries(&transaction)?;
-    let file = find_entity_file_by_id(&transaction, file_id)?
-        .ok_or_else(|| format!("Registered S3 artifact row '{}' was not found.", file_id))?;
-    transaction
-        .commit()
-        .map_err(|error| format!("Failed to commit S3 artifact registration: {error}"))?;
-    Ok(file)
+    Ok(file_id)
+}
+
+fn find_s3_artifact_by_producer_and_artifact(
+    connection: &Connection,
+    producer_run_id: &str,
+    artifact_id: &str,
+) -> Result<Option<EntityFileRecord>, String> {
+    connection
+        .query_row(
+            entity_files_select_sql(Some(
+                "WHERE storage_provider = 's3' AND producer_run_id = ?1 AND artifact_id = ?2 ORDER BY id DESC LIMIT 1",
+            )),
+            params![producer_run_id, artifact_id],
+            entity_file_from_row,
+        )
+        .optional()
+        .map_err(|error| {
+            format!(
+                "Failed to load S3 artifact '{}' for producer run '{}': {error}",
+                artifact_id, producer_run_id
+            )
+        })
 }
 
 pub(crate) fn mark_missing_files_for_active_stages(
@@ -2207,6 +2412,9 @@ pub(crate) fn mark_missing_files_for_active_stages(
 
     for file in existing_files {
         if !active_stage_ids.contains(&file.stage_id) {
+            continue;
+        }
+        if file.storage_provider != StorageProvider::Local {
             continue;
         }
         if seen_paths.contains(&file.file_path) || !file.file_exists {
@@ -2440,27 +2648,34 @@ pub(crate) fn load_setting(connection: &Connection, key: &str) -> Result<Option<
 
 fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
     match current_schema_version(connection)? {
-        0 => create_schema_v5(connection)?,
+        0 => create_schema_v6(connection)?,
         1 => {
             migrate_v1_to_v2(connection)?;
             migrate_v2_to_v3(connection)?;
             migrate_v3_to_v4(connection)?;
             migrate_v4_to_v5(connection)?;
+            migrate_v5_to_v6(connection)?;
         }
         2 => {
             migrate_v2_to_v3(connection)?;
             migrate_v3_to_v4(connection)?;
             migrate_v4_to_v5(connection)?;
+            migrate_v5_to_v6(connection)?;
         }
         3 => {
             migrate_v3_to_v4(connection)?;
             migrate_v4_to_v5(connection)?;
+            migrate_v5_to_v6(connection)?;
         }
-        4 => migrate_v4_to_v5(connection)?,
-        5 => {}
+        4 => {
+            migrate_v4_to_v5(connection)?;
+            migrate_v5_to_v6(connection)?;
+        }
+        5 => migrate_v5_to_v6(connection)?,
+        6 => {}
         version => {
             return Err(format!(
-                "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, 4, or 5."
+                "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, 4, 5, or 6."
             ))
         }
     }
@@ -2489,6 +2704,8 @@ fn ensure_query_indexes(connection: &Connection) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS idx_stage_runs_entity_stage ON stage_runs(entity_id, stage_id);
             CREATE INDEX IF NOT EXISTS idx_app_events_level_created_at ON app_events(level, created_at);
             CREATE INDEX IF NOT EXISTS idx_entity_files_storage_key ON entity_files(storage_provider, bucket, object_key);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_files_s3_producer_artifact ON entity_files(producer_run_id, artifact_id)
+                WHERE storage_provider = 's3' AND producer_run_id IS NOT NULL AND artifact_id IS NOT NULL;
             "#,
         )
         .map_err(|error| format!("Failed to ensure dashboard query indexes: {error}"))?;
@@ -2501,7 +2718,7 @@ fn current_schema_version(connection: &Connection) -> Result<u32, String> {
         .map_err(|error| format!("Failed to read PRAGMA user_version: {error}"))
 }
 
-fn create_schema_v5(connection: &Connection) -> Result<(), String> {
+fn create_schema_v6(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
             r#"
@@ -2523,6 +2740,7 @@ fn create_schema_v5(connection: &Connection) -> Result<(), String> {
                 retry_delay_sec INTEGER NOT NULL CHECK (retry_delay_sec >= 0),
                 next_stage TEXT,
                 save_path_aliases_json TEXT NOT NULL DEFAULT '[]',
+                allow_empty_outputs INTEGER NOT NULL DEFAULT 0,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 archived_at TEXT,
                 last_seen_in_config_at TEXT,
@@ -2550,6 +2768,8 @@ fn create_schema_v5(connection: &Connection) -> Result<(), String> {
                 stage_id TEXT NOT NULL,
                 file_path TEXT NOT NULL UNIQUE,
                 file_name TEXT NOT NULL,
+                artifact_id TEXT,
+                relation_to_source TEXT,
                 storage_provider TEXT NOT NULL DEFAULT 'local',
                 bucket TEXT,
                 object_key TEXT,
@@ -2641,10 +2861,13 @@ fn create_schema_v5(connection: &Connection) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS idx_stage_runs_run_id ON stage_runs(run_id);
             CREATE INDEX IF NOT EXISTS idx_entity_stage_states_status_retry ON entity_stage_states(status, next_retry_at);
 
-            PRAGMA user_version = 5;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_files_s3_producer_artifact ON entity_files(producer_run_id, artifact_id)
+                WHERE storage_provider = 's3' AND producer_run_id IS NOT NULL AND artifact_id IS NOT NULL;
+
+            PRAGMA user_version = 6;
             "#,
         )
-        .map_err(|error| format!("Failed to create SQLite schema v5: {error}"))?;
+        .map_err(|error| format!("Failed to create SQLite schema v6: {error}"))?;
     Ok(())
 }
 
@@ -3182,6 +3405,36 @@ fn migrate_v4_to_v5(connection: &mut Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_v5_to_v6(connection: &mut Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            r#"
+            ALTER TABLE stages ADD COLUMN allow_empty_outputs INTEGER NOT NULL DEFAULT 0;
+
+            ALTER TABLE entity_files ADD COLUMN artifact_id TEXT;
+            ALTER TABLE entity_files ADD COLUMN relation_to_source TEXT;
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_files_s3_producer_artifact ON entity_files(producer_run_id, artifact_id)
+                WHERE storage_provider = 's3' AND producer_run_id IS NOT NULL AND artifact_id IS NOT NULL;
+
+            PRAGMA user_version = 6;
+            "#,
+        )
+        .map_err(|error| format!("Failed to migrate schema from v5 to v6: {error}"))?;
+
+    let now = Utc::now().to_rfc3339();
+    insert_app_event(
+        connection,
+        AppEventLevel::Info,
+        "schema_migrated_to_v6",
+        "SQLite schema migrated from version 5 to version 6.",
+        None,
+        &now,
+    )?;
+    set_setting(connection, "schema_version", "6", &now)?;
+    Ok(())
+}
+
 fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Result<(), String> {
     let now = Utc::now().to_rfc3339();
     let transaction = connection
@@ -3210,13 +3463,14 @@ fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Resul
                     retry_delay_sec,
                     next_stage,
                     save_path_aliases_json,
+                    allow_empty_outputs,
                     is_active,
                     archived_at,
                     last_seen_in_config_at,
                     created_at,
                     updated_at
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, NULL, ?10, ?10, ?10)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, NULL, ?11, ?11, ?11)
                 ON CONFLICT(stage_id) DO UPDATE SET
                     input_folder = excluded.input_folder,
                     input_uri = excluded.input_uri,
@@ -3226,6 +3480,7 @@ fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Resul
                     retry_delay_sec = excluded.retry_delay_sec,
                     next_stage = excluded.next_stage,
                     save_path_aliases_json = excluded.save_path_aliases_json,
+                    allow_empty_outputs = excluded.allow_empty_outputs,
                     is_active = 1,
                     archived_at = NULL,
                     last_seen_in_config_at = excluded.last_seen_in_config_at,
@@ -3241,6 +3496,7 @@ fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Resul
                     stage.retry_delay_sec as i64,
                     stage.next_stage,
                     save_path_aliases_json,
+                    bool_to_i64(stage.allow_empty_outputs),
                     now,
                 ],
             )
@@ -3329,6 +3585,7 @@ fn load_stage_records_from_connection(connection: &Connection) -> Result<Vec<Sta
                 stage.retry_delay_sec,
                 stage.next_stage,
                 stage.save_path_aliases_json,
+                stage.allow_empty_outputs,
                 stage.is_active,
                 stage.archived_at,
                 stage.last_seen_in_config_at,
@@ -3347,6 +3604,7 @@ fn load_stage_records_from_connection(connection: &Connection) -> Result<Vec<Sta
                 stage.retry_delay_sec,
                 stage.next_stage,
                 stage.save_path_aliases_json,
+                stage.allow_empty_outputs,
                 stage.is_active,
                 stage.archived_at,
                 stage.last_seen_in_config_at,
@@ -3377,12 +3635,13 @@ fn load_stage_records_from_connection(connection: &Connection) -> Result<Vec<Sta
                 retry_delay_sec: row.get::<_, i64>(6)? as u64,
                 next_stage: row.get(7)?,
                 save_path_aliases,
-                is_active: row.get::<_, i64>(9)? == 1,
-                archived_at: row.get(10)?,
-                last_seen_in_config_at: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
-                entity_count: row.get::<_, i64>(14)? as u64,
+                allow_empty_outputs: row.get::<_, i64>(9)? == 1,
+                is_active: row.get::<_, i64>(10)? == 1,
+                archived_at: row.get(11)?,
+                last_seen_in_config_at: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
+                entity_count: row.get::<_, i64>(15)? as u64,
             })
         })
         .map_err(|error| format!("Failed to query stages: {error}"))?;
@@ -3472,6 +3731,8 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 stage_id,
                 file_path,
                 file_name,
+                artifact_id,
+                relation_to_source,
                 storage_provider,
                 bucket,
                 object_key,
@@ -3511,6 +3772,8 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 stage_id,
                 file_path,
                 file_name,
+                artifact_id,
+                relation_to_source,
                 storage_provider,
                 bucket,
                 object_key,
@@ -3541,6 +3804,49 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
             "#
         }
         Some(
+            "WHERE storage_provider = 's3' AND producer_run_id = ?1 AND artifact_id = ?2 ORDER BY id DESC LIMIT 1",
+        ) => {
+            r#"
+            SELECT
+                id,
+                entity_id,
+                stage_id,
+                file_path,
+                file_name,
+                artifact_id,
+                relation_to_source,
+                storage_provider,
+                bucket,
+                object_key,
+                version_id,
+                etag,
+                checksum_sha256,
+                checksum,
+                file_mtime,
+                file_size,
+                artifact_size,
+                payload_json,
+                meta_json,
+                current_stage,
+                next_stage,
+                status,
+                validation_status,
+                validation_errors_json,
+                is_managed_copy,
+                copy_source_file_id,
+                producer_run_id,
+                file_exists,
+                missing_since,
+                first_seen_at,
+                last_seen_at,
+                updated_at
+            FROM entity_files
+            WHERE storage_provider = 's3' AND producer_run_id = ?1 AND artifact_id = ?2
+            ORDER BY id DESC
+            LIMIT 1
+            "#
+        }
+        Some(
             "WHERE entity_id = ?1 AND stage_id = ?2 ORDER BY updated_at DESC, id DESC LIMIT 1",
         ) => {
             r#"
@@ -3550,6 +3856,8 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 stage_id,
                 file_path,
                 file_name,
+                artifact_id,
+                relation_to_source,
                 storage_provider,
                 bucket,
                 object_key,
@@ -3591,6 +3899,8 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 stage_id,
                 file_path,
                 file_name,
+                artifact_id,
+                relation_to_source,
                 storage_provider,
                 bucket,
                 object_key,
@@ -3632,6 +3942,8 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 stage_id,
                 file_path,
                 file_name,
+                artifact_id,
+                relation_to_source,
                 storage_provider,
                 bucket,
                 object_key,
@@ -3672,6 +3984,8 @@ fn entity_files_select_sql(filter: Option<&str>) -> &'static str {
                 stage_id,
                 file_path,
                 file_name,
+                artifact_id,
+                relation_to_source,
                 storage_provider,
                 bucket,
                 object_key,
@@ -3884,6 +4198,25 @@ fn build_json_preview(file: Option<&EntityFileRecord>) -> Result<String, String>
     let Some(file) = file else {
         return Ok("{}".to_string());
     };
+    if file.storage_provider == StorageProvider::S3 {
+        return serialize_json_pretty(&json!({
+            "entity_id": file.entity_id,
+            "stage_id": file.stage_id,
+            "status": file.status,
+            "storage_provider": "s3",
+            "artifact_id": file.artifact_id,
+            "relation_to_source": file.relation_to_source,
+            "bucket": file.bucket,
+            "key": file.key,
+            "version_id": file.version_id,
+            "etag": file.etag,
+            "checksum_sha256": file.checksum_sha256,
+            "size": file.artifact_size,
+            "producer_run_id": file.producer_run_id,
+            "business_json_preview": null,
+            "note": "S3 business JSON is not loaded by Beehive during execution."
+        }));
+    }
     let payload = parse_json_value(&file.payload_json)?;
     let meta = parse_json_value(&file.meta_json)?;
     serialize_json_pretty(&json!({
@@ -4334,13 +4667,13 @@ fn entity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityRecord> {
 }
 
 fn entity_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityFileRecord> {
-    let storage_provider = parse_storage_provider(&row.get::<_, String>(5)?)?;
-    let validation_status = parse_validation_status(&row.get::<_, String>(20)?)?;
-    let validation_errors_json: String = row.get(21)?;
+    let storage_provider = parse_storage_provider(&row.get::<_, String>(7)?)?;
+    let validation_status = parse_validation_status(&row.get::<_, String>(22)?)?;
+    let validation_errors_json: String = row.get(23)?;
     let validation_errors = parse_json::<Vec<ConfigValidationIssue>>(&validation_errors_json)
         .map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                21,
+                23,
                 rusqlite::types::Type::Text,
                 Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
             )
@@ -4352,31 +4685,33 @@ fn entity_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityFileR
         stage_id: row.get(2)?,
         file_path: row.get(3)?,
         file_name: row.get(4)?,
+        artifact_id: row.get(5)?,
+        relation_to_source: row.get(6)?,
         storage_provider,
-        bucket: row.get(6)?,
-        key: row.get(7)?,
-        version_id: row.get(8)?,
-        etag: row.get(9)?,
-        checksum_sha256: row.get(10)?,
-        checksum: row.get(11)?,
-        file_mtime: row.get(12)?,
-        file_size: row.get::<_, i64>(13)? as u64,
-        artifact_size: row.get::<_, Option<i64>>(14)?.map(|value| value as u64),
-        payload_json: row.get(15)?,
-        meta_json: row.get(16)?,
-        current_stage: row.get(17)?,
-        next_stage: row.get(18)?,
-        status: row.get(19)?,
+        bucket: row.get(8)?,
+        key: row.get(9)?,
+        version_id: row.get(10)?,
+        etag: row.get(11)?,
+        checksum_sha256: row.get(12)?,
+        checksum: row.get(13)?,
+        file_mtime: row.get(14)?,
+        file_size: row.get::<_, i64>(15)? as u64,
+        artifact_size: row.get::<_, Option<i64>>(16)?.map(|value| value as u64),
+        payload_json: row.get(17)?,
+        meta_json: row.get(18)?,
+        current_stage: row.get(19)?,
+        next_stage: row.get(20)?,
+        status: row.get(21)?,
         validation_status,
         validation_errors,
-        is_managed_copy: row.get::<_, i64>(22)? == 1,
-        copy_source_file_id: row.get(23)?,
-        producer_run_id: row.get(24)?,
-        file_exists: row.get::<_, i64>(25)? == 1,
-        missing_since: row.get(26)?,
-        first_seen_at: row.get(27)?,
-        last_seen_at: row.get(28)?,
-        updated_at: row.get(29)?,
+        is_managed_copy: row.get::<_, i64>(24)? == 1,
+        copy_source_file_id: row.get(25)?,
+        producer_run_id: row.get(26)?,
+        file_exists: row.get::<_, i64>(27)? == 1,
+        missing_since: row.get(28)?,
+        first_seen_at: row.get(29)?,
+        last_seen_at: row.get(30)?,
+        updated_at: row.get(31)?,
     })
 }
 
@@ -4385,7 +4720,7 @@ fn parse_storage_provider(value: &str) -> rusqlite::Result<StorageProvider> {
         "local" => Ok(StorageProvider::Local),
         "s3" => Ok(StorageProvider::S3),
         other => Err(rusqlite::Error::FromSqlConversionFailure(
-            5,
+            7,
             rusqlite::types::Type::Text,
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -4525,6 +4860,45 @@ mod tests {
             retry_delay_sec: 10,
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
+            allow_empty_outputs: false,
+        }
+    }
+
+    fn s3_pointer_input(
+        entity_id: &str,
+        artifact_id: &str,
+        key: &str,
+        producer_run_id: &str,
+    ) -> RegisterS3ArtifactPointerInput {
+        RegisterS3ArtifactPointerInput {
+            entity_id: entity_id.to_string(),
+            artifact_id: artifact_id.to_string(),
+            relation_to_source: Some("child_entity".to_string()),
+            stage_id: "raw_entities".to_string(),
+            bucket: "steos-s3-data".to_string(),
+            key: key.to_string(),
+            version_id: None,
+            etag: None,
+            checksum_sha256: None,
+            size: Some(42),
+            source_file_id: None,
+            producer_run_id: Some(producer_run_id.to_string()),
+            status: StageStatus::Pending,
+        }
+    }
+
+    fn s3_stage(id: &str, input_uri: &str) -> StageDefinition {
+        StageDefinition {
+            id: id.to_string(),
+            input_folder: String::new(),
+            input_uri: Some(input_uri.to_string()),
+            output_folder: String::new(),
+            workflow_url: format!("http://localhost:5678/webhook/{id}"),
+            max_attempts: 3,
+            retry_delay_sec: 10,
+            next_stage: None,
+            save_path_aliases: Vec::new(),
+            allow_empty_outputs: false,
         }
     }
 
@@ -4704,7 +5078,7 @@ mod tests {
         let table_names = load_table_names(&connection).expect("table names");
 
         assert!(database_path.exists());
-        assert_eq!(result.schema_version, 5);
+        assert_eq!(result.schema_version, 6);
         assert!(table_names.contains(&"entity_files".to_string()));
         assert!(table_names.contains(&"entities".to_string()));
         assert!(table_names.contains(&"entity_stage_states".to_string()));
@@ -4770,7 +5144,7 @@ mod tests {
             load_entity_files_from_connection(&connection, Some("entity-1")).expect("load files");
         let events = load_app_events_from_connection(&connection, 20).expect("events");
 
-        assert_eq!(result.schema_version, 5);
+        assert_eq!(result.schema_version, 6);
         assert_eq!(entity.file_count, 1);
         assert_eq!(files.len(), 1);
         assert!(events
@@ -4792,7 +5166,144 @@ mod tests {
         let result = bootstrap_database(&database_path, &test_config(vec![stage("ingest", None)]))
             .expect("bootstrap");
 
-        assert_eq!(result.schema_version, 5);
+        assert_eq!(result.schema_version, 6);
+    }
+
+    #[test]
+    fn s3_artifact_registration_preserves_entity_identity_and_replays_idempotently() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("app.db");
+        bootstrap_database(
+            &database_path,
+            &test_config(vec![
+                stage("raw", Some("raw_entities")),
+                stage("raw_entities", None),
+            ]),
+        )
+        .expect("bootstrap");
+        let batch = vec![
+            s3_pointer_input(
+                "entity-alpha",
+                "art-alpha",
+                "main_dir/processed/raw_entities/art-alpha.json",
+                "run-1",
+            ),
+            s3_pointer_input(
+                "entity-beta",
+                "art-beta",
+                "main_dir/processed/raw_entities/art-beta.json",
+                "run-1",
+            ),
+        ];
+
+        let first = register_s3_artifact_pointers(&database_path, &batch).expect("first");
+        let second = register_s3_artifact_pointers(&database_path, &batch).expect("replay");
+        let files = list_entity_files(&database_path, None).expect("files");
+
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 2);
+        assert_eq!(first[0].entity_id, "entity-alpha");
+        assert_eq!(first[0].artifact_id.as_deref(), Some("art-alpha"));
+        assert_eq!(
+            files
+                .iter()
+                .filter(|file| file.stage_id == "raw_entities")
+                .count(),
+            2
+        );
+
+        let conflict = vec![s3_pointer_input(
+            "entity-alpha",
+            "art-alpha",
+            "main_dir/processed/raw_entities/art-alpha-conflict.json",
+            "run-1",
+        )];
+        let error = register_s3_artifact_pointers(&database_path, &conflict).expect_err("conflict");
+        assert!(error.contains("different bucket/key"));
+    }
+
+    #[test]
+    fn s3_artifact_registration_validates_full_batch_before_mutation() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("app.db");
+        bootstrap_database(
+            &database_path,
+            &test_config(vec![
+                stage("raw", Some("raw_entities")),
+                stage("raw_entities", None),
+            ]),
+        )
+        .expect("bootstrap");
+        let batch = vec![
+            s3_pointer_input(
+                "entity-alpha",
+                "art-alpha",
+                "main_dir/processed/raw_entities/art-alpha.json",
+                "run-1",
+            ),
+            s3_pointer_input(
+                "entity-beta",
+                "art-alpha",
+                "main_dir/processed/raw_entities/art-beta.json",
+                "run-1",
+            ),
+        ];
+
+        let error = register_s3_artifact_pointers(&database_path, &batch).expect_err("duplicate");
+        let files = list_entity_files(&database_path, None).expect("files");
+
+        assert!(error.contains("appears more than once"));
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn workspace_explorer_exposes_s3_pointer_metadata_without_local_actions() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(
+            &database_path,
+            &test_config(vec![s3_stage(
+                "raw_entities",
+                "s3://steos-s3-data/main_dir/processed/raw_entities",
+            )]),
+        )
+        .expect("bootstrap");
+        register_s3_artifact_pointers(
+            &database_path,
+            &[s3_pointer_input(
+                "entity-alpha",
+                "art-alpha",
+                "main_dir/processed/raw_entities/art-alpha.json",
+                "run-1",
+            )],
+        )
+        .expect("register");
+
+        let explorer = get_workspace_explorer(&workdir, &database_path).expect("explorer");
+        let stage = explorer
+            .stages
+            .iter()
+            .find(|stage| stage.stage_id == "raw_entities")
+            .expect("stage");
+        let file = stage.files.first().expect("file");
+
+        assert_eq!(stage.storage_provider, StorageProvider::S3);
+        assert_eq!(
+            stage.input_uri.as_deref(),
+            Some("s3://steos-s3-data/main_dir/processed/raw_entities")
+        );
+        assert!(stage.folder_exists);
+        assert_eq!(file.storage_provider, StorageProvider::S3);
+        assert_eq!(file.artifact_id.as_deref(), Some("art-alpha"));
+        assert_eq!(file.producer_run_id.as_deref(), Some("run-1"));
+        assert_eq!(file.bucket.as_deref(), Some("steos-s3-data"));
+        assert_eq!(
+            file.key.as_deref(),
+            Some("main_dir/processed/raw_entities/art-alpha.json")
+        );
+        assert!(!file.can_open_file);
+        assert!(!file.can_open_folder);
     }
 
     #[test]

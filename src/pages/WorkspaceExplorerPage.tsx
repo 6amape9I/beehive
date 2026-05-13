@@ -426,18 +426,26 @@ function StageTreePanel({
       <summary>
         <div>
           <strong>{stage.stage_id}</strong>
-          <span className="muted">{stage.input_folder}</span>
+          <span className="muted">{stage.input_uri ?? stage.input_folder}</span>
         </div>
         <div className="button-row">
           <StatusBadge status={stage.is_active ? "active" : "inactive"} />
-          <StatusBadge status={stage.folder_exists ? "folder_ready" : "folder_missing"} />
+          <StatusBadge
+            status={
+              stage.storage_provider === "s3"
+                ? "s3_input"
+                : stage.folder_exists
+                  ? "folder_ready"
+                  : "folder_missing"
+            }
+          />
         </div>
       </summary>
       {!stage.is_active ? (
         <p className="muted">Inactive stage: historical files remain visible, but new files are not scanned here.</p>
       ) : null}
       <div className="inline-meta">
-        <span>folder {stage.folder_path}</span>
+        <span>input {stage.input_uri ?? stage.folder_path}</span>
         <span>output {stage.output_folder ?? "not required"}</span>
         <span>next {stage.next_stage ?? "terminal"}</span>
         <span>registered {stage.counters.registered_files}</span>
@@ -491,10 +499,22 @@ function StageTreePanel({
                           <div className="stacked-cell">
                             <strong>{file.entity_id}</strong>
                             <span className="muted">file #{file.entity_file_id}</span>
+                            <span className="muted">{file.storage_provider}</span>
+                            {file.artifact_id ? <span className="muted">artifact {file.artifact_id}</span> : null}
+                            {file.relation_to_source ? <span className="muted">{file.relation_to_source}</span> : null}
+                            {file.producer_run_id ? <span className="muted">run {file.producer_run_id}</span> : null}
                           </div>
                         </td>
                         <td>
-                          <code>{file.file_path}</code>
+                          <div className="stacked-cell">
+                            <code>{file.file_path}</code>
+                            {file.storage_provider === "s3" ? (
+                              <>
+                                <span className="muted">bucket {file.bucket ?? "unknown"}</span>
+                                <span className="muted">key {file.key ?? "unknown"}</span>
+                              </>
+                            ) : null}
+                          </div>
                         </td>
                         <td>
                           {file.runtime_status ? (
@@ -510,9 +530,11 @@ function StageTreePanel({
                           <StatusBadge status={file.validation_status} />
                         </td>
                         <td>
-                          {file.file_exists
-                            ? "Present"
-                            : `Missing since ${formatDateTime(file.missing_since)}`}
+                          {file.storage_provider === "s3"
+                            ? "S3 pointer"
+                            : file.file_exists
+                              ? "Present"
+                              : `Missing since ${formatDateTime(file.missing_since)}`}
                         </td>
                         <td>
                           {file.is_managed_copy ? (
@@ -527,7 +549,10 @@ function StageTreePanel({
                           )}
                         </td>
                         <td>
-                          <code>{shortChecksum(file.checksum)}</code>
+                          <div className="stacked-cell">
+                            <code>{shortChecksum(file.checksum)}</code>
+                            <span className="muted">{file.file_size} bytes</span>
+                          </div>
                         </td>
                         <td>{formatDateTime(file.updated_at)}</td>
                         <td>
@@ -701,7 +726,20 @@ function fileMatchesFilters(file: WorkspaceFileNode, filters: ExplorerFilters) {
   if (filters.validationStatus && file.validation_status !== filters.validationStatus) return false;
   const search = filters.search.trim().toLowerCase();
   if (!search) return true;
-  return [file.entity_id, file.file_name, file.file_path, file.stage_id, file.current_stage, file.next_stage]
+  return [
+    file.entity_id,
+    file.file_name,
+    file.file_path,
+    file.stage_id,
+    file.current_stage,
+    file.next_stage,
+    file.storage_provider,
+    file.bucket,
+    file.key,
+    file.artifact_id,
+    file.relation_to_source,
+    file.producer_run_id,
+  ]
     .filter(Boolean)
     .some((value) => value!.toLowerCase().includes(search));
 }

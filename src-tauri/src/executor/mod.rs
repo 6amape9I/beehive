@@ -12,7 +12,7 @@ use crate::database::{
     block_stage_state, claim_eligible_runtime_tasks, claim_specific_runtime_task,
     find_latest_entity_file_for_stage, find_stage_by_id, finish_stage_run, insert_app_event,
     load_active_stages_from_connection, load_setting, open_connection,
-    reconcile_orphan_stage_runs_for_queued_state, register_s3_artifact_pointer,
+    reconcile_orphan_stage_runs_for_queued_state, register_s3_artifact_pointers,
     release_queued_claim, start_claimed_stage_run, update_stage_state_failure,
     update_stage_state_failure_with_reason, update_stage_state_success, FinishStageRunInput,
     NewStageRunInput, RegisterS3ArtifactPointerInput, RuntimeTaskRecord,
@@ -563,6 +563,7 @@ fn execute_s3_task(
             .unwrap_or_default()
             .to_string(),
         run_id: run_id.clone(),
+        source_entity_id: source_file.entity_id.clone(),
         source: ArtifactLocation {
             provider: StorageProvider::S3,
             local_path: None,
@@ -635,53 +636,56 @@ fn execute_s3_task(
         );
     }
 
-    let mut created_child_paths = Vec::new();
-    for output in &validated.outputs {
-        let file = match register_s3_artifact_pointer(
-            database_path,
-            &RegisterS3ArtifactPointerInput {
-                entity_id: output.output.artifact_id.clone(),
-                artifact_id: output.output.artifact_id.clone(),
-                stage_id: output.target_stage.id.clone(),
-                bucket: output
-                    .location
-                    .bucket
-                    .clone()
-                    .unwrap_or_else(|| output.output.bucket.clone()),
-                key: output
-                    .location
-                    .key
-                    .clone()
-                    .unwrap_or_else(|| output.output.key.clone()),
-                version_id: output.location.version_id.clone(),
-                etag: output.location.etag.clone(),
-                checksum_sha256: output.location.checksum_sha256.clone(),
-                size: output.location.size,
-                source_file_id: Some(source_file.id),
-                producer_run_id: Some(run_id.clone()),
-                status: StageStatus::Pending,
-            },
-        ) {
-            Ok(file) => file,
-            Err(message) => {
-                return finish_failure(
-                    &connection,
-                    &task,
-                    &run_id,
-                    attempt_no,
-                    AttemptFailure {
-                        error_type: "artifact_registration_failed".to_string(),
-                        message,
-                        http_status: Some(response.status),
-                        response_json: Some(response.body),
-                    },
-                    finished_at,
-                    duration_ms,
-                );
-            }
-        };
-        created_child_paths.push(file.file_path);
-    }
+    let output_inputs = validated
+        .outputs
+        .iter()
+        .map(|output| RegisterS3ArtifactPointerInput {
+            entity_id: output.output.entity_id.clone(),
+            artifact_id: output.output.artifact_id.clone(),
+            relation_to_source: Some(output.output.relation_to_source.as_str().to_string()),
+            stage_id: output.target_stage.id.clone(),
+            bucket: output
+                .location
+                .bucket
+                .clone()
+                .unwrap_or_else(|| output.output.bucket.clone()),
+            key: output
+                .location
+                .key
+                .clone()
+                .unwrap_or_else(|| output.output.key.clone()),
+            version_id: output.location.version_id.clone(),
+            etag: output.location.etag.clone(),
+            checksum_sha256: output.location.checksum_sha256.clone(),
+            size: output.location.size,
+            source_file_id: Some(source_file.id),
+            producer_run_id: Some(run_id.clone()),
+            status: StageStatus::Pending,
+        })
+        .collect::<Vec<_>>();
+    let registered_files = match register_s3_artifact_pointers(database_path, &output_inputs) {
+        Ok(files) => files,
+        Err(message) => {
+            return finish_failure(
+                &connection,
+                &task,
+                &run_id,
+                attempt_no,
+                AttemptFailure {
+                    error_type: "artifact_registration_failed".to_string(),
+                    message,
+                    http_status: Some(response.status),
+                    response_json: Some(response.body),
+                },
+                finished_at,
+                duration_ms,
+            );
+        }
+    };
+    let created_child_paths = registered_files
+        .iter()
+        .map(|file| file.file_path.clone())
+        .collect::<Vec<_>>();
 
     finish_stage_run(
         &connection,
@@ -1411,6 +1415,7 @@ mod tests {
                     retry_delay_sec,
                     next_stage: Some("normalized".to_string()),
                     save_path_aliases: Vec::new(),
+                    allow_empty_outputs: false,
                 },
                 StageDefinition {
                     id: "normalized".to_string(),
@@ -1422,6 +1427,7 @@ mod tests {
                     retry_delay_sec,
                     next_stage: None,
                     save_path_aliases: Vec::new(),
+                    allow_empty_outputs: false,
                 },
             ],
         }
@@ -1443,6 +1449,7 @@ mod tests {
             retry_delay_sec: 0,
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
+            allow_empty_outputs: false,
         }
     }
 
@@ -1559,7 +1566,11 @@ mod tests {
             .collect()
     }
 
-    fn s3_test_config(workflow_url: &str, raw_next_stage: Option<&str>) -> PipelineConfig {
+    fn s3_test_config_with_allow_empty_outputs(
+        workflow_url: &str,
+        raw_next_stage: Option<&str>,
+        allow_empty_outputs: bool,
+    ) -> PipelineConfig {
         PipelineConfig {
             project: ProjectConfig {
                 name: "beehive-s3-dev".to_string(),
@@ -1587,6 +1598,7 @@ mod tests {
                         "main_dir/raw".to_string(),
                         "/main_dir/raw".to_string(),
                     ],
+                    allow_empty_outputs,
                 },
                 StageDefinition {
                     id: "raw_entities".to_string(),
@@ -1603,6 +1615,7 @@ mod tests {
                         "main_dir/processed/raw_entities".to_string(),
                         "/main_dir/processed/raw_entities".to_string(),
                     ],
+                    allow_empty_outputs: false,
                 },
             ],
         }
@@ -1612,16 +1625,29 @@ mod tests {
         workflow_url: &str,
         raw_next_stage: Option<&str>,
     ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        prepare_s3_workdir_with_allow_empty_outputs(workflow_url, raw_next_stage, false)
+    }
+
+    fn prepare_s3_workdir_with_allow_empty_outputs(
+        workflow_url: &str,
+        raw_next_stage: Option<&str>,
+        allow_empty_outputs: bool,
+    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let workdir = tempdir.path().join("workdir");
         let database_path = workdir.join("app.db");
-        let config = s3_test_config(workflow_url, raw_next_stage);
+        let config = s3_test_config_with_allow_empty_outputs(
+            workflow_url,
+            raw_next_stage,
+            allow_empty_outputs,
+        );
         bootstrap_database(&database_path, &config).expect("bootstrap");
         register_s3_artifact_pointer(
             &database_path,
             &RegisterS3ArtifactPointerInput {
                 entity_id: "entity-1".to_string(),
                 artifact_id: "source-001".to_string(),
+                relation_to_source: None,
                 stage_id: "raw".to_string(),
                 bucket: "steos-s3-data".to_string(),
                 key: "main_dir/raw/input_001.json".to_string(),
@@ -1646,7 +1672,7 @@ mod tests {
   "run_id":"{run_id}",
   "source":{{"bucket":"steos-s3-data","key":"main_dir/raw/input_001.json","version_id":null,"etag":"etag-source"}},
   "status":"success",
-  "outputs":[{{"artifact_id":"art_001","bucket":"steos-s3-data","key":"{key}","save_path":"{save_path}","content_type":"application/json","checksum_sha256":null,"size":456}}],
+  "outputs":[{{"artifact_id":"art_001","entity_id":"entity-1-child","relation_to_source":"child_entity","bucket":"steos-s3-data","key":"{key}","save_path":"{save_path}","content_type":"application/json","checksum_sha256":null,"size":456}}],
   "created_at":"2026-05-12T00:00:00Z"
 }}"#
         )
@@ -1755,7 +1781,7 @@ mod tests {
     }
 
     #[test]
-    fn s3_terminal_success_with_no_outputs_marks_done() {
+    fn s3_success_with_no_outputs_requires_stage_opt_in() {
         let server = mock_server_dynamic(1, |request| {
             let run_id = header_value(request, "X-Beehive-Run-Id").expect("run header");
             (
@@ -1774,6 +1800,41 @@ mod tests {
             )
         });
         let (_tempdir, workdir, database_path) = prepare_s3_workdir(&server.url, None);
+
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+
+        assert_eq!(summary.failed, 1);
+        assert_eq!(stage_status(&database_path, "raw"), "failed");
+        assert_eq!(runs[0].error_type.as_deref(), Some("manifest_invalid"));
+        assert!(runs[0]
+            .error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("allow_empty_outputs"));
+    }
+
+    #[test]
+    fn s3_terminal_success_with_no_outputs_marks_done() {
+        let server = mock_server_dynamic(1, |request| {
+            let run_id = header_value(request, "X-Beehive-Run-Id").expect("run header");
+            (
+                200,
+                format!(
+                    r#"{{
+  "schema":"beehive.s3_artifact_manifest.v1",
+  "workspace_id":"beehive-s3-dev",
+  "run_id":"{run_id}",
+  "source":{{"bucket":"steos-s3-data","key":"main_dir/raw/input_001.json"}},
+  "status":"success",
+  "outputs":[],
+  "created_at":"2026-05-12T00:00:00Z"
+}}"#
+                ),
+            )
+        });
+        let (_tempdir, workdir, database_path) =
+            prepare_s3_workdir_with_allow_empty_outputs(&server.url, None, true);
 
         let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run");
 
@@ -2793,6 +2854,7 @@ mod tests {
                     retry_delay_sec: 0,
                     next_stage: None,
                     save_path_aliases: Vec::new(),
+                    allow_empty_outputs: false,
                 }],
             },
         )

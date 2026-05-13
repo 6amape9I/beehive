@@ -6,6 +6,8 @@ Stage 9 prepares the app for demo and first internal use with a resettable demo 
 
 `eligible stage state -> queued -> in_progress -> n8n webhook -> stage_runs -> done/retry_wait/failed -> next-stage file`
 
+S3 mode is now storage-aware: Beehive sends n8n only technical S3 pointers, validates the returned artifact manifest, and stores S3 pointer rows in SQLite. Business JSON stays in S3; Beehive keeps control-plane state, routing, attempts, lineage, and operator visibility.
+
 ## Stack
 
 - Tauri v2
@@ -119,14 +121,18 @@ The app expects `pipeline.yaml` with:
 Each stage should define:
 
 - `id`
-- `input_folder`
+- `input_folder` for local stages, or `input_uri` for S3 stages
 - `output_folder` when `next_stage` is configured
 - `workflow_url`
 - `max_attempts`
 - `retry_delay_sec`
 - optional `next_stage`
+- optional `save_path_aliases`
+- optional `allow_empty_outputs`
 
-Terminal stages, where `next_stage` is absent or empty, may omit `output_folder`. Internally this is normalized to an empty string in the current v4 schema and displayed as not required.
+Terminal stages, where `next_stage` is absent or empty, may omit `output_folder`. Internally this is normalized to an empty string in the current v6 schema and displayed as not required.
+
+In S3 mode, `allow_empty_outputs` defaults to `false`. A success manifest with zero outputs is accepted only when the source stage explicitly sets `allow_empty_outputs: true`.
 
 Runtime also supports:
 
@@ -164,6 +170,8 @@ Stage rules:
 - historical entity files, stage states, and stage runs are not deleted;
 - terminal stages may omit `output_folder`;
 - non-terminal stages with `next_stage` require `output_folder`.
+- S3 stages may use empty `input_folder` when `input_uri` is configured;
+- S3 config fields `input_uri`, `save_path_aliases`, and `allow_empty_outputs` are preserved by draft validation and save.
 
 Stage Editor does not call n8n, manage n8n workflows, move JSON files, delete runtime history, or provide a visual graph builder.
 

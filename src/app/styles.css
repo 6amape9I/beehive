@@ -348,6 +348,22 @@ textarea:focus {
   outline: 3px solid #d8eff4;
 }
 
+textarea.compact-textarea {
+  min-height: 84px;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #1f2933;
+  font-weight: 600;
+}
+
+.checkbox-row input {
+  width: auto;
+}
+
 .button-row {
   display: flex;
   flex-wrap: wrap;

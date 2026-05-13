@@ -41,10 +41,13 @@ B1 adds explicit storage metadata instead of treating S3 keys as local paths:
 - stage `input_uri`: S3 input prefix;
 - stage `save_path_aliases`: logical route aliases.
 
-SQLite remains the MVP control-plane database. Schema v5 extends existing tables:
+SQLite remains the MVP control-plane database. Schema v6 extends existing tables:
 
 - `stages.input_uri`;
 - `stages.save_path_aliases_json`;
+- `stages.allow_empty_outputs`;
+- `entity_files.artifact_id`;
+- `entity_files.relation_to_source`;
 - `entity_files.storage_provider`;
 - `entity_files.bucket`;
 - `entity_files.object_key`;
@@ -56,6 +59,8 @@ SQLite remains the MVP control-plane database. Schema v5 extends existing tables
 
 Local fields remain present for backward compatibility.
 
+`entity_id` remains the logical Beehive entity identifier used by `entities` and `entity_stage_states`. `artifact_id` is the physical output identifier from one producer run and is stored separately on `entity_files`. S3 output registration never falls back from missing `entity_id` to `artifact_id`.
+
 ## Runtime Flow
 
 S3 execution path:
@@ -64,11 +69,15 @@ S3 execution path:
 2. Beehive creates a `stage_runs` row with a technical audit envelope.
 3. Beehive sends an empty-body webhook request with S3 pointer headers.
 4. n8n returns `beehive.s3_artifact_manifest.v1`.
-5. Beehive validates schema, run id, source, output bucket, output route, and output key prefix.
-6. Valid outputs become S3 artifact pointer rows.
+5. Beehive validates schema, run id, source, output bucket, output route, output key prefix, `entity_id`, `artifact_id`, and `relation_to_source`.
+6. Valid outputs become S3 artifact pointer rows in one SQLite transaction.
 7. Source state becomes `done`; child states become `pending`.
 
 Local execution path remains the B0 payload-only behavior.
+
+Zero-output success manifests are valid only when the source stage has `allow_empty_outputs = true`. The default is false even if a stage has no `next_stage`.
+
+S3 registration is idempotent for the same `producer_run_id + artifact_id + bucket/key` and rejects conflicting replays. Duplicate `artifact_id` values inside one manifest are invalid. A `same_entity` output must use the source logical `entity_id`; child or representation outputs still need an explicit `entity_id`.
 
 ## Route Safety
 
@@ -82,4 +91,4 @@ Rejected forms include empty strings, `..`, Windows drive paths, UNC paths, abso
 
 ## B1 Boundaries
 
-B1 does not call real S3, list buckets, manage credentials, poll async manifests, manage n8n workflows, or implement a scheduler. B2 should add real S3 reconciliation and a one-artifact n8n smoke pipeline.
+B1/B1.1 do not call real S3, list buckets, poll async manifests, manage n8n workflows, or implement a scheduler. B2 should add real S3 reconciliation and a one-artifact n8n smoke pipeline.

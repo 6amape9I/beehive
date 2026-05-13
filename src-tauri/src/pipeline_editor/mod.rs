@@ -14,7 +14,7 @@ use crate::domain::{
     AppEventLevel, CommandErrorInfo, ConfigValidationIssue, ConfigValidationResult, PipelineConfig,
     PipelineConfigDraft, PipelineEditorState, ProjectConfig, ProjectConfigDraft, RuntimeConfig,
     RuntimeConfigDraft, SavePipelineConfigResult, StageDefinition, StageDefinitionDraft,
-    StageUsageSummary, ValidatePipelineConfigDraftResult, ValidationSeverity,
+    StageUsageSummary, StorageProvider, ValidatePipelineConfigDraftResult, ValidationSeverity,
 };
 use crate::workdir::{self, path_string};
 
@@ -284,6 +284,7 @@ fn validate_draft(
                 retry_delay_sec: stage.retry_delay_sec as u64,
                 next_stage: normalize_optional(&stage.next_stage),
                 save_path_aliases: stage.save_path_aliases.clone(),
+                allow_empty_outputs: stage.allow_empty_outputs,
             })
             .collect(),
     };
@@ -312,6 +313,10 @@ fn validate_stage_drafts(
     usages: &[StageUsageSummary],
     issues: &mut Vec<ConfigValidationIssue>,
 ) {
+    let is_s3_mode = draft
+        .storage
+        .as_ref()
+        .is_some_and(|storage| storage.provider == StorageProvider::S3);
     let usage_ids = usages
         .iter()
         .map(|usage| usage.stage_id.as_str())
@@ -376,7 +381,7 @@ fn validate_stage_drafts(
         validate_stage_folder(
             paths,
             &stage.input_folder,
-            true,
+            !is_s3_mode,
             "invalid_stage_input_folder",
             &format!("{prefix}.input_folder"),
             "input_folder must be a relative path inside the workdir.",
@@ -722,6 +727,7 @@ fn draft_from_config(config: &PipelineConfig) -> PipelineConfigDraft {
                 retry_delay_sec: stage.retry_delay_sec as i64,
                 next_stage: stage.next_stage.clone(),
                 save_path_aliases: stage.save_path_aliases.clone(),
+                allow_empty_outputs: stage.allow_empty_outputs,
                 original_stage_id: Some(stage.id.clone()),
                 is_new: false,
             })
@@ -880,6 +886,7 @@ mod tests {
             retry_delay_sec: 10,
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
+            allow_empty_outputs: false,
         }
     }
 
@@ -926,6 +933,7 @@ mod tests {
             retry_delay_sec: 10,
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
+            allow_empty_outputs: false,
             original_stage_id: None,
             is_new: true,
         }

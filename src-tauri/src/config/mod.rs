@@ -52,6 +52,7 @@ struct RawStageDefinition {
     retry_delay_sec: Option<i64>,
     next_stage: Option<String>,
     save_path_aliases: Option<Vec<String>>,
+    allow_empty_outputs: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -442,6 +443,7 @@ fn build_stages(
                 retry_delay_sec: retry_delay_sec.max(0) as u64,
                 next_stage,
                 save_path_aliases,
+                allow_empty_outputs: raw_stage.allow_empty_outputs.unwrap_or(false),
             });
         }
     }

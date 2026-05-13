@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::database::{find_entity_file_by_id, open_connection};
+use crate::domain::StorageProvider;
 use crate::file_ops::canonical_registered_file_path;
 use crate::workdir::path_string;
 
@@ -19,6 +20,12 @@ pub fn resolve_entity_open_path(
     let connection = open_connection(database_path)?;
     let file = find_entity_file_by_id(&connection, entity_file_id)?
         .ok_or_else(|| format!("Entity file id '{entity_file_id}' was not found."))?;
+    if file.storage_provider == StorageProvider::S3 {
+        return Err(format!(
+            "S3 artifact pointer '{}' is not a local file and cannot be opened.",
+            file.file_path
+        ));
+    }
     let file_path = canonical_registered_file_path(workdir_path, &file.file_path, false)?;
 
     match kind {
@@ -92,6 +99,7 @@ mod tests {
                 retry_delay_sec: 10,
                 next_stage: None,
                 save_path_aliases: Vec::new(),
+                allow_empty_outputs: false,
             }],
         }
     }

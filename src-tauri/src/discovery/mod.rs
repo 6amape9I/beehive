@@ -222,6 +222,9 @@ fn ensure_stage_directories_for_stages(
     let mut created_paths = Vec::new();
 
     for stage in stages {
+        if stage.input_folder.trim().is_empty() {
+            continue;
+        }
         let input_path = workdir_path.join(&stage.input_folder);
         create_directory_if_missing(&input_path, &mut created_paths)?;
 
@@ -262,6 +265,9 @@ fn scan_stage(
     summary: &mut MutableScanSummary,
     newly_registered_entities: &mut HashSet<String>,
 ) -> Result<(), String> {
+    if stage.input_folder.trim().is_empty() {
+        return Ok(());
+    }
     let input_dir = workdir_path.join(&stage.input_folder);
     if !input_dir.exists() || !input_dir.is_dir() {
         return Ok(());
@@ -516,6 +522,8 @@ fn process_json_file(
         stage_id: stage.id.clone(),
         file_path: file_path_string.clone(),
         file_name,
+        artifact_id: None,
+        relation_to_source: None,
         storage_provider: StorageProvider::Local,
         bucket: None,
         key: None,
@@ -829,6 +837,7 @@ mod tests {
             retry_delay_sec: 10,
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
+            allow_empty_outputs: false,
         }
     }
 

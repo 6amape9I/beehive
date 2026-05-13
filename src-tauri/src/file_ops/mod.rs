@@ -832,6 +832,8 @@ pub fn save_entity_file_business_json(
             stage_id: file.stage_id.clone(),
             file_path: file.file_path.clone(),
             file_name: file.file_name.clone(),
+            artifact_id: file.artifact_id.clone(),
+            relation_to_source: file.relation_to_source.clone(),
             storage_provider: file.storage_provider.clone(),
             bucket: file.bucket.clone(),
             key: file.key.clone(),
@@ -1454,6 +1456,8 @@ fn register_target_file(
             stage_id: target_stage_id.to_string(),
             file_path: path_string(target_path),
             file_name: file_name.to_string(),
+            artifact_id: None,
+            relation_to_source: None,
             storage_provider: StorageProvider::Local,
             bucket: None,
             key: None,
@@ -1556,6 +1560,7 @@ mod tests {
             retry_delay_sec: 10,
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
+            allow_empty_outputs: false,
         }
     }
 

@@ -59,6 +59,7 @@ export interface StageDefinition {
   retry_delay_sec: number;
   next_stage: string | null;
   save_path_aliases?: string[];
+  allow_empty_outputs?: boolean;
 }
 
 export interface PipelineConfig {
@@ -91,6 +92,7 @@ export interface StageDefinitionDraft {
   retry_delay_sec: number;
   next_stage: string | null;
   save_path_aliases?: string[];
+  allow_empty_outputs?: boolean;
   original_stage_id: string | null;
   is_new: boolean;
 }
@@ -221,6 +223,7 @@ export interface StageRecord {
   retry_delay_sec: number;
   next_stage: string | null;
   save_path_aliases: string[];
+  allow_empty_outputs: boolean;
   is_active: boolean;
   archived_at: string | null;
   last_seen_in_config_at: string | null;
@@ -291,6 +294,8 @@ export interface EntityFileRecord {
   stage_id: string;
   file_path: string;
   file_name: string;
+  artifact_id: string | null;
+  relation_to_source: string | null;
   storage_provider: StorageProvider;
   bucket: string | null;
   key: string | null;
@@ -637,6 +642,12 @@ export interface WorkspaceFileNode {
   stage_id: string;
   file_name: string;
   file_path: string;
+  storage_provider: StorageProvider;
+  bucket: string | null;
+  key: string | null;
+  artifact_id: string | null;
+  relation_to_source: string | null;
+  producer_run_id: string | null;
   file_exists: boolean;
   missing_since: string | null;
   is_managed_copy: boolean;
@@ -685,6 +696,8 @@ export interface WorkspaceStageTreeCounters {
 export interface WorkspaceStageTree {
   stage_id: string;
   input_folder: string;
+  input_uri: string | null;
+  storage_provider: StorageProvider;
   output_folder: string | null;
   workflow_url: string | null;
   next_stage: string | null;

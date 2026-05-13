@@ -33,11 +33,14 @@ function makeNewStage(existingIds: string[]): StageDefinitionDraft {
   return {
     id,
     input_folder: `stages/${id}`,
+    input_uri: null,
     output_folder: `stages/${id}_out`,
     workflow_url: `http://localhost:5678/webhook/${id}`,
     max_attempts: 3,
     retry_delay_sec: 10,
     next_stage: null,
+    save_path_aliases: [],
+    allow_empty_outputs: false,
     original_stage_id: null,
     is_new: true,
   };
