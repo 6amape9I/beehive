@@ -9,11 +9,16 @@ import {
   getWorkspaceExplorer,
   openEntityFile,
   openEntityFolder,
+  reconcileS3Workspace,
+  registerS3SourceArtifact,
+  runDueTasksLimited,
   scanWorkspace,
 } from "../lib/runtimeApi";
 import type {
   CommandErrorInfo,
   EntityValidationStatus,
+  RegisterS3SourceArtifactRequest,
+  S3ReconciliationSummary,
   WorkspaceEntityTrail,
   WorkspaceExplorerResult,
   WorkspaceFileNode,
@@ -31,6 +36,18 @@ interface ExplorerFilters {
   showManaged: boolean;
 }
 
+interface ManualS3RegistrationForm {
+  stage_id: string;
+  entity_id: string;
+  artifact_id: string;
+  bucket: string;
+  key: string;
+  version_id: string;
+  etag: string;
+  checksum_sha256: string;
+  size: string;
+}
+
 const defaultFilters: ExplorerFilters = {
   search: "",
   stageId: "",
@@ -40,6 +57,18 @@ const defaultFilters: ExplorerFilters = {
   showInvalid: true,
   showInactive: true,
   showManaged: true,
+};
+
+const defaultManualS3RegistrationForm: ManualS3RegistrationForm = {
+  stage_id: "",
+  entity_id: "",
+  artifact_id: "",
+  bucket: "",
+  key: "",
+  version_id: "",
+  etag: "",
+  checksum_sha256: "",
+  size: "",
 };
 
 export function WorkspaceExplorerPage() {
@@ -52,6 +81,11 @@ export function WorkspaceExplorerPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [activeAction, setActiveAction] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [s3Summary, setS3Summary] = useState<S3ReconciliationSummary | null>(null);
+  const [manualS3Registration, setManualS3Registration] = useState<ManualS3RegistrationForm>(
+    defaultManualS3RegistrationForm,
+  );
+  const [batchLimit, setBatchLimit] = useState(3);
 
   const workdirPath = state.selected_workdir_path;
   const canQueryRuntime = state.phase === "fully_initialized" && !!workdirPath;
@@ -81,6 +115,20 @@ export function WorkspaceExplorerPage() {
   useEffect(() => {
     void loadExplorer();
   }, [loadExplorer]);
+
+  useEffect(() => {
+    if (!explorer) return;
+    const firstS3Stage = explorer.stages.find(isS3CapableStage);
+    if (!firstS3Stage) return;
+    setManualS3Registration((current) => {
+      if (current.stage_id || current.bucket) return current;
+      return {
+        ...current,
+        stage_id: firstS3Stage.stage_id,
+        bucket: bucketFromS3Uri(firstS3Stage.input_uri) ?? "",
+      };
+    });
+  }, [explorer]);
 
   const stageOptions = useMemo(
     () => explorer?.stages.map((stage) => stage.stage_id) ?? [],
@@ -140,6 +188,96 @@ export function WorkspaceExplorerPage() {
           : "Scan finished with no summary.",
       );
       await loadExplorer();
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
+  async function handleReconcileS3() {
+    if (!workdirPath) return;
+    setActiveAction("s3-reconcile");
+    setActionMessage(null);
+    try {
+      const result = await reconcileS3Workspace(workdirPath);
+      setErrors(result.errors);
+      setS3Summary(result.summary);
+      setActionMessage(
+        result.summary
+          ? `S3 reconciliation complete: ${result.summary.registered_file_count} registered, ${result.summary.updated_file_count} updated, ${result.summary.unmapped_object_count} unmapped.`
+          : "S3 reconciliation finished with no summary.",
+      );
+      await loadExplorer();
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
+  async function handleManualS3Registration() {
+    if (!workdirPath) return;
+    const size = manualS3Registration.size.trim()
+      ? Number(manualS3Registration.size.trim())
+      : null;
+    if (size !== null && (!Number.isFinite(size) || size < 0)) {
+      setActionMessage("S3 size must be an empty value or a non-negative number.");
+      return;
+    }
+    const input: RegisterS3SourceArtifactRequest = {
+      stage_id: manualS3Registration.stage_id.trim(),
+      entity_id: manualS3Registration.entity_id.trim(),
+      artifact_id: manualS3Registration.artifact_id.trim(),
+      bucket: manualS3Registration.bucket.trim(),
+      key: manualS3Registration.key.trim(),
+      version_id: optionalText(manualS3Registration.version_id),
+      etag: optionalText(manualS3Registration.etag),
+      checksum_sha256: optionalText(manualS3Registration.checksum_sha256),
+      size,
+    };
+
+    setActiveAction("s3-register");
+    setActionMessage(null);
+    try {
+      const result = await registerS3SourceArtifact(workdirPath, input);
+      setErrors(result.errors);
+      setActionMessage(
+        result.payload
+          ? `S3 artifact registered: ${result.payload.file.entity_id} / ${result.payload.file.artifact_id ?? result.payload.file.key ?? "artifact"}.`
+          : "S3 registration finished without a registered artifact.",
+      );
+      await loadExplorer();
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
+  async function handleRunSmallBatch() {
+    if (!workdirPath) return;
+    setActiveAction("s3-batch");
+    setActionMessage(null);
+    try {
+      const result = await runDueTasksLimited(workdirPath, batchLimit);
+      setErrors(result.errors);
+      setActionMessage(
+        result.summary
+          ? `Small batch complete: ${result.summary.claimed} claimed, ${result.summary.succeeded} succeeded, ${result.summary.retry_scheduled} retry, ${result.summary.failed} failed, ${result.summary.blocked} blocked.`
+          : "Small batch finished with no summary.",
+      );
+      await loadExplorer();
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
+  async function handleCopyS3Uri(file: WorkspaceFileNode) {
+    const uri = s3UriForFile(file);
+    if (!uri) return;
+    setActiveAction(`copy:${file.entity_file_id}`);
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(uri);
+        setActionMessage(`Copied ${uri}`);
+      } else {
+        setActionMessage(uri);
+      }
     } finally {
       setActiveAction(null);
     }
@@ -209,6 +347,19 @@ export function WorkspaceExplorerPage() {
       ) : explorer ? (
         <>
           <ExplorerSummary explorer={explorer} />
+          <S3OperatorPanel
+            activeAction={activeAction}
+            batchLimit={batchLimit}
+            disabled={!canQueryRuntime || isLoading}
+            form={manualS3Registration}
+            stages={explorer.stages}
+            summary={s3Summary}
+            onBatchLimitChange={setBatchLimit}
+            onFormChange={setManualS3Registration}
+            onReconcile={() => void handleReconcileS3()}
+            onRegister={() => void handleManualS3Registration()}
+            onRunBatch={() => void handleRunSmallBatch()}
+          />
           <ExplorerFiltersPanel
             filters={filters}
             stageOptions={stageOptions}
@@ -231,6 +382,7 @@ export function WorkspaceExplorerPage() {
                     onSelectFile={setSelectedFileId}
                     onOpenFile={(fileId) => void handleOpen("file", fileId)}
                     onOpenFolder={(fileId) => void handleOpen("folder", fileId)}
+                    onCopyS3Uri={(file) => void handleCopyS3Uri(file)}
                     onGoToEntity={goToEntity}
                   />
                 ))}
@@ -251,6 +403,225 @@ export function WorkspaceExplorerPage() {
           <p className="empty-text">Workspace explorer data is not available.</p>
         </section>
       )}
+    </div>
+  );
+}
+
+interface S3OperatorPanelProps {
+  activeAction: string | null;
+  batchLimit: number;
+  disabled: boolean;
+  form: ManualS3RegistrationForm;
+  stages: WorkspaceStageTree[];
+  summary: S3ReconciliationSummary | null;
+  onBatchLimitChange: (value: number) => void;
+  onFormChange: (form: ManualS3RegistrationForm) => void;
+  onReconcile: () => void;
+  onRegister: () => void;
+  onRunBatch: () => void;
+}
+
+function S3OperatorPanel({
+  activeAction,
+  batchLimit,
+  disabled,
+  form,
+  stages,
+  summary,
+  onBatchLimitChange,
+  onFormChange,
+  onReconcile,
+  onRegister,
+  onRunBatch,
+}: S3OperatorPanelProps) {
+  const s3Stages = stages.filter(isS3CapableStage);
+  const canRegister =
+    !disabled &&
+    !!form.stage_id.trim() &&
+    !!form.entity_id.trim() &&
+    !!form.artifact_id.trim() &&
+    !!form.bucket.trim() &&
+    !!form.key.trim();
+
+  function updateField(key: keyof ManualS3RegistrationForm, value: string) {
+    onFormChange({ ...form, [key]: value });
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-heading">
+        <div>
+          <h2>S3 Operator Console</h2>
+          <span className="muted">{s3Stages.length} S3-capable stage(s)</span>
+        </div>
+        <div className="button-row">
+          <button
+            type="button"
+            className="button secondary"
+            disabled={disabled || activeAction === "s3-reconcile"}
+            onClick={onReconcile}
+          >
+            {activeAction === "s3-reconcile" ? "Reconciling..." : "Reconcile S3"}
+          </button>
+          <label className="inline-field">
+            Batch
+            <input
+              type="number"
+              min={1}
+              max={5}
+              value={batchLimit}
+              disabled={disabled || activeAction === "s3-batch"}
+              onChange={(event) => onBatchLimitChange(Number(event.target.value))}
+            />
+          </label>
+          <button
+            type="button"
+            className="button primary"
+            disabled={disabled || activeAction === "s3-batch"}
+            onClick={onRunBatch}
+          >
+            {activeAction === "s3-batch" ? "Running..." : "Run small batch"}
+          </button>
+        </div>
+      </div>
+
+      {summary ? (
+        <div className="summary-card-grid">
+          <SummaryCard label="Stages" value={summary.stage_count} />
+          <SummaryCard label="Listed" value={summary.listed_object_count} />
+          <SummaryCard label="Tagged" value={summary.metadata_tagged_count} />
+          <SummaryCard label="Registered" value={summary.registered_file_count} />
+          <SummaryCard label="Updated" value={summary.updated_file_count} />
+          <SummaryCard label="Unchanged" value={summary.unchanged_file_count} />
+          <SummaryCard label="Missing" value={summary.missing_file_count} />
+          <SummaryCard label="Restored" value={summary.restored_file_count} />
+          <SummaryCard label="Unmapped" value={summary.unmapped_object_count} />
+          <SummaryCard label="Elapsed ms" value={summary.elapsed_ms} />
+          <SummaryCard label="Latest" value={formatDateTime(summary.latest_reconciliation_at)} />
+        </div>
+      ) : null}
+
+      <div className="stage-editor-form-grid">
+        <div className="form-row">
+          <label htmlFor="s3-register-stage">Stage</label>
+          <select
+            id="s3-register-stage"
+            value={form.stage_id}
+            disabled={disabled || activeAction === "s3-register"}
+            onChange={(event) => {
+              const stage = s3Stages.find((item) => item.stage_id === event.target.value);
+              onFormChange({
+                ...form,
+                stage_id: event.target.value,
+                bucket: form.bucket || bucketFromS3Uri(stage?.input_uri) || "",
+              });
+            }}
+          >
+            <option value="">Select stage</option>
+            {s3Stages.map((stage) => (
+              <option key={stage.stage_id} value={stage.stage_id}>
+                {stage.stage_id}
+              </option>
+            ))}
+          </select>
+        </div>
+        <S3RegistrationInput
+          disabled={disabled || activeAction === "s3-register"}
+          id="s3-register-entity"
+          label="Entity ID"
+          value={form.entity_id}
+          onChange={(value) => updateField("entity_id", value)}
+        />
+        <S3RegistrationInput
+          disabled={disabled || activeAction === "s3-register"}
+          id="s3-register-artifact"
+          label="Artifact ID"
+          value={form.artifact_id}
+          onChange={(value) => updateField("artifact_id", value)}
+        />
+        <S3RegistrationInput
+          disabled={disabled || activeAction === "s3-register"}
+          id="s3-register-bucket"
+          label="Bucket"
+          value={form.bucket}
+          onChange={(value) => updateField("bucket", value)}
+        />
+        <S3RegistrationInput
+          disabled={disabled || activeAction === "s3-register"}
+          id="s3-register-key"
+          label="Key"
+          value={form.key}
+          onChange={(value) => updateField("key", value)}
+        />
+        <S3RegistrationInput
+          disabled={disabled || activeAction === "s3-register"}
+          id="s3-register-version"
+          label="Version ID"
+          value={form.version_id}
+          onChange={(value) => updateField("version_id", value)}
+        />
+        <S3RegistrationInput
+          disabled={disabled || activeAction === "s3-register"}
+          id="s3-register-etag"
+          label="ETag"
+          value={form.etag}
+          onChange={(value) => updateField("etag", value)}
+        />
+        <S3RegistrationInput
+          disabled={disabled || activeAction === "s3-register"}
+          id="s3-register-checksum"
+          label="SHA-256"
+          value={form.checksum_sha256}
+          onChange={(value) => updateField("checksum_sha256", value)}
+        />
+        <S3RegistrationInput
+          disabled={disabled || activeAction === "s3-register"}
+          id="s3-register-size"
+          label="Size"
+          type="number"
+          value={form.size}
+          onChange={(value) => updateField("size", value)}
+        />
+      </div>
+      <div className="button-row">
+        <button
+          type="button"
+          className="button secondary"
+          disabled={!canRegister || activeAction === "s3-register"}
+          onClick={onRegister}
+        >
+          {activeAction === "s3-register" ? "Registering..." : "Register S3 source"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function S3RegistrationInput({
+  disabled,
+  id,
+  label,
+  onChange,
+  type = "text",
+  value,
+}: {
+  disabled: boolean;
+  id: string;
+  label: string;
+  onChange: (value: string) => void;
+  type?: "text" | "number";
+  value: string;
+}) {
+  return (
+    <div className="form-row">
+      <label htmlFor={id}>{label}</label>
+      <input
+        id={id}
+        type={type}
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+      />
     </div>
   );
 }
@@ -409,6 +780,7 @@ interface StageTreePanelProps {
   onSelectFile: (fileId: number) => void;
   onOpenFile: (fileId: number) => void;
   onOpenFolder: (fileId: number) => void;
+  onCopyS3Uri: (file: WorkspaceFileNode) => void;
   onGoToEntity: (file: WorkspaceFileNode) => void;
 }
 
@@ -419,6 +791,7 @@ function StageTreePanel({
   onSelectFile,
   onOpenFile,
   onOpenFolder,
+  onCopyS3Uri,
   onGoToEntity,
 }: StageTreePanelProps) {
   return (
@@ -490,6 +863,8 @@ function StageTreePanel({
                     const busy =
                       activeAction === `file:${file.entity_file_id}` ||
                       activeAction === `folder:${file.entity_file_id}`;
+                    const isS3 = file.storage_provider === "s3";
+                    const s3Uri = s3UriForFile(file);
                     return (
                       <tr
                         key={file.entity_file_id}
@@ -499,7 +874,7 @@ function StageTreePanel({
                           <div className="stacked-cell">
                             <strong>{file.entity_id}</strong>
                             <span className="muted">file #{file.entity_file_id}</span>
-                            <span className="muted">{file.storage_provider}</span>
+                            <span className="muted">{isS3 ? "s3 pointer" : file.storage_provider}</span>
                             {file.artifact_id ? <span className="muted">artifact {file.artifact_id}</span> : null}
                             {file.relation_to_source ? <span className="muted">{file.relation_to_source}</span> : null}
                             {file.producer_run_id ? <span className="muted">run {file.producer_run_id}</span> : null}
@@ -508,7 +883,7 @@ function StageTreePanel({
                         <td>
                           <div className="stacked-cell">
                             <code>{file.file_path}</code>
-                            {file.storage_provider === "s3" ? (
+                            {isS3 ? (
                               <>
                                 <span className="muted">bucket {file.bucket ?? "unknown"}</span>
                                 <span className="muted">key {file.key ?? "unknown"}</span>
@@ -530,11 +905,18 @@ function StageTreePanel({
                           <StatusBadge status={file.validation_status} />
                         </td>
                         <td>
-                          {file.storage_provider === "s3"
-                            ? "S3 pointer"
-                            : file.file_exists
-                              ? "Present"
-                              : `Missing since ${formatDateTime(file.missing_since)}`}
+                          {isS3 ? (
+                            <div className="stacked-cell">
+                              <span>S3 pointer</span>
+                              <span className="muted">
+                                {file.file_exists ? "registered" : `missing since ${formatDateTime(file.missing_since)}`}
+                              </span>
+                            </div>
+                          ) : file.file_exists ? (
+                            "Present"
+                          ) : (
+                            `Missing since ${formatDateTime(file.missing_since)}`
+                          )}
                         </td>
                         <td>
                           {file.is_managed_copy ? (
@@ -579,6 +961,16 @@ function StageTreePanel({
                             <button type="button" className="button secondary" onClick={() => onGoToEntity(file)}>
                               Entity
                             </button>
+                            {isS3 ? (
+                              <button
+                                type="button"
+                                className="button secondary"
+                                disabled={!s3Uri || activeAction === `copy:${file.entity_file_id}`}
+                                onClick={() => onCopyS3Uri(file)}
+                              >
+                                Copy S3 URI
+                              </button>
+                            ) : null}
                           </div>
                         </td>
                       </tr>
@@ -753,4 +1145,24 @@ function invalidItemMatchesSearch(
   return [item.file_name, item.file_path, item.code, item.message]
     .filter(Boolean)
     .some((value) => value.toLowerCase().includes(search));
+}
+
+function optionalText(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function isS3CapableStage(stage: WorkspaceStageTree): boolean {
+  return stage.storage_provider === "s3" || stage.input_uri?.startsWith("s3://") === true;
+}
+
+function bucketFromS3Uri(inputUri?: string | null): string | null {
+  if (!inputUri?.startsWith("s3://")) return null;
+  const withoutScheme = inputUri.slice("s3://".length);
+  return withoutScheme.split("/")[0] || null;
+}
+
+function s3UriForFile(file: WorkspaceFileNode): string | null {
+  if (file.storage_provider !== "s3" || !file.bucket || !file.key) return null;
+  return `s3://${file.bucket}/${file.key}`;
 }

@@ -4,7 +4,6 @@ use std::time::Instant;
 use chrono::{DateTime, Duration, Utc};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
-use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -24,6 +23,7 @@ use crate::domain::{
 };
 use crate::file_ops;
 use crate::file_safety::read_stable_file;
+use crate::s3_control_envelope::{S3ControlEnvelope, S3ControlEnvelopeParts};
 use crate::s3_manifest::{
     parse_and_validate_s3_manifest, S3ManifestStatus, S3ManifestValidationContext,
     S3ManifestValidationErrorKind,
@@ -464,8 +464,7 @@ fn execute_s3_task(
         );
     };
     let target_prefix = resolve_s3_control_target_prefix(&source_stage, &active_stages, &storage)?;
-    let control_envelope = S3ControlEnvelope {
-        schema: "beehive.s3_control_envelope.v1".to_string(),
+    let control_envelope = S3ControlEnvelope::from_parts(S3ControlEnvelopeParts {
         workspace_id: workspace_id.clone(),
         run_id: run_id.clone(),
         stage_id: task.stage_id.clone(),
@@ -479,7 +478,7 @@ fn execute_s3_task(
         workspace_prefix: storage.workspace_prefix.clone(),
         target_prefix: target_prefix.clone(),
         save_path: target_prefix,
-    };
+    });
     let request_json = serde_json::to_value(&control_envelope)
         .map_err(|error| format!("Failed to serialize S3 control envelope: {error}"))?;
     let stage_run_input = NewStageRunInput {
@@ -948,24 +947,6 @@ fn call_webhook(
     Ok(HttpResponse { status, body })
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct S3ControlEnvelope {
-    schema: String,
-    workspace_id: String,
-    run_id: String,
-    stage_id: String,
-    source_bucket: String,
-    source_key: String,
-    source_version_id: Option<String>,
-    source_etag: Option<String>,
-    source_entity_id: String,
-    source_artifact_id: String,
-    manifest_prefix: String,
-    workspace_prefix: String,
-    target_prefix: String,
-    save_path: String,
-}
-
 fn call_s3_control_webhook(
     workflow_url: &str,
     control_envelope: &S3ControlEnvelope,
@@ -982,7 +963,7 @@ fn call_s3_control_webhook(
         })?;
     let response = client
         .post(workflow_url)
-        .header(CONTENT_TYPE, "application/json")
+        .header(CONTENT_TYPE, "application/json; charset=utf-8")
         .header(ACCEPT, "application/json")
         .json(control_envelope)
         .send()
@@ -1777,7 +1758,7 @@ mod tests {
         assert_eq!(summary.succeeded, 1);
         assert_eq!(
             header_value(request, "Content-Type").as_deref(),
-            Some("application/json")
+            Some("application/json; charset=utf-8")
         );
         assert_eq!(
             control["schema"].as_str(),

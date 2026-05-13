@@ -124,6 +124,13 @@ export async function runDueTasks(path: string): Promise<RunDueTasksResult> {
   return invoke<RunDueTasksResult>("run_due_tasks", { path });
 }
 
+export async function runDueTasksLimited(
+  path: string,
+  maxTasks: number,
+): Promise<RunDueTasksResult> {
+  return invoke<RunDueTasksResult>("run_due_tasks_limited", { path, maxTasks });
+}
+
 export async function runEntityStage(
   path: string,
   entityId: string,

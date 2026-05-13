@@ -849,9 +849,122 @@ mod tests {
     #[test]
     #[ignore = "real S3+n8n smoke; requires .env, uploaded smoke objects, and imported n8n workflow"]
     fn real_s3_n8n_smoke_one_artifact() {
+        let report = run_real_s3_n8n_smoke(
+            "/tmp/beehive_s3_smoke_workdir",
+            1,
+            false,
+            "beehive.s3_single_smoke_report.v1",
+        )
+        .expect("real S3+n8n smoke");
+        let run = report.runs.first().expect("single smoke run evidence");
+
+        assert_eq!(
+            report.claimed, 1,
+            "expected exactly one claimed smoke source"
+        );
+        assert_eq!(
+            report.succeeded, 1,
+            "expected one successful real n8n smoke run"
+        );
+        assert_eq!(run.source_status, "done");
+        assert_eq!(run.child_status, "pending");
+        assert!(run.s3_output_exists);
+
+        println!("B2_1_SOURCE_KEY={}", run.source_key);
+        println!("B2_1_RUN_ID={}", run.run_id);
+        println!("B2_1_STAGE_RUN_SUCCESS=true");
+        println!("B2_1_OUTPUT_ARTIFACT_ID={}", run.output_artifact_id);
+        println!("B2_1_OUTPUT_KEY={}", run.output_key);
+        println!("B2_1_SOURCE_STATE={}", run.source_status);
+        println!("B2_1_CHILD_STATE={}", run.child_status);
+        println!("B2_1_S3_OUTPUT_EXISTS=true size={:?}", run.s3_output_size);
+        println!("B2_1_REPORT={}", report.report_path.display());
+    }
+
+    #[test]
+    #[ignore = "real S3+n8n batch smoke; requires .env, uploaded smoke objects, and imported BODY_JSON n8n workflow"]
+    fn real_s3_n8n_smoke_batch_small() {
+        require_real_batch_smoke_opt_in();
+        let limit = batch_smoke_limit();
+        let report = run_real_s3_n8n_smoke(
+            "/tmp/beehive_s3_batch_smoke_workdir",
+            limit,
+            true,
+            "beehive.s3_batch_smoke_report.v1",
+        )
+        .expect("real S3+n8n batch smoke");
+
+        assert_eq!(report.claimed, limit, "expected claimed batch size");
+        assert_eq!(report.succeeded, limit, "expected successful batch size");
+        assert_eq!(report.runs.len() as u64, limit);
+        for run in &report.runs {
+            assert_eq!(run.source_status, "done");
+            assert_eq!(run.child_status, "pending");
+            assert!(run.s3_output_exists);
+        }
+
+        println!("B3_BATCH_SMOKE_LIMIT={limit}");
+        println!("B3_BATCH_SMOKE_CLAIMED={}", report.claimed);
+        println!("B3_BATCH_SMOKE_SUCCEEDED={}", report.succeeded);
+        println!("B3_BATCH_SMOKE_REPORT={}", report.report_path.display());
+        for run in &report.runs {
+            println!(
+                "B3_BATCH_SMOKE_RUN run_id={} source_key={} output_key={} source_state={} child_state={} s3_output_exists={} size={:?}",
+                run.run_id,
+                run.source_key,
+                run.output_key,
+                run.source_status,
+                run.child_status,
+                run.s3_output_exists,
+                run.s3_output_size
+            );
+        }
+    }
+
+    struct RealSmokeReport {
+        report_path: PathBuf,
+        claimed: u64,
+        succeeded: u64,
+        runs: Vec<RealSmokeRunEvidence>,
+    }
+
+    struct RealSmokeRunEvidence {
+        run_id: String,
+        source_key: String,
+        output_artifact_id: String,
+        output_key: String,
+        source_status: String,
+        child_status: String,
+        s3_output_exists: bool,
+        s3_output_size: Option<u64>,
+    }
+
+    fn batch_smoke_limit() -> u64 {
+        env::var("BEEHIVE_SMOKE_BATCH_LIMIT")
+            .or_else(|_| env::var("BEEHIVE_BATCH_SMOKE_LIMIT"))
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(3)
+            .clamp(3, 5)
+    }
+
+    fn require_real_batch_smoke_opt_in() {
+        assert_eq!(
+            env::var("BEEHIVE_REAL_S3_BATCH_SMOKE").as_deref(),
+            Ok("1"),
+            "set BEEHIVE_REAL_S3_BATCH_SMOKE=1 to run the real S3+n8n batch smoke"
+        );
+    }
+
+    fn run_real_s3_n8n_smoke(
+        workdir_path: &str,
+        limit: u64,
+        reset_database: bool,
+        report_schema: &str,
+    ) -> Result<RealSmokeReport, String> {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .expect("repo root")
+            .ok_or_else(|| "missing repo root".to_string())?
             .to_path_buf();
         let env_values = load_smoke_env(&repo_root.join(".env"));
         let s3_host = required_smoke_env(&env_values, "S3_HOST");
@@ -870,18 +983,29 @@ mod tests {
         env::set_var("BEEHIVE_S3_ENDPOINT", &endpoint);
         env::set_var("BEEHIVE_S3_REGION", &s3_region);
 
-        let workdir = PathBuf::from("/tmp/beehive_s3_smoke_workdir");
-        fs::create_dir_all(&workdir).expect("create smoke workdir");
+        let workdir = PathBuf::from(workdir_path);
+        fs::create_dir_all(&workdir).map_err(|error| format!("create smoke workdir: {error}"))?;
         let database_path = workdir.join("app.db");
+        if reset_database && database_path.exists() {
+            fs::remove_file(&database_path).map_err(|error| {
+                format!(
+                    "reset smoke database '{}': {error}",
+                    database_path.display()
+                )
+            })?;
+        }
         let config = real_smoke_config(&bucket, &prefix, &s3_region, &endpoint, &webhook);
-        let pipeline_yaml = serde_yaml::to_string(&config).expect("serialize smoke pipeline");
-        fs::write(workdir.join("pipeline.yaml"), pipeline_yaml).expect("write smoke pipeline");
+        let pipeline_yaml = serde_yaml::to_string(&config)
+            .map_err(|error| format!("serialize smoke pipeline: {error}"))?;
+        fs::write(workdir.join("pipeline.yaml"), pipeline_yaml)
+            .map_err(|error| format!("write smoke pipeline: {error}"))?;
 
-        bootstrap_database(&database_path, &config).expect("bootstrap smoke database");
-        let reconciliation =
-            reconcile_s3_workspace(&database_path, &config).expect("real S3 reconciliation");
+        bootstrap_database(&database_path, &config)
+            .map_err(|error| format!("bootstrap smoke database: {error}"))?;
+        let reconciliation = reconcile_s3_workspace(&database_path, &config)
+            .map_err(|error| format!("real S3 reconciliation: {error}"))?;
         println!(
-            "B2_1_RECONCILE listed={} tagged={} registered={} updated={} unchanged={} unmapped={} missing={} restored={}",
+            "B2_RECONCILE listed={} tagged={} registered={} updated={} unchanged={} unmapped={} missing={} restored={}",
             reconciliation.listed_object_count,
             reconciliation.metadata_tagged_count,
             reconciliation.registered_file_count,
@@ -891,15 +1015,19 @@ mod tests {
             reconciliation.missing_file_count,
             reconciliation.restored_file_count
         );
-        assert!(
-            reconciliation.metadata_tagged_count >= 50 || reconciliation.unchanged_file_count >= 50,
-            "expected at least 50 metadata-tagged or already registered source objects"
-        );
 
-        let run_summary = executor::run_due_tasks(&workdir, &database_path, 1, 300, 300, 0)
-            .expect("run due tasks");
+        let available_sources =
+            reconciliation.metadata_tagged_count + reconciliation.unchanged_file_count;
+        if available_sources < limit {
+            return Err(format!(
+                "expected at least {limit} metadata-tagged or already registered source objects, got {available_sources}"
+            ));
+        }
+
+        let run_summary = executor::run_due_tasks(&workdir, &database_path, limit, 300, 300, 0)
+            .map_err(|error| format!("run due tasks: {error}"))?;
         println!(
-            "B2_1_RUN_SUMMARY claimed={} succeeded={} failed={} blocked={} retry_scheduled={} skipped={}",
+            "B2_RUN_SUMMARY claimed={} succeeded={} failed={} blocked={} retry_scheduled={} skipped={}",
             run_summary.claimed,
             run_summary.succeeded,
             run_summary.failed,
@@ -907,59 +1035,108 @@ mod tests {
             run_summary.retry_scheduled,
             run_summary.skipped
         );
-        assert_eq!(
-            run_summary.claimed, 1,
-            "expected exactly one claimed smoke source"
-        );
-        if run_summary.succeeded != 1 {
+        if run_summary.succeeded != limit {
             if let Ok(latest_run) = latest_stage_run(&database_path) {
-                println!("B2_1_LATEST_RUN_ID={}", latest_run["run_id"]);
-                println!("B2_1_LATEST_RUN_SOURCE_KEY={}", latest_run["source_key"]);
-                println!("B2_1_LATEST_RUN_SUCCESS={}", latest_run["success"]);
-                println!("B2_1_LATEST_RUN_HTTP_STATUS={}", latest_run["http_status"]);
-                println!("B2_1_LATEST_RUN_ERROR_TYPE={}", latest_run["error_type"]);
+                println!("B2_LATEST_RUN_ID={}", latest_run["run_id"]);
+                println!("B2_LATEST_RUN_SOURCE_KEY={}", latest_run["source_key"]);
+                println!("B2_LATEST_RUN_SUCCESS={}", latest_run["success"]);
+                println!("B2_LATEST_RUN_HTTP_STATUS={}", latest_run["http_status"]);
+                println!("B2_LATEST_RUN_ERROR_TYPE={}", latest_run["error_type"]);
             }
-            panic!("expected one successful real n8n smoke run");
+            return Err(format!(
+                "expected {limit} successful real n8n smoke run(s), got {}",
+                run_summary.succeeded
+            ));
         }
 
-        let latest_run = latest_stage_run(&database_path).expect("latest stage run");
-        let run_id = latest_run.get("run_id").expect("run_id").clone();
-        let source_key = latest_run.get("source_key").expect("source_key").clone();
-        let output_file = latest_output_file_for_run(&database_path, &run_id)
-            .expect("load output file for run")
-            .expect("registered output file for run");
-        let output_key = output_file.key.clone().expect("output S3 key");
-        let source_status = stage_state_status(
-            &database_path,
-            latest_run.get("entity_id").unwrap(),
-            "smoke_source",
-        )
-        .expect("source state");
-        let child_status =
-            stage_state_status(&database_path, &output_file.entity_id, "smoke_processed")
-                .expect("child state");
-
-        assert_eq!(source_status, "done");
-        assert_eq!(child_status, "pending");
-
         let storage = config.storage.as_ref().unwrap().s3_config().unwrap();
-        let client = AwsS3MetadataClient::from_storage_config(&storage).expect("S3 client");
-        let output_head = client
-            .head_object(&bucket, &output_key)
-            .expect("head output object")
-            .expect("output object exists in S3");
+        let client = AwsS3MetadataClient::from_storage_config(&storage)
+            .map_err(|error| format!("S3 client: {error}"))?;
+        let runs = latest_successful_stage_runs(&database_path, limit)?;
+        let mut evidence = Vec::new();
+        for run in runs {
+            let run_id = run.get("run_id").expect("run_id").clone();
+            let entity_id = run.get("entity_id").expect("entity_id").clone();
+            let source_key = run.get("source_key").expect("source_key").clone();
+            let output_file = latest_output_file_for_run(&database_path, &run_id)?
+                .ok_or_else(|| format!("missing registered output file for run {run_id}"))?;
+            let output_key = output_file.key.clone().ok_or_else(|| {
+                format!("registered output for run {run_id} is missing S3 object key")
+            })?;
+            let output_artifact_id = output_file.artifact_id.clone().unwrap_or_default();
+            let source_status = stage_state_status(&database_path, &entity_id, "smoke_source")?;
+            let child_status =
+                stage_state_status(&database_path, &output_file.entity_id, "smoke_processed")?;
+            let output_head = client
+                .head_object(&bucket, &output_key)
+                .map_err(|error| format!("head output object '{output_key}': {error}"))?;
+            let s3_output_size = output_head.as_ref().and_then(|object| object.size);
+            evidence.push(RealSmokeRunEvidence {
+                run_id,
+                source_key,
+                output_artifact_id,
+                output_key,
+                source_status,
+                child_status,
+                s3_output_exists: output_head.is_some(),
+                s3_output_size,
+            });
+        }
+        evidence.reverse();
 
-        println!("B2_1_SOURCE_KEY={source_key}");
-        println!("B2_1_RUN_ID={run_id}");
-        println!("B2_1_STAGE_RUN_SUCCESS=true");
-        println!(
-            "B2_1_OUTPUT_ARTIFACT_ID={}",
-            output_file.artifact_id.unwrap_or_default()
-        );
-        println!("B2_1_OUTPUT_KEY={output_key}");
-        println!("B2_1_SOURCE_STATE={source_status}");
-        println!("B2_1_CHILD_STATE={child_status}");
-        println!("B2_1_S3_OUTPUT_EXISTS=true size={:?}", output_head.size);
+        let report_path = workdir.join(if limit == 1 {
+            "single_smoke_report.json"
+        } else {
+            "batch_smoke_report.json"
+        });
+        let report_json = serde_json::json!({
+            "schema": report_schema,
+            "workdir": workdir,
+            "bucket": bucket,
+            "prefix": prefix,
+            "requested_limit": limit,
+            "reconciliation": {
+                "listed": reconciliation.listed_object_count,
+                "tagged": reconciliation.metadata_tagged_count,
+                "registered": reconciliation.registered_file_count,
+                "updated": reconciliation.updated_file_count,
+                "unchanged": reconciliation.unchanged_file_count,
+                "unmapped": reconciliation.unmapped_object_count,
+                "missing": reconciliation.missing_file_count,
+                "restored": reconciliation.restored_file_count
+            },
+            "run_summary": {
+                "claimed": run_summary.claimed,
+                "succeeded": run_summary.succeeded,
+                "failed": run_summary.failed,
+                "blocked": run_summary.blocked,
+                "retry_scheduled": run_summary.retry_scheduled,
+                "skipped": run_summary.skipped
+            },
+            "runs": evidence.iter().map(|run| serde_json::json!({
+                "run_id": run.run_id,
+                "source_key": run.source_key,
+                "output_artifact_id": run.output_artifact_id,
+                "output_key": run.output_key,
+                "source_status": run.source_status,
+                "child_status": run.child_status,
+                "s3_output_exists": run.s3_output_exists,
+                "s3_output_size": run.s3_output_size
+            })).collect::<Vec<_>>()
+        });
+        fs::write(
+            &report_path,
+            serde_json::to_string_pretty(&report_json)
+                .map_err(|error| format!("serialize smoke report: {error}"))?,
+        )
+        .map_err(|error| format!("write smoke report '{}': {error}", report_path.display()))?;
+
+        Ok(RealSmokeReport {
+            report_path,
+            claimed: run_summary.claimed,
+            succeeded: run_summary.succeeded,
+            runs: evidence,
+        })
     }
 
     fn real_smoke_config(
@@ -1089,15 +1266,7 @@ mod tests {
                     let http_status: i64 = row.get(4)?;
                     let error_type: String = row.get(5)?;
                     let request_json: String = row.get(6)?;
-                    let source_key = serde_json::from_str::<serde_json::Value>(&request_json)
-                        .ok()
-                        .and_then(|value| {
-                            value["source_key"]
-                                .as_str()
-                                .or_else(|| value["source"]["key"].as_str())
-                                .map(ToOwned::to_owned)
-                        })
-                        .unwrap_or_default();
+                    let source_key = source_key_from_request_json(&request_json);
                     let mut out = HashMap::new();
                     out.insert("run_id".to_string(), run_id);
                     out.insert("entity_id".to_string(), entity_id);
@@ -1110,6 +1279,55 @@ mod tests {
                 },
             )
             .map_err(|error| format!("failed to load latest stage run: {error}"))
+    }
+
+    fn latest_successful_stage_runs(
+        database_path: &Path,
+        limit: u64,
+    ) -> Result<Vec<HashMap<String, String>>, String> {
+        let connection = database::open_connection(database_path)?;
+        let mut statement = connection
+            .prepare(
+                r#"
+                SELECT
+                    run_id,
+                    entity_id,
+                    COALESCE(request_json, '')
+                FROM stage_runs
+                WHERE stage_id = 'smoke_source'
+                  AND COALESCE(success, 0) = 1
+                ORDER BY id DESC
+                LIMIT ?1
+                "#,
+            )
+            .map_err(|error| format!("failed to prepare successful stage run query: {error}"))?;
+        let rows = statement
+            .query_map([limit], |row| {
+                let run_id: String = row.get(0)?;
+                let entity_id: String = row.get(1)?;
+                let request_json: String = row.get(2)?;
+                let source_key = source_key_from_request_json(&request_json);
+                let mut out = HashMap::new();
+                out.insert("run_id".to_string(), run_id);
+                out.insert("entity_id".to_string(), entity_id);
+                out.insert("source_key".to_string(), source_key);
+                Ok(out)
+            })
+            .map_err(|error| format!("failed to query successful stage runs: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("failed to read successful stage runs: {error}"))
+    }
+
+    fn source_key_from_request_json(request_json: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(request_json)
+            .ok()
+            .and_then(|value| {
+                value["source_key"]
+                    .as_str()
+                    .or_else(|| value["source"]["key"].as_str())
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_default()
     }
 
     fn latest_output_file_for_run(

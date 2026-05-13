@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Prepare selected_50_for_n8n.zip as S3 smoke-test source objects.
+"""Prepare S3 smoke-test source objects.
 
 This script does not contact S3. It creates:
   - smoke_source_objects/*.json
   - smoke_source_manifest.json
-  - upload_selected50_to_s3.sh
+  - upload_s3_smoke_objects.sh
 
 The upload script expects env vars:
   S3_HOST, S3_REGION, S3_KEY, S3_SEC_KEY, S3_BUCKET_NAME
@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_PREFIX = "beehive-smoke/test_workflow"
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_FIXTURES_DIR = SCRIPT_DIR / "fixtures" / "minimal_raw"
 
 
 def safe_slug(value: str, max_len: int = 80) -> str:
@@ -66,20 +68,40 @@ def load_raw_docs(zip_path: Path) -> list[tuple[str, dict[str, Any]]]:
     return docs
 
 
+def load_fixture_docs(fixtures_dir: Path) -> list[tuple[str, dict[str, Any]]]:
+    docs: list[tuple[str, dict[str, Any]]] = []
+    for path in sorted(fixtures_dir.glob("*.json")):
+        docs.append((str(path.relative_to(fixtures_dir)), json.loads(path.read_text(encoding="utf-8"))))
+    return docs
+
+
+def resolve_input_path(value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute() or path.exists():
+        return path.resolve()
+    return (SCRIPT_DIR / path).resolve()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--zip", default="selected_50_for_n8n.zip", help="Path to selected_50_for_n8n.zip")
+    parser.add_argument("--zip", default=None, help="Optional external source zip with selected_50_for_n8n/raw/*.json")
+    parser.add_argument("--fixtures", default=str(DEFAULT_FIXTURES_DIR), help="Fixture directory used when --zip is omitted")
     parser.add_argument("--out", default="s3_smoke_dataset", help="Output directory")
     parser.add_argument("--prefix", default=DEFAULT_PREFIX, help="Default S3 prefix used in generated manifest/upload script")
-    parser.add_argument("--limit", type=int, default=50, help="How many docs to prepare")
+    parser.add_argument("--limit", type=int, default=3, help="How many docs to prepare")
     args = parser.parse_args()
 
-    zip_path = Path(args.zip).resolve()
     out_dir = Path(args.out).resolve()
     source_dir = out_dir / "smoke_source_objects"
     source_dir.mkdir(parents=True, exist_ok=True)
 
-    docs = load_raw_docs(zip_path)[: args.limit]
+    if args.zip:
+        docs = load_raw_docs(resolve_input_path(args.zip))[: args.limit]
+    else:
+        docs = load_fixture_docs(resolve_input_path(args.fixtures))[: args.limit]
+    if not docs:
+        raise SystemExit("No smoke source documents found.")
+
     manifest: dict[str, Any] = {
         "schema": "beehive.s3_smoke_seed_manifest.v1",
         "default_prefix": args.prefix.strip("/"),
@@ -130,7 +152,7 @@ def main() -> int:
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    upload_script = out_dir / "upload_selected50_to_s3.sh"
+    upload_script = out_dir / "upload_s3_smoke_objects.sh"
     upload_lines = [
         "#!/usr/bin/env bash",
         "set -euo pipefail",

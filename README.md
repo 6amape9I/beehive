@@ -8,6 +8,27 @@ Stage 9 prepares the app for demo and first internal use with a resettable demo 
 
 S3 mode is now storage-aware: Beehive sends n8n only technical S3 pointers, validates the returned artifact manifest, and stores S3 pointer rows in SQLite. Business JSON stays in S3; Beehive keeps control-plane state, routing, attempts, lineage, and operator visibility.
 
+## Current S3 Production Contract
+
+Current S3 production contract: JSON body envelope, headers deprecated.
+
+Beehive calls n8n with `Content-Type: application/json; charset=utf-8` and a technical `beehive.s3_control_envelope.v1` body. The envelope contains the claimed source bucket/key, source entity/artifact ids, `run_id`, `stage_id`, `manifest_prefix`, `workspace_prefix`, `target_prefix`, and `save_path`.
+
+The body is control-plane metadata only. Beehive must not send business JSON, source document text, `payload_json`, content blocks, or `raw_article` in the webhook request.
+
+S3 object keys must be read from the JSON body fields `source_bucket` and `source_key`. The old empty-body plus `X-Beehive-*` header pointer mode is deprecated and must not be used for production S3 source keys.
+
+Real S3 smoke tests are opt-in:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml real_s3_n8n_smoke_one_artifact -- --ignored --nocapture
+BEEHIVE_REAL_S3_BATCH_SMOKE=1 BEEHIVE_SMOKE_BATCH_LIMIT=3 cargo test --manifest-path src-tauri/Cargo.toml real_s3_n8n_smoke_batch_small -- --ignored --nocapture
+```
+
+The batch smoke defaults to 3 artifacts and clamps the limit to 3-5. Set `BEEHIVE_SMOKE_BATCH_LIMIT=5` to run 5.
+
+The batch smoke writes `/tmp/beehive_s3_batch_smoke_workdir/batch_smoke_report.json` with run ids, source keys, output keys, final states, and S3 output existence.
+
 ## Stack
 
 - Tauri v2
@@ -394,7 +415,7 @@ It shows:
 - safe `Open file` and `Open folder` actions through registered entity file ids;
 - deep links to Entity Detail with `file_id` selected.
 
-Workspace Explorer reads SQLite and selected folder metadata only. It does not edit JSON, move files, edit `pipeline.yaml`, run n8n, reconcile stuck tasks, or scan automatically. `Scan workspace` remains an explicit operator action.
+Workspace Explorer reads SQLite and selected folder metadata, can run S3 reconciliation, can manually register one S3 source artifact, and can run a small due-task batch. It does not edit JSON, move files, edit `pipeline.yaml`, reconcile stuck tasks, or scan automatically. `Scan workspace`, `Reconcile S3`, and `Run small batch` remain explicit operator actions.
 
 Currently deferred: live display of present but unregistered JSON files before a scan. Run `Scan workspace` to register or report those files through the normal reconciliation path.
 
@@ -405,7 +426,7 @@ The app surfaces:
 - Dashboard: Stage 5 overview, stage graph, counters, active tasks, recent errors/runs, and manual operational actions
 - Entities: server-side paginated/sorted/filterable logical entity rows with attempts and last-error context
 - Entity Detail: all file instances, stage timeline, allowed manual actions, safe payload/meta JSON editor, open file/folder actions, and stage run history
-- Workspace Explorer: read-only stage tree, registered files, missing/invalid files, managed copies, and entity trails
+- Workspace Explorer: stage tree, registered files, missing/invalid files, managed copies, entity trails, S3 pointer metadata, S3 reconciliation, manual S3 source registration, and small batch execution
 - Settings / Diagnostics: schema v4, reconciliation summary, file lifecycle and execution events
 
 ## Intentionally Deferred

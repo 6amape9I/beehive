@@ -423,6 +423,34 @@ pub fn run_due_tasks(path: String) -> RunDueTasksResult {
 }
 
 #[tauri::command]
+pub fn run_due_tasks_limited(path: String, max_tasks: u64) -> RunDueTasksResult {
+    let limited_max_tasks = max_tasks.clamp(1, 5);
+    match load_runtime_context(&path) {
+        Ok(context) => match executor::run_due_tasks(
+            &context.workdir_path,
+            &context.database_path,
+            limited_max_tasks,
+            context.config.runtime.request_timeout_sec,
+            context.config.runtime.stuck_task_timeout_sec,
+            context.config.runtime.file_stability_delay_ms,
+        ) {
+            Ok(summary) => RunDueTasksResult {
+                summary: Some(summary),
+                errors: Vec::new(),
+            },
+            Err(message) => RunDueTasksResult {
+                summary: None,
+                errors: vec![command_error("run_due_tasks_limited_failed", message, None)],
+            },
+        },
+        Err(error) => RunDueTasksResult {
+            summary: None,
+            errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
 pub fn run_entity_stage(path: String, entity_id: String, stage_id: String) -> RunEntityStageResult {
     match load_runtime_context(&path) {
         Ok(context) => match executor::run_entity_stage(

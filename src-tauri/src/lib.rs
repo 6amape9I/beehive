@@ -11,6 +11,7 @@ mod file_ops;
 mod file_safety;
 mod pipeline_editor;
 mod s3_client;
+mod s3_control_envelope;
 mod s3_manifest;
 mod s3_reconciliation;
 mod save_path;
@@ -38,6 +39,7 @@ pub fn run() {
             commands::get_entity,
             commands::create_next_stage_copy,
             commands::run_due_tasks,
+            commands::run_due_tasks_limited,
             commands::run_entity_stage,
             commands::list_stage_runs,
             commands::reconcile_stuck_tasks,

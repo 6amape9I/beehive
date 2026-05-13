@@ -5,7 +5,7 @@
 Проверить один минимальный production-like путь:
 
 ```text
-selected_50 JSON -> S3 raw prefix -> Beehive registers/claims source artifact -> n8n receives only S3 pointer headers -> n8n downloads exactly that object -> n8n uploads output JSON to S3 processed prefix -> n8n returns manifest -> Beehive registers child pointer -> source done, child pending/visible
+minimal fixture JSON -> S3 raw prefix -> Beehive registers/claims source artifact -> n8n receives JSON control envelope body -> n8n downloads exactly that object -> n8n uploads output JSON to S3 processed prefix -> n8n returns manifest -> Beehive registers child pointer -> source done, child pending/visible
 ```
 
 ## Что подготовить человеку до запуска Codex-агента
@@ -39,7 +39,7 @@ export BEEHIVE_S3_ENDPOINT="https://$S3_HOST"
 Импортировать файл:
 
 ```text
-n8n_beehive_s3_pointer_smoke_workflow.json
+Beehive_S3_Pointer_Smoke_Adapter_BODY_JSON.json
 ```
 
 После импорта:
@@ -50,8 +50,10 @@ n8n_beehive_s3_pointer_smoke_workflow.json
 4. Скопировать production webhook URL. Он будет похож на:
 
 ```text
-https://n8n-dev.steos.io/webhook/beehive-s3-pointer-smoke
+https://n8n-dev.steos.io/webhook/beehive-s3-pointer-smoke-body
 ```
+
+Header-based `n8n_beehive_s3_pointer_smoke_workflow.json` was a B2.1 adapter and is deprecated. B2.2+ uses the JSON body envelope contract.
 
 Если n8n при импорте ругается на `fileKey` у upload node, открыть node `Upload smoke output` и вручную выбрать:
 
@@ -62,28 +64,35 @@ File Name / Key: ={{ $json.output_key }}
 Binary Property: data
 ```
 
-### 3. selected_50_for_n8n.zip
+### 3. Minimal fixtures or external selected_50 zip
 
-Положить архив рядом с smoke kit или передать агенту путь к нему.
-
-Smoke kit уже содержит скрипт:
+Smoke kit keeps only a generator and minimal fixtures in git. By default it prepares 3 source objects from `fixtures/minimal_raw`:
 
 ```bash
 python3 prepare_selected50_s3_smoke.py \
-  --zip selected_50_for_n8n.zip \
+  --out s3_smoke_dataset \
+  --prefix "$BEEHIVE_SMOKE_PREFIX" \
+  --limit 3
+```
+
+For a larger external dataset, pass a local zip that is not committed:
+
+```bash
+python3 prepare_selected50_s3_smoke.py \
+  --zip /path/to/selected_50_for_n8n.zip \
   --out s3_smoke_dataset \
   --prefix "$BEEHIVE_SMOKE_PREFIX" \
   --limit 50
 ```
 
-Он создаёт 50 source JSON objects и upload script.
+The script creates source JSON objects and `upload_s3_smoke_objects.sh`.
 
-### 4. Загрузка 50 source objects в S3
+### 4. Загрузка source objects в S3
 
 Из каталога `s3_smoke_dataset` выполнить:
 
 ```bash
-./upload_selected50_to_s3.sh
+./upload_s3_smoke_objects.sh
 ```
 
 Проверить:
@@ -94,7 +103,7 @@ aws s3 ls --endpoint-url "$ENDPOINT" \
   "s3://${S3_BUCKET_NAME}/${BEEHIVE_SMOKE_PREFIX}/raw/"
 ```
 
-Должно быть 50 JSON files.
+Для minimal smoke должно быть 3 JSON files. Для внешнего selected_50 zip должно быть 50 JSON files.
 
 ### 5. Beehive workdir и pipeline.yaml
 
@@ -129,7 +138,7 @@ workflow_url: https://n8n-dev.steos.io/webhook/REPLACE_WITH_IMPORTED_SMOKE_WEBHO
 5. Проверить:
    - source stage state стал `done`;
    - появился stage_run с `success=true`;
-   - `stage_runs.request_json` содержит technical pointer, но не содержит business JSON;
+   - `stage_runs.request_json` содержит technical JSON control envelope, но не содержит business JSON;
    - появился child artifact в `smoke_processed`;
    - child artifact имеет S3 key под `beehive-smoke/test_workflow/processed/`.
 
@@ -162,7 +171,7 @@ aws s3 ls --endpoint-url "https://${S3_HOST}" \
 ```text
 1 source S3 artifact registered or reconciled
 1 Run due tasks executed
-n8n received empty body + X-Beehive-* headers
+n8n received JSON body `beehive.s3_control_envelope.v1`
 n8n downloaded source object from S3
 n8n uploaded output object to processed prefix
 n8n returned valid beehive.s3_artifact_manifest.v1
@@ -173,9 +182,9 @@ Beehive registered child S3 pointer in smoke_processed
 Полный успех для пачки:
 
 ```text
-50 source artifacts uploaded
-50 source artifacts discovered/registered
-N runs executed, where N can start with 1 and later become 50
+3 to 5 source artifacts uploaded for short batch smoke
+3 to 5 source artifacts discovered/registered
+N runs executed, where N is 3 to 5
 No silent lost entities
 Failures are retry_wait/failed/blocked with visible errors
 ```

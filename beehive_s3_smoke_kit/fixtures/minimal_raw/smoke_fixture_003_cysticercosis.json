@@ -1,0 +1,24 @@
+{
+  "tag_id": "fixture_cysticercosis",
+  "canonical_tag_ru": "Цистицеркоз",
+  "canonical_tag_latin": "cysticercosis",
+  "entity_type": "condition",
+  "article_status": "fixture",
+  "needs_review_before_publication": false,
+  "content": {
+    "blocks": [
+      {
+        "type": "header",
+        "data": {
+          "text": "Цистицеркоз"
+        }
+      },
+      {
+        "type": "paragraph",
+        "data": {
+          "text": "Минимальная запись для проверки manifest и child artifact pointer."
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "tag_id": "fixture_miosarcoma_gallbladder",
+  "canonical_tag_ru": "Миосаркома желчного пузыря",
+  "canonical_tag_latin": "gallbladder myosarcoma",
+  "entity_type": "condition",
+  "article_status": "fixture",
+  "needs_review_before_publication": false,
+  "content": {
+    "blocks": [
+      {
+        "type": "header",
+        "data": {
+          "text": "Миосаркома желчного пузыря"
+        }
+      },
+      {
+        "type": "paragraph",
+        "data": {
+          "text": "Короткий fixture для batch smoke на несколько S3 объектов."
+        }
+      }
+    ]
+  }
+}

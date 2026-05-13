@@ -370,6 +370,19 @@ textarea.compact-textarea {
   gap: 10px;
 }
 
+.inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #33414d;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.inline-field input {
+  width: 72px;
+}
+
 .button {
   min-height: 38px;
   border: 1px solid transparent;

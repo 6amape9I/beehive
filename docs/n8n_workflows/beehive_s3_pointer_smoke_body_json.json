@@ -1,0 +1,131 @@
+{
+  "name": "Beehive S3 Pointer Smoke BODY JSON",
+  "meta": {
+    "beehive_contract": "beehive.s3_control_envelope.v1",
+    "beehive_manifest": "beehive.s3_artifact_manifest.v1"
+  },
+  "nodes": [
+    {
+      "id": "webhook",
+      "name": "Beehive S3 Control Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "beehive-s3-pointer-smoke",
+        "responseMode": "responseNode"
+      }
+    },
+    {
+      "id": "download-source",
+      "name": "Download source object",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [260, 0],
+      "parameters": {
+        "operation": "download",
+        "bucketName": "={{ $json.body.source_bucket }}",
+        "fileKey": "={{ $json.body.source_key }}"
+      }
+    },
+    {
+      "id": "set-output-pointer",
+      "name": "Build output pointer",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [520, 0],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "output_bucket",
+              "type": "string",
+              "value": "={{ $json.body.source_bucket }}"
+            },
+            {
+              "name": "output_key",
+              "type": "string",
+              "value": "={{ $json.body.save_path + '/' + $json.body.source_artifact_id + '.json' }}"
+            },
+            {
+              "name": "save_path",
+              "type": "string",
+              "value": "={{ $json.body.save_path }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "upload-output",
+      "name": "Upload output object",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [780, 0],
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "={{ $json.output_bucket }}",
+        "fileKey": "={{ $json.output_key }}"
+      }
+    },
+    {
+      "id": "build-manifest",
+      "name": "Build Beehive manifest",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [1040, 0],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "schema",
+              "type": "string",
+              "value": "beehive.s3_artifact_manifest.v1"
+            },
+            {
+              "name": "status",
+              "type": "string",
+              "value": "success"
+            },
+            {
+              "name": "run_id",
+              "type": "string",
+              "value": "={{ $json.body.run_id }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "respond",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1300, 0],
+      "parameters": {
+        "responseCode": 200,
+        "responseBody": "={{ $json }}"
+      }
+    }
+  ],
+  "connections": {
+    "Beehive S3 Control Webhook": {
+      "main": [[{ "node": "Download source object", "type": "main", "index": 0 }]]
+    },
+    "Download source object": {
+      "main": [[{ "node": "Build output pointer", "type": "main", "index": 0 }]]
+    },
+    "Build output pointer": {
+      "main": [[{ "node": "Upload output object", "type": "main", "index": 0 }]]
+    },
+    "Upload output object": {
+      "main": [[{ "node": "Build Beehive manifest", "type": "main", "index": 0 }]]
+    },
+    "Build Beehive manifest": {
+      "main": [[{ "node": "Respond to Webhook", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {}
+}

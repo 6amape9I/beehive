@@ -1,5 +1,9 @@
 # B2.1 Real Smoke Kit and Smoke Execution Instruction for Codex Agent
 
+Deprecated historical instruction.
+
+B2.1 used an empty-body plus `X-Beehive-*` header smoke workflow. That workflow has been removed from the current smoke kit. B2.2 and later use the JSON body control envelope contract documented in `README.md`, `docs/s3_n8n_contract.md`, and `beehive_s3_smoke_kit/s3_real_smoke_miniguide.md`.
+
 ## 0. Mission
 
 Continue Beehive S3+n8n integration after B2 foundation. Do not rebuild B2 foundation.

@@ -1,0 +1,24 @@
+{
+  "tag_id": "fixture_porphyria",
+  "canonical_tag_ru": "Порфирия",
+  "canonical_tag_latin": "porphyria",
+  "entity_type": "condition",
+  "article_status": "fixture",
+  "needs_review_before_publication": false,
+  "content": {
+    "blocks": [
+      {
+        "type": "header",
+        "data": {
+          "text": "Порфирия"
+        }
+      },
+      {
+        "type": "paragraph",
+        "data": {
+          "text": "Минимальный smoke fixture с кириллическим названием для проверки S3 ключей."
+        }
+      }
+    ]
+  }
+}
