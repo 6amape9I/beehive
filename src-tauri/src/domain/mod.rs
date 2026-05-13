@@ -330,6 +330,8 @@ pub type BootstrapErrorInfo = CommandErrorInfo;
 pub struct AppInitializationState {
     pub phase: AppInitializationPhase,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_workspace_id: Option<String>,
     pub selected_workdir_path: Option<String>,
     pub project_name: Option<String>,
     pub config_path: Option<String>,
@@ -349,6 +351,29 @@ pub struct AppInitializationState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BootstrapResult {
     pub state: AppInitializationState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceDescriptor {
+    pub id: String,
+    pub name: String,
+    pub provider: StorageProvider,
+    pub bucket: Option<String>,
+    pub workspace_prefix: Option<String>,
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceRegistryListResult {
+    pub workspaces: Vec<WorkspaceDescriptor>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceRegistryEntryResult {
+    pub workspace: Option<WorkspaceDescriptor>,
+    pub errors: Vec<CommandErrorInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -823,6 +848,35 @@ pub struct RegisterS3SourceArtifactResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateS3StageRequest {
+    pub stage_id: String,
+    pub workflow_url: String,
+    pub next_stage: Option<String>,
+    pub max_attempts: Option<u64>,
+    pub retry_delay_sec: Option<u64>,
+    pub allow_empty_outputs: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct S3StageRouteHints {
+    pub input_uri: String,
+    pub save_path_aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateS3StagePayload {
+    pub stage: StageDefinition,
+    pub route_hints: S3StageRouteHints,
+    pub backup_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateS3StageResult {
+    pub payload: Option<CreateS3StagePayload>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityDetailPayload {
     pub entity: EntityRecord,
     pub files: Vec<EntityFileRecord>,
@@ -1096,6 +1150,38 @@ pub struct RunEntityStageResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StageRunsResult {
     pub runs: Vec<StageRunRecord>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageRunOutputArtifact {
+    pub entity_file_id: i64,
+    pub entity_id: String,
+    pub artifact_id: Option<String>,
+    pub target_stage_id: String,
+    pub relation_to_source: Option<String>,
+    pub storage_provider: StorageProvider,
+    pub bucket: Option<String>,
+    pub key: Option<String>,
+    pub s3_uri: Option<String>,
+    pub version_id: Option<String>,
+    pub etag: Option<String>,
+    pub checksum_sha256: Option<String>,
+    pub size: Option<u64>,
+    pub runtime_status: Option<String>,
+    pub producer_run_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageRunOutputsPayload {
+    pub run_id: String,
+    pub output_count: u64,
+    pub outputs: Vec<StageRunOutputArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageRunOutputsResult {
+    pub payload: Option<StageRunOutputsPayload>,
     pub errors: Vec<CommandErrorInfo>,
 }
 

@@ -164,6 +164,7 @@ fn state_from_parts(
         state: AppInitializationState {
             phase,
             message: message.into(),
+            selected_workspace_id: None,
             selected_workdir_path,
             project_name,
             config_path,
@@ -199,6 +200,7 @@ fn invalid_path_state(path: &str, code: &str, message: String) -> BootstrapResul
         state: AppInitializationState {
             phase: AppInitializationPhase::BootstrapFailed,
             message: message.clone(),
+            selected_workspace_id: None,
             selected_workdir_path,
             project_name: None,
             config_path: None,

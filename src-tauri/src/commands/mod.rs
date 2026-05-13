@@ -7,26 +7,89 @@ use crate::database;
 use crate::discovery;
 use crate::domain::{
     AppEventsResult, BootstrapResult, CommandErrorInfo, ConfigValidationIssue,
-    DashboardOverviewResult, EntityDetailResult, EntityFilesResult, EntityListQuery,
-    EntityListResult, FileCopyResult, ManualEntityStageActionResult, OpenEntityPathPayload,
-    OpenEntityPathResult, PipelineConfigDraft, PipelineEditorStateResult,
-    ReconcileStuckTasksResult, RegisterS3SourceArtifactPayload, RegisterS3SourceArtifactRequest,
+    CreateS3StageRequest, CreateS3StageResult, DashboardOverviewResult, EntityDetailResult,
+    EntityFilesResult, EntityListQuery, EntityListResult, FileCopyResult,
+    ManualEntityStageActionResult, OpenEntityPathPayload, OpenEntityPathResult,
+    PipelineConfigDraft, PipelineEditorStateResult, ReconcileStuckTasksResult,
+    RegisterS3SourceArtifactPayload, RegisterS3SourceArtifactRequest,
     RegisterS3SourceArtifactResult, RunDueTasksResult, RunEntityStageResult,
     RunPipelineWavesResult, RuntimeSummaryResult, S3ReconciliationResult, SaveEntityFileJsonResult,
     SavePipelineConfigResult, ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult,
-    StageRunsResult, ValidatePipelineConfigDraftResult, ValidationSeverity,
-    WorkspaceExplorerResult, WorkspaceExplorerTotals,
+    StageRunOutputsResult, StageRunsResult, ValidatePipelineConfigDraftResult, ValidationSeverity,
+    WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceRegistryEntryResult,
+    WorkspaceRegistryListResult,
 };
 use crate::executor;
 use crate::file_open::{self, OpenEntityPathKind};
 use crate::file_ops;
 use crate::pipeline_editor;
 use crate::s3_reconciliation;
+use crate::services;
 use crate::workdir;
 
 #[tauri::command]
 pub fn initialize_workdir(path: String) -> BootstrapResult {
     bootstrap::initialize_workdir(&path)
+}
+
+#[tauri::command]
+pub fn list_registered_workspaces() -> WorkspaceRegistryListResult {
+    match services::workspaces::list_workspace_descriptors() {
+        Ok(workspaces) => WorkspaceRegistryListResult {
+            workspaces,
+            errors: Vec::new(),
+        },
+        Err(message) => WorkspaceRegistryListResult {
+            workspaces: Vec::new(),
+            errors: vec![command_error("workspace_registry_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn get_registered_workspace(workspace_id: String) -> WorkspaceRegistryEntryResult {
+    match services::workspaces::get_workspace_descriptor(&workspace_id) {
+        Ok(workspace) => WorkspaceRegistryEntryResult {
+            workspace: Some(workspace),
+            errors: Vec::new(),
+        },
+        Err(message) => WorkspaceRegistryEntryResult {
+            workspace: None,
+            errors: vec![command_error("workspace_not_found", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn open_registered_workspace(workspace_id: String) -> BootstrapResult {
+    match services::runtime::open_registered_workspace(&workspace_id) {
+        Ok(result) => result,
+        Err(message) => BootstrapResult {
+            state: crate::domain::AppInitializationState {
+                phase: crate::domain::AppInitializationPhase::BootstrapFailed,
+                message: message.clone(),
+                selected_workspace_id: Some(workspace_id),
+                selected_workdir_path: None,
+                project_name: None,
+                config_path: None,
+                database_path: None,
+                config_status: "not_loaded".to_string(),
+                database_status: "not_ready".to_string(),
+                stage_count: 0,
+                stage_ids: Vec::new(),
+                last_config_load_at: None,
+                validation: crate::domain::ConfigValidationResult::valid(),
+                workdir_state: None,
+                database_state: None,
+                config: None,
+                errors: vec![command_error(
+                    "open_registered_workspace_failed",
+                    message,
+                    None,
+                )],
+            },
+        },
+    }
 }
 
 #[tauri::command]
@@ -758,6 +821,106 @@ pub fn get_workspace_explorer(path: String) -> WorkspaceExplorerResult {
             }
         }
         Err(error) => empty_workspace_explorer_result(vec![error]),
+    }
+}
+
+#[tauri::command]
+pub fn get_workspace_explorer_by_id(workspace_id: String) -> WorkspaceExplorerResult {
+    match services::runtime::workspace_explorer(&workspace_id) {
+        Ok(result) => result,
+        Err(message) => empty_workspace_explorer_result(vec![command_error(
+            "workspace_explorer_failed",
+            message,
+            None,
+        )]),
+    }
+}
+
+#[tauri::command]
+pub fn reconcile_s3_workspace_by_id(workspace_id: String) -> S3ReconciliationResult {
+    match services::runtime::reconcile_s3_workspace(&workspace_id) {
+        Ok(summary) => S3ReconciliationResult {
+            summary: Some(summary),
+            errors: Vec::new(),
+        },
+        Err(message) => S3ReconciliationResult {
+            summary: None,
+            errors: vec![command_error("s3_reconciliation_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn register_s3_source_artifact_by_id(
+    workspace_id: String,
+    input: RegisterS3SourceArtifactRequest,
+) -> RegisterS3SourceArtifactResult {
+    services::runtime::register_s3_source_artifact(&workspace_id, &input)
+}
+
+#[tauri::command]
+pub fn run_due_tasks_limited_by_id(workspace_id: String, max_tasks: u64) -> RunDueTasksResult {
+    match services::runtime::run_small_batch(&workspace_id, max_tasks) {
+        Ok(summary) => RunDueTasksResult {
+            summary: Some(summary),
+            errors: Vec::new(),
+        },
+        Err(message) => RunDueTasksResult {
+            summary: None,
+            errors: vec![command_error("run_due_tasks_limited_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn run_pipeline_waves_by_id(
+    workspace_id: String,
+    max_waves: u64,
+    max_tasks_per_wave: u64,
+    stop_on_first_failure: bool,
+) -> RunPipelineWavesResult {
+    match services::runtime::run_pipeline_waves(
+        &workspace_id,
+        max_waves,
+        max_tasks_per_wave,
+        stop_on_first_failure,
+    ) {
+        Ok(summary) => RunPipelineWavesResult {
+            summary: Some(summary),
+            errors: Vec::new(),
+        },
+        Err(message) => RunPipelineWavesResult {
+            summary: None,
+            errors: vec![command_error("run_pipeline_waves_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn create_s3_stage(workspace_id: String, input: CreateS3StageRequest) -> CreateS3StageResult {
+    match services::pipeline::create_s3_stage_for_workspace(&workspace_id, &input) {
+        Ok(payload) => CreateS3StageResult {
+            payload: Some(payload),
+            errors: Vec::new(),
+        },
+        Err(message) => CreateS3StageResult {
+            payload: None,
+            errors: vec![command_error("create_s3_stage_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn list_stage_run_outputs(workspace_id: String, run_id: String) -> StageRunOutputsResult {
+    match services::artifacts::list_stage_run_outputs_for_workspace(&workspace_id, &run_id) {
+        Ok(payload) => StageRunOutputsResult {
+            payload: Some(payload),
+            errors: Vec::new(),
+        },
+        Err(message) => StageRunOutputsResult {
+            payload: None,
+            errors: vec![command_error("stage_run_outputs_failed", message, None)],
+        },
     }
 }
 

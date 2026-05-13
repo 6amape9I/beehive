@@ -5,6 +5,7 @@ import { useBootstrap } from "./BootstrapContext";
 import { StatusBadge } from "../components/StatusBadge";
 
 const navItems = [
+  { to: "/workspaces", label: "Workspaces" },
   { to: "/dashboard", label: "Dashboard" },
   { to: "/entities", label: "Entities" },
   { to: "/entities/entity-0001", label: "Entity Detail" },
@@ -15,7 +16,7 @@ const navItems = [
 
 export function AppShell({ children }: { children: ReactNode }) {
   const { state, isBusy, reloadCurrentWorkdir } = useBootstrap();
-  const projectName = state.project_name ?? "beehive";
+  const projectName = state.project_name ?? state.selected_workspace_id ?? "beehive";
 
   return (
     <div className="app-shell">
@@ -47,6 +48,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             <div className="topbar-title">
               <StatusBadge status={state.phase} />
               <span>{state.message}</span>
+              {state.selected_workspace_id ? <span>Workspace {state.selected_workspace_id}</span> : null}
             </div>
           </div>
           <button

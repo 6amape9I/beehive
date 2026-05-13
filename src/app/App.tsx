@@ -7,12 +7,14 @@ import { EntityDetailPage } from "../pages/EntityDetailPage";
 import { SettingsDiagnosticsPage } from "../pages/SettingsDiagnosticsPage";
 import { StageEditorPage } from "../pages/StageEditorPage";
 import { WorkspaceExplorerPage } from "../pages/WorkspaceExplorerPage";
+import { WorkspaceSelectorPage } from "../pages/WorkspaceSelectorPage";
 
 export function App() {
   return (
     <AppShell>
       <Routes>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/" element={<Navigate to="/workspaces" replace />} />
+        <Route path="/workspaces" element={<WorkspaceSelectorPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/entities" element={<EntitiesPage />} />
         <Route path="/entities/:entityId" element={<EntityDetailPage />} />

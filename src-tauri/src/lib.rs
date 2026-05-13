@@ -9,12 +9,14 @@ mod executor;
 mod file_open;
 mod file_ops;
 mod file_safety;
+mod http_api;
 mod pipeline_editor;
 mod s3_client;
 mod s3_control_envelope;
 mod s3_manifest;
 mod s3_reconciliation;
 mod save_path;
+mod services;
 mod state_machine;
 mod workdir;
 
@@ -24,6 +26,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::initialize_workdir,
+            commands::list_registered_workspaces,
+            commands::get_registered_workspace,
+            commands::open_registered_workspace,
             commands::open_workdir,
             commands::reload_workdir,
             commands::get_dashboard_overview,
@@ -46,8 +51,15 @@ pub fn run() {
             commands::reconcile_stuck_tasks,
             commands::list_app_events,
             commands::get_workspace_explorer,
+            commands::get_workspace_explorer_by_id,
             commands::reconcile_s3_workspace,
+            commands::reconcile_s3_workspace_by_id,
             commands::register_s3_source_artifact,
+            commands::register_s3_source_artifact_by_id,
+            commands::run_due_tasks_limited_by_id,
+            commands::run_pipeline_waves_by_id,
+            commands::create_s3_stage,
+            commands::list_stage_run_outputs,
             commands::retry_entity_stage_now,
             commands::reset_entity_stage_to_pending,
             commands::skip_entity_stage,

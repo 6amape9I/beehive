@@ -7,12 +7,17 @@ import { StatusBadge } from "../components/StatusBadge";
 import { formatDateTime, shortChecksum } from "../lib/formatters";
 import {
   getWorkspaceExplorer,
+  getWorkspaceExplorerById,
   openEntityFile,
   openEntityFolder,
   reconcileS3Workspace,
+  reconcileS3WorkspaceById,
   registerS3SourceArtifact,
+  registerS3SourceArtifactById,
   runDueTasksLimited,
+  runDueTasksLimitedById,
   runPipelineWaves,
+  runPipelineWavesById,
   scanWorkspace,
 } from "../lib/runtimeApi";
 import type {
@@ -107,10 +112,11 @@ export function WorkspaceExplorerPage() {
     useState<RunPipelineWavesSummary | null>(null);
 
   const workdirPath = state.selected_workdir_path;
-  const canQueryRuntime = state.phase === "fully_initialized" && !!workdirPath;
+  const workspaceId = state.selected_workspace_id;
+  const canQueryRuntime = state.phase === "fully_initialized" && (!!workdirPath || !!workspaceId);
 
   const loadExplorer = useCallback(async () => {
-    if (!canQueryRuntime || !workdirPath) {
+    if (!canQueryRuntime || (!workdirPath && !workspaceId)) {
       setExplorer(null);
       setErrors([]);
       return;
@@ -118,7 +124,9 @@ export function WorkspaceExplorerPage() {
 
     setIsLoading(true);
     try {
-      const result = await getWorkspaceExplorer(workdirPath);
+      const result = workspaceId
+        ? await getWorkspaceExplorerById(workspaceId)
+        : await getWorkspaceExplorer(workdirPath as string);
       setExplorer(result);
       setErrors(result.errors);
       setSelectedFileId((current) =>
@@ -129,7 +137,7 @@ export function WorkspaceExplorerPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [canQueryRuntime, workdirPath]);
+  }, [canQueryRuntime, workdirPath, workspaceId]);
 
   useEffect(() => {
     void loadExplorer();
@@ -213,11 +221,13 @@ export function WorkspaceExplorerPage() {
   }
 
   async function handleReconcileS3() {
-    if (!workdirPath) return;
+    if (!workdirPath && !workspaceId) return;
     setActiveAction("s3-reconcile");
     setActionMessage(null);
     try {
-      const result = await reconcileS3Workspace(workdirPath);
+      const result = workspaceId
+        ? await reconcileS3WorkspaceById(workspaceId)
+        : await reconcileS3Workspace(workdirPath as string);
       setErrors(result.errors);
       setS3Summary(result.summary);
       setActionMessage(
@@ -232,7 +242,7 @@ export function WorkspaceExplorerPage() {
   }
 
   async function handleManualS3Registration() {
-    if (!workdirPath) return;
+    if (!workdirPath && !workspaceId) return;
     const size = manualS3Registration.size.trim()
       ? Number(manualS3Registration.size.trim())
       : null;
@@ -255,7 +265,9 @@ export function WorkspaceExplorerPage() {
     setActiveAction("s3-register");
     setActionMessage(null);
     try {
-      const result = await registerS3SourceArtifact(workdirPath, input);
+      const result = workspaceId
+        ? await registerS3SourceArtifactById(workspaceId, input)
+        : await registerS3SourceArtifact(workdirPath as string, input);
       setErrors(result.errors);
       setActionMessage(
         result.payload
@@ -269,11 +281,13 @@ export function WorkspaceExplorerPage() {
   }
 
   async function handleRunSmallBatch() {
-    if (!workdirPath) return;
+    if (!workdirPath && !workspaceId) return;
     setActiveAction("s3-batch");
     setActionMessage(null);
     try {
-      const result = await runDueTasksLimited(workdirPath, batchLimit);
+      const result = workspaceId
+        ? await runDueTasksLimitedById(workspaceId, batchLimit)
+        : await runDueTasksLimited(workdirPath as string, batchLimit);
       setErrors(result.errors);
       setActionMessage(
         result.summary
@@ -287,16 +301,23 @@ export function WorkspaceExplorerPage() {
   }
 
   async function handleRunPipelineWaves() {
-    if (!workdirPath) return;
+    if (!workdirPath && !workspaceId) return;
     setActiveAction("pipeline-waves");
     setActionMessage(null);
     try {
-      const result = await runPipelineWaves(
-        workdirPath,
-        pipelineWaveControls.max_waves,
-        pipelineWaveControls.max_tasks_per_wave,
-        pipelineWaveControls.stop_on_first_failure,
-      );
+      const result = workspaceId
+        ? await runPipelineWavesById(
+            workspaceId,
+            pipelineWaveControls.max_waves,
+            pipelineWaveControls.max_tasks_per_wave,
+            pipelineWaveControls.stop_on_first_failure,
+          )
+        : await runPipelineWaves(
+            workdirPath as string,
+            pipelineWaveControls.max_waves,
+            pipelineWaveControls.max_tasks_per_wave,
+            pipelineWaveControls.stop_on_first_failure,
+          );
       setErrors([...(result.errors ?? []), ...(result.summary?.errors ?? [])]);
       setPipelineWaveSummary(result.summary);
       setActionMessage(
@@ -354,6 +375,7 @@ export function WorkspaceExplorerPage() {
           <h1>Workspace Explorer</h1>
           <span className="muted">
             {explorer?.workdir_path ?? workdirPath ?? "No workdir selected"}
+            {workspaceId ? ` / workspace ${workspaceId}` : ""}
           </span>
         </div>
         <div className="button-row">

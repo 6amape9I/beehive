@@ -10,6 +10,7 @@ import {
 import {
   initializeWorkdir as initializeWorkdirCommand,
   openWorkdir as openWorkdirCommand,
+  openRegisteredWorkspace as openRegisteredWorkspaceCommand,
   reloadWorkdir as reloadWorkdirCommand,
 } from "../lib/bootstrapApi";
 import type { AppInitializationState } from "../types/domain";
@@ -21,6 +22,7 @@ interface BootstrapContextValue {
   lastActionError: string | null;
   initializeWorkdir: (path: string) => Promise<void>;
   openWorkdir: (path: string) => Promise<void>;
+  openRegisteredWorkspace: (workspaceId: string) => Promise<void>;
   reloadCurrentWorkdir: () => Promise<void>;
 }
 
@@ -62,6 +64,13 @@ export function BootstrapProvider({ children }: { children: ReactNode }) {
     [runBootstrapAction],
   );
 
+  const openRegisteredWorkspace = useCallback(
+    async (workspaceId: string) => {
+      await runBootstrapAction(() => openRegisteredWorkspaceCommand(workspaceId));
+    },
+    [runBootstrapAction],
+  );
+
   const reloadCurrentWorkdir = useCallback(async () => {
     if (!state.selected_workdir_path) {
       setLastActionError("No workdir is selected.");
@@ -78,9 +87,18 @@ export function BootstrapProvider({ children }: { children: ReactNode }) {
       lastActionError,
       initializeWorkdir,
       openWorkdir,
+      openRegisteredWorkspace,
       reloadCurrentWorkdir,
     }),
-    [initializeWorkdir, isBusy, lastActionError, openWorkdir, reloadCurrentWorkdir, state],
+    [
+      initializeWorkdir,
+      isBusy,
+      lastActionError,
+      openRegisteredWorkspace,
+      openWorkdir,
+      reloadCurrentWorkdir,
+      state,
+    ],
   );
 
   return <BootstrapContext.Provider value={value}>{children}</BootstrapContext.Provider>;

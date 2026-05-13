@@ -237,6 +237,36 @@ code {
   line-height: 1;
 }
 
+.workspace-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.workspace-card {
+  display: grid;
+  gap: 12px;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #e8edf2;
+  color: #33414d;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.status-done {
+  background: #dff5e5;
+  color: #1f6f3a;
+}
+
 .status-badge {
   display: inline-flex;
   align-items: center;
@@ -762,6 +792,35 @@ textarea.compact-textarea {
   margin-top: 14px;
 }
 
+.route-hints,
+.stage-run-output-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.route-alias-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.route-alias {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.compact-action {
+  margin-top: 8px;
+  padding: 6px 10px;
+}
+
+.nested-table {
+  min-width: 720px;
+  background: #f9fafb;
+}
+
 .workspace-stage-content h3,
 .workspace-trail-panel h3 {
   margin: 0 0 12px;
@@ -841,6 +900,7 @@ th {
   .filter-grid,
   .explorer-split,
   .workspace-layout,
+  .workspace-card-grid,
   .workspace-stage-content,
   .summary-card-grid,
   .dashboard-split,

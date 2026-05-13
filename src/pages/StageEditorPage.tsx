@@ -8,6 +8,7 @@ import { StageDraftForm } from "../components/stage-editor/StageDraftForm";
 import { StageDraftList } from "../components/stage-editor/StageDraftList";
 import { StageValidationPanel } from "../components/stage-editor/StageValidationPanel";
 import {
+  createS3Stage,
   getPipelineEditorState,
   savePipelineConfig,
   validatePipelineConfigDraft,
@@ -15,6 +16,8 @@ import {
 import type {
   CommandErrorInfo,
   ConfigValidationResult,
+  CreateS3StagePayload,
+  CreateS3StageRequest,
   PipelineConfigDraft,
   PipelineEditorState,
   StageDefinitionDraft,
@@ -22,6 +25,24 @@ import type {
 } from "../types/domain";
 
 const emptyValidation: ConfigValidationResult = { is_valid: true, issues: [] };
+
+interface S3StageCreationForm {
+  stage_id: string;
+  workflow_url: string;
+  next_stage: string;
+  max_attempts: number;
+  retry_delay_sec: number;
+  allow_empty_outputs: boolean;
+}
+
+const defaultS3StageCreationForm: S3StageCreationForm = {
+  stage_id: "",
+  workflow_url: "",
+  next_stage: "",
+  max_attempts: 3,
+  retry_delay_sec: 30,
+  allow_empty_outputs: false,
+};
 
 function makeNewStage(existingIds: string[]): StageDefinitionDraft {
   let suffix = 1;
@@ -76,6 +97,10 @@ export function StageEditorPage() {
   const [operatorComment, setOperatorComment] = useState("");
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [confirmRemoveStageId, setConfirmRemoveStageId] = useState<string | null>(null);
+  const [s3StageForm, setS3StageForm] = useState<S3StageCreationForm>(
+    defaultS3StageCreationForm,
+  );
+  const [createdS3Stage, setCreatedS3Stage] = useState<CreateS3StagePayload | null>(null);
 
   const workdirPath = state.selected_workdir_path;
   const canEdit = state.phase === "fully_initialized" && !!workdirPath;
@@ -211,6 +236,39 @@ export function StageEditorPage() {
     }
   }
 
+  async function handleCreateS3Stage() {
+    if (!state.selected_workspace_id) {
+      setActionMessage("Select a registered workspace before creating an S3 stage.");
+      return;
+    }
+    const input: CreateS3StageRequest = {
+      stage_id: s3StageForm.stage_id.trim(),
+      workflow_url: s3StageForm.workflow_url.trim(),
+      next_stage: s3StageForm.next_stage.trim() || null,
+      max_attempts: s3StageForm.max_attempts,
+      retry_delay_sec: s3StageForm.retry_delay_sec,
+      allow_empty_outputs: s3StageForm.allow_empty_outputs,
+    };
+    setIsSaving(true);
+    setActionMessage(null);
+    setCreatedS3Stage(null);
+    try {
+      const result = await createS3Stage(state.selected_workspace_id, input);
+      setErrors(result.errors);
+      if (result.payload) {
+        setCreatedS3Stage(result.payload);
+        setS3StageForm(defaultS3StageCreationForm);
+        await reloadCurrentWorkdir();
+        await loadEditor();
+        setActionMessage(`S3 stage ${result.payload.stage.id} created.`);
+      } else {
+        setActionMessage("S3 stage creation was rejected.");
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   const disabled = isLoading || isSaving || isValidating;
 
   return (
@@ -267,6 +325,16 @@ export function StageEditorPage() {
 
           <ProjectRuntimeForm draft={draft} disabled={disabled} onChange={updateDraft} />
 
+          <S3StageCreationPanel
+            disabled={disabled}
+            form={s3StageForm}
+            payload={createdS3Stage}
+            selectedWorkspaceId={state.selected_workspace_id}
+            stages={draft.stages}
+            onChange={setS3StageForm}
+            onCreate={() => void handleCreateS3Stage()}
+          />
+
           <section className="panel">
             <div className="panel-heading">
               <h2>Stage Actions</h2>
@@ -310,4 +378,157 @@ export function StageEditorPage() {
       )}
     </div>
   );
+}
+
+interface S3StageCreationPanelProps {
+  disabled: boolean;
+  form: S3StageCreationForm;
+  payload: CreateS3StagePayload | null;
+  selectedWorkspaceId: string | null;
+  stages: StageDefinitionDraft[];
+  onChange: (form: S3StageCreationForm) => void;
+  onCreate: () => void;
+}
+
+function S3StageCreationPanel({
+  disabled,
+  form,
+  payload,
+  selectedWorkspaceId,
+  stages,
+  onChange,
+  onCreate,
+}: S3StageCreationPanelProps) {
+  const canCreate =
+    !!selectedWorkspaceId && !!form.stage_id.trim() && !!form.workflow_url.trim() && !disabled;
+
+  function update(key: keyof S3StageCreationForm, value: string | number | boolean) {
+    onChange({ ...form, [key]: value });
+  }
+
+  async function copyAlias(alias: string) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(alias);
+    }
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-heading">
+        <div>
+          <h2>Create S3 Stage</h2>
+          <span className="muted">
+            {selectedWorkspaceId
+              ? `Workspace ${selectedWorkspaceId}`
+              : "Select a registered workspace first"}
+          </span>
+        </div>
+      </div>
+      <div className="stage-editor-form-grid">
+        <div className="form-row">
+          <label htmlFor="s3-stage-id">Stage ID</label>
+          <input
+            id="s3-stage-id"
+            value={form.stage_id}
+            disabled={disabled}
+            onChange={(event) => update("stage_id", event.target.value)}
+            placeholder="semantic_rich"
+          />
+        </div>
+        <div className="form-row">
+          <label htmlFor="s3-stage-webhook">n8n webhook URL</label>
+          <input
+            id="s3-stage-webhook"
+            value={form.workflow_url}
+            disabled={disabled}
+            onChange={(event) => update("workflow_url", event.target.value)}
+            placeholder="https://n8n.example/webhook/semantic_rich"
+          />
+        </div>
+        <div className="form-row">
+          <label htmlFor="s3-stage-next">Next stage</label>
+          <select
+            id="s3-stage-next"
+            value={form.next_stage}
+            disabled={disabled}
+            onChange={(event) => update("next_stage", event.target.value)}
+          >
+            <option value="">Terminal or routed by save_path</option>
+            {stages.map((stage) => (
+              <option key={stage.id} value={stage.id}>
+                {stage.id}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="form-row">
+          <label htmlFor="s3-stage-attempts">Max attempts</label>
+          <input
+            id="s3-stage-attempts"
+            type="number"
+            min={1}
+            value={form.max_attempts}
+            disabled={disabled}
+            onChange={(event) => update("max_attempts", boundedNumber(event.target.value, 1, 20, 3))}
+          />
+        </div>
+        <div className="form-row">
+          <label htmlFor="s3-stage-retry">Retry delay sec</label>
+          <input
+            id="s3-stage-retry"
+            type="number"
+            min={0}
+            value={form.retry_delay_sec}
+            disabled={disabled}
+            onChange={(event) =>
+              update("retry_delay_sec", boundedNumber(event.target.value, 0, 3600, 30))
+            }
+          />
+        </div>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={form.allow_empty_outputs}
+            disabled={disabled}
+            onChange={(event) => update("allow_empty_outputs", event.target.checked)}
+          />
+          Allow empty outputs
+        </label>
+      </div>
+      <div className="button-row">
+        <button type="button" className="button primary" disabled={!canCreate} onClick={onCreate}>
+          Create S3 stage
+        </button>
+      </div>
+      {payload ? (
+        <div className="route-hints">
+          <div className="form-row">
+            <label>Input URI</label>
+            <code>{payload.route_hints.input_uri}</code>
+          </div>
+          <div className="route-alias-list">
+            {payload.route_hints.save_path_aliases.map((alias) => (
+              <button
+                key={alias}
+                type="button"
+                className="button secondary route-alias"
+                onClick={() => void copyAlias(alias)}
+              >
+                {alias}
+              </button>
+            ))}
+          </div>
+          <p className="field-hint">
+            n8n manifest outputs must use one of these save_path aliases.
+          </p>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function boundedNumber(value: string, min: number, max: number, fallback: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(parsed)));
 }

@@ -193,6 +193,7 @@ export interface CommandErrorInfo {
 export interface AppInitializationState {
   phase: AppInitializationPhase;
   message: string;
+  selected_workspace_id: string | null;
   selected_workdir_path: string | null;
   project_name: string | null;
   config_path: string | null;
@@ -211,6 +212,26 @@ export interface AppInitializationState {
 
 export interface BootstrapResult {
   state: AppInitializationState;
+}
+
+export interface WorkspaceDescriptor {
+  id: string;
+  name: string;
+  provider: StorageProvider;
+  bucket: string | null;
+  workspace_prefix: string | null;
+  region: string | null;
+  endpoint: string | null;
+}
+
+export interface WorkspaceRegistryListResult {
+  workspaces: WorkspaceDescriptor[];
+  errors: CommandErrorInfo[];
+}
+
+export interface WorkspaceRegistryEntryResult {
+  workspace: WorkspaceDescriptor | null;
+  errors: CommandErrorInfo[];
 }
 
 export interface StageRecord {
@@ -639,6 +660,31 @@ export interface RegisterS3SourceArtifactResult {
   errors: CommandErrorInfo[];
 }
 
+export interface CreateS3StageRequest {
+  stage_id: string;
+  workflow_url: string;
+  next_stage?: string | null;
+  max_attempts?: number | null;
+  retry_delay_sec?: number | null;
+  allow_empty_outputs?: boolean | null;
+}
+
+export interface S3StageRouteHints {
+  input_uri: string;
+  save_path_aliases: string[];
+}
+
+export interface CreateS3StagePayload {
+  stage: StageDefinition;
+  route_hints: S3StageRouteHints;
+  backup_path: string | null;
+}
+
+export interface CreateS3StageResult {
+  payload: CreateS3StagePayload | null;
+  errors: CommandErrorInfo[];
+}
+
 export interface EntityDetailPayload {
   entity: EntityRecord;
   files: EntityFileRecord[];
@@ -875,6 +921,35 @@ export interface StageRunsResult {
   errors: CommandErrorInfo[];
 }
 
+export interface StageRunOutputArtifact {
+  entity_file_id: number;
+  entity_id: string;
+  artifact_id: string | null;
+  target_stage_id: string;
+  relation_to_source: string | null;
+  storage_provider: StorageProvider;
+  bucket: string | null;
+  key: string | null;
+  s3_uri: string | null;
+  version_id: string | null;
+  etag: string | null;
+  checksum_sha256: string | null;
+  size: number | null;
+  runtime_status: string | null;
+  producer_run_id: string;
+}
+
+export interface StageRunOutputsPayload {
+  run_id: string;
+  output_count: number;
+  outputs: StageRunOutputArtifact[];
+}
+
+export interface StageRunOutputsResult {
+  payload: StageRunOutputsPayload | null;
+  errors: CommandErrorInfo[];
+}
+
 export interface ReconcileStuckTasksResult {
   reconciled: number;
   errors: CommandErrorInfo[];
@@ -903,6 +978,7 @@ export interface SaveEntityFileJsonResult {
 export const notConfiguredState: AppInitializationState = {
   phase: "app_not_configured",
   message: "No workdir is selected.",
+  selected_workspace_id: null,
   selected_workdir_path: null,
   project_name: null,
   config_path: null,

@@ -271,7 +271,7 @@ export function EntityDetailPage() {
             isSaving={isSavingJson}
             onSave={handleSaveJson}
           />
-          <StageRunsPanel runs={detail.stage_runs} />
+          <StageRunsPanel runs={detail.stage_runs} workspaceId={state.selected_workspace_id} />
         </>
       ) : (
         <section className="panel">
