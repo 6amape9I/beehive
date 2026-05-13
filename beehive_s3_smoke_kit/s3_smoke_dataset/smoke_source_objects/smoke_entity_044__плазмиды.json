@@ -1,0 +1,198 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_044",
+  "artifact_id": "smoke_source_artifact_044",
+  "canonical_tag_ru": "Плазмиды",
+  "canonical_tag_latin": "Plasmids",
+  "entity_type": "cell_or_biological_structure",
+  "tag_id": "cell_or_biological_structure_1ea1953a63",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/44__cell_or_biological_structure__Плазмиды.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Плазмиды — это двунитчатые кольцевые ДНК, которые реплицируются клеткой. Они относятся к вирусоподобным структурам и также могут называться эписомами или эпивирусами."
+    },
+    {
+      "type": "paragraph",
+      "text": "Размер этих фрагментов ДНК составляет от 10^3 до 10^6 пар нуклеотидов, что позволяет им содержать от 40 до 50 генов."
+    },
+    {
+      "type": "header",
+      "text": "Классификация и формы существования"
+    },
+    {
+      "type": "paragraph",
+      "text": "Плазмиды могут существовать в двух формах: автономно в цитоплазме или в интегрированном состоянии (эписомы), когда они встроены в хромосому и реплицируются вместе с ней."
+    },
+    {
+      "type": "list",
+      "items": [
+        "F-плазмиды (фертильности): контролируют синтез F-пилей для процесса конъюгации;",
+        "R-плазмиды (резистентности): обеспечивают устойчивость к антибиотикам и тяжелым металлам;",
+        "Col-плазмиды (бактериоциногении): отвечают за синтез белков-бактериоцинов, уничтожающих родственные бактерии;",
+        "Tox-плазмиды (патогенности): контролируют токсинообразование и вирулентность;",
+        "Плазмиды биодеградации: позволяют расщеплять необычные субстраты."
+      ]
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Plasmids",
+    "canonical_tag_ru": "Плазмиды",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "p1_h1",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Плазмиды — это двунитчатые кольцевые ДНК, которые реплицируются клеткой. Они относятся к вирусоподобным структурам и также могут называться эписомами или эпивирусами."
+          },
+          "id": "p1_b1",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_d439e4664360",
+              "fg_b32bb06cb3a9"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Размер этих фрагментов ДНК составляет от 10^3 до 10^6 пар нуклеотидов, что позволяет им содержать от 40 до 50 генов."
+          },
+          "id": "p1_b2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_926656fc0c2f"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Классификация и формы существования"
+          },
+          "id": "p1_h2",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Плазмиды могут существовать в двух формах: автономно в цитоплазме или в интегрированном состоянии (эписомы), когда они встроены в хромосому и реплицируются вместе с ней."
+          },
+          "id": "p1_b3",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_d996b42ead39"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "F-плазмиды (фертильности): контролируют синтез F-пилей для процесса конъюгации;",
+              "R-плазмиды (резистентности): обеспечивают устойчивость к антибиотикам и тяжелым металлам;",
+              "Col-плазмиды (бактериоциногении): отвечают за синтез белков-бактериоцинов, уничтожающих родственные бактерии;",
+              "Tox-плазмиды (патогенности): контролируют токсинообразование и вирулентность;",
+              "Плазмиды биодеградации: позволяют расщеплять необычные субстраты."
+            ],
+            "style": "unordered"
+          },
+          "id": "p1_b4",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_b91ffbd6490a"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Значение"
+          },
+          "id": "p1_h3",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Плазмиды кодируют дополнительные функции, которые обеспечивают бактериальной клетке преимущества при выживании в неблагоприятных условиях окружающей среды."
+          },
+          "id": "p1_b5",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_b0eb6144178a"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "cell_or_biological_structure",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/cell_or_biological_structure/cell_or_biological_structure_Плазмиды.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/cell_or_biological_structure/cell_or_biological_structure_Плазмиды_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/cell_or_biological_structure_Плазмиды.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/cell_or_biological_structure/cell_or_biological_structure_1ea1953a63.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/cell_or_biological_structure/cell_or_biological_structure_1ea1953a63.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_d439e4664360",
+        "fg_926656fc0c2f",
+        "fg_d996b42ead39",
+        "fg_b91ffbd6490a",
+        "fg_b32bb06cb3a9",
+        "fg_b0eb6144178a"
+      ],
+      "source_doc_ids": [
+        "doc_000044_d7d57abf",
+        "doc_000112_c78c03ae"
+      ],
+      "source_documents_count": 2,
+      "used_fact_group_ids": [
+        "fg_d439e4664360",
+        "fg_926656fc0c2f",
+        "fg_d996b42ead39",
+        "fg_b91ffbd6490a",
+        "fg_b32bb06cb3a9",
+        "fg_b0eb6144178a"
+      ]
+    },
+    "tag_id": "cell_or_biological_structure_1ea1953a63"
+  }
+}

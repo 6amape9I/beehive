@@ -1,0 +1,276 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_043",
+  "artifact_id": "smoke_source_artifact_043",
+  "canonical_tag_ru": "Миндалины",
+  "canonical_tag_latin": "Tonsillae",
+  "entity_type": "organ_or_body_system",
+  "tag_id": "organ_or_body_system_5f05374b6d",
+  "article_status": "direct_copy_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/43__organ_or_body_system__Миндалины.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Гланды: описание"
+    },
+    {
+      "type": "paragraph",
+      "text": "Гланды - это лимфоидные образования, расположенные в различных частях тела, включая глотку и носоглотку, которые играют важную роль в иммунной системе. Они помогают организму защищаться от инфекций, вырабатывая антитела и другие вещества, которые борются с патогенами."
+    },
+    {
+      "type": "header",
+      "text": "Гланды: этиология"
+    },
+    {
+      "type": "paragraph",
+      "text": "Гипертрофия гланд может возникать в результате хронического воспаления, аллергических реакций, инфекций или постоянного раздражения, например, при частых простудах или аллергическом рините."
+    },
+    {
+      "type": "header",
+      "text": "Гланды: прогноз"
+    },
+    {
+      "type": "paragraph",
+      "text": "Прогноз при заболеваниях гланд зависит от их природы и степени поражения. В случае воспалительных процессов, таких как тонзиллит, при своевременном лечении возможно полное выздоровление. Однако хронические заболевания, такие как хронический тонзиллит, могут приводить к рецидивам и осложнениям, включая развитие ревматизма или гломерулонефрита."
+    }
+  ],
+  "raw_article": {
+    "article_status": "direct_copy_article",
+    "canonical_tag_latin": "Tonsillae",
+    "canonical_tag_ru": "Миндалины",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 3,
+            "text": "Гланды: описание"
+          },
+          "metadata": {
+            "source_block_id": "b_000001",
+            "source_block_index": 0,
+            "source_block_type": "header",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Гланды - это лимфоидные образования, расположенные в различных частях тела, включая глотку и носоглотку, которые играют важную роль в иммунной системе. Они помогают организму защищаться от инфекций, вырабатывая антитела и другие вещества, которые борются с патогенами."
+          },
+          "metadata": {
+            "source_block_id": "b_000002",
+            "source_block_index": 1,
+            "source_block_type": "paragraph",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 3,
+            "text": "Гланды: этиология"
+          },
+          "metadata": {
+            "source_block_id": "b_000003",
+            "source_block_index": 2,
+            "source_block_type": "header",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Гипертрофия гланд может возникать в результате хронического воспаления, аллергических реакций, инфекций или постоянного раздражения, например, при частых простудах или аллергическом рините."
+          },
+          "metadata": {
+            "source_block_id": "b_000004",
+            "source_block_index": 3,
+            "source_block_type": "paragraph",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 3,
+            "text": "Гланды: прогноз"
+          },
+          "metadata": {
+            "source_block_id": "b_000005",
+            "source_block_index": 4,
+            "source_block_type": "header",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Прогноз при заболеваниях гланд зависит от их природы и степени поражения. В случае воспалительных процессов, таких как тонзиллит, при своевременном лечении возможно полное выздоровление. Однако хронические заболевания, такие как хронический тонзиллит, могут приводить к рецидивам и осложнениям, включая развитие ревматизма или гломерулонефрита."
+          },
+          "metadata": {
+            "source_block_id": "b_000006",
+            "source_block_index": 5,
+            "source_block_type": "paragraph",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 3,
+            "text": "Гланды: профилактика"
+          },
+          "metadata": {
+            "source_block_id": "b_000007",
+            "source_block_index": 6,
+            "source_block_type": "header",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Профилактика заболеваний гланд заключается в поддержании хорошей гигиены полости рта, регулярном посещении стоматолога, а также в своевременном лечении инфекций верхних дыхательных путей и аллергических реакций, которые могут способствовать воспалению гланд."
+          },
+          "metadata": {
+            "source_block_id": "b_000008",
+            "source_block_index": 7,
+            "source_block_type": "paragraph",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 3,
+            "text": "Гланды: группа риска"
+          },
+          "metadata": {
+            "source_block_id": "b_000009",
+            "source_block_index": 8,
+            "source_block_type": "header",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "- Дети и подростки: Увеличенная предрасположенность к заболеваниям гланд, таким как тонзиллит, наблюдается у детей и подростков, особенно в возрасте от 5 до 15 лет. - Люди с ослабленной иммунной системой: Индивиды с иммунодефицитом или хроническими заболеваниями также подвержены более высокому риску инфекций гланд. - Люди, часто подверженные инфекциям верхних дыхательных путей: Частые простуды и инфекции могут способствовать воспалению гланд."
+          },
+          "metadata": {
+            "source_block_id": "b_000010",
+            "source_block_index": 9,
+            "source_block_type": "paragraph",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 3,
+            "text": "Гланды: осложнение"
+          },
+          "metadata": {
+            "source_block_id": "b_000011",
+            "source_block_index": 10,
+            "source_block_type": "header",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Заболевание может приводить к следующим осложнениям: - хронические инфекции верхних дыхательных путей; - обструктивное апноэ во сне; - рецидивирующие тонзиллиты; - развитие абсцессов; - нарушения глотания; - системные воспалительные реакции; - аллергические реакции; - увеличение риска сердечно-сосудистых заболеваний."
+          },
+          "metadata": {
+            "source_block_id": "b_000012",
+            "source_block_index": 11,
+            "source_block_type": "paragraph",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 3,
+            "text": "Гланды: лечение"
+          },
+          "metadata": {
+            "source_block_id": "b_000013",
+            "source_block_index": 12,
+            "source_block_type": "header",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Данная информация имеет лишь ознакомительный характер. Ни в коем случае не используйте описанные методы в качестве рекомендаций к лечению. За всеми подробностями обращайтесь к вашему лечащему врачу. Лечение заболеваний гланд может включать как консервативные, так и хирургические методы. Консервативное лечение часто включает применение антибиотиков, противовоспалительных средств и местных антисептиков для устранения инфекции и воспаления. В случаях, когда консервативные методы неэффективны или при наличии осложнений, может потребоваться хирургическое вмешательство, такое как тонзиллэктомия (удаление миндалин) или аденотомия (удаление аденоидов)."
+          },
+          "metadata": {
+            "source_block_id": "b_000014",
+            "source_block_index": 13,
+            "source_block_type": "paragraph",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 3,
+            "text": "Гланды: диагностика"
+          },
+          "metadata": {
+            "source_block_id": "b_000015",
+            "source_block_index": 14,
+            "source_block_type": "header",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Диагностика заболеваний гланд (миндалин) основывается на следующих методах: - Сбор анамнеза и жалоб пациента, включая информацию о наличии боли в горле, затруднении глотания, повышенной температуре и других симптомах. - Физикальный осмотр, во время которого врач оценивает состояние гланд, их размер, цвет и наличие налета или гнойных выделений. - Лабораторные исследования, включая общий анализ крови, который может показать признаки воспаления (увеличение уровня лейкоцитов и СОЭ). - Микробиологическое исследование мазка из зева для выявления патогенных микроорганизмов, таких как стрептококки или стафилококки. - Ультразвуковое исследование шеи для оценки состояния лимфатических узлов и окружающих тканей. - В редких случаях может потребоваться биопсия для исключения злокачественных процессов."
+          },
+          "metadata": {
+            "source_block_id": "b_000016",
+            "source_block_index": 15,
+            "source_block_type": "paragraph",
+            "source_doc_id": "doc_004257_ba5b5244"
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 0,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "organ_or_body_system",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/organ_or_body_system/organ_or_body_system_Миндалины.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/organ_or_body_system/organ_or_body_system_Миндалины_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/organ_or_body_system_Миндалины.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/organ_or_body_system/organ_or_body_system_5f05374b6d.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": ""
+    },
+    "review_reasons": [],
+    "source_article_status": "direct_copy_article",
+    "source_stage": "A1",
+    "sources": {
+      "fact_group_ids": [],
+      "source_doc_ids": [
+        "doc_004257_ba5b5244"
+      ],
+      "source_documents_count": 1,
+      "used_fact_group_ids": []
+    },
+    "tag_id": "organ_or_body_system_5f05374b6d"
+  }
+}

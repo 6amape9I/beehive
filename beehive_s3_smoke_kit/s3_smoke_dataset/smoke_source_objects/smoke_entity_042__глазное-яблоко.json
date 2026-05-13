@@ -1,0 +1,204 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_042",
+  "artifact_id": "smoke_source_artifact_042",
+  "canonical_tag_ru": "Глазное яблоко",
+  "canonical_tag_latin": "Bulbus oculi",
+  "entity_type": "organ_or_body_system",
+  "tag_id": "organ_or_body_system_88ca7a2d07",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/42__organ_or_body_system__Глазное яблоко.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Глазное яблоко (bulbus oculi) представляет собой парное образование почти правильной шаровидной формы, расположенное в глазницах (орбитах) черепа. Оно является одной из основных частей органа зрения наряду со зрительными путями и вспомогательным аппаратом."
+    },
+    {
+      "type": "header",
+      "text": "Описание"
+    },
+    {
+      "type": "paragraph",
+      "text": "Анатомически глазное яблоко состоит из трех оболочек и внутреннего содержимого. Его размер увеличивается в процессе роста: у новорожденных он составляет в среднем 16,2 мм, достигая у взрослого человека 24 мм."
+    },
+    {
+      "type": "paragraph",
+      "text": "Подвижность глаза во всех направлениях обеспечивается шестью мышцами (четырьмя прямыми и двумя косыми). Сзади глазное яблоко покрыто теноновой капсулой, выполняющей роль суставной сумки для вращения глаза."
+    },
+    {
+      "type": "header",
+      "text": "Связанные сведения"
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Bulbus oculi",
+    "canonical_tag_ru": "Глазное яблоко",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "b7",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Глазное яблоко (bulbus oculi) представляет собой парное образование почти правильной шаровидной формы, расположенное в глазницах (орбитах) черепа. Оно является одной из основных частей органа зрения наряду со зрительными путями и вспомогательным аппаратом."
+          },
+          "id": "b8",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_8b637b100d9a",
+              "fg_9cf4df487e6c"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Описание"
+          },
+          "id": "b9",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Анатомически глазное яблоко состоит из трех оболочек и внутреннего содержимого. Его размер увеличивается в процессе роста: у новорожденных он составляет в среднем 16,2 мм, достигая у взрослого человека 24 мм."
+          },
+          "id": "b10",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_6adc6225763b",
+              "fg_8e28de77a580"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Подвижность глаза во всех направлениях обеспечивается шестью мышцами (четырьмя прямыми и двумя косыми). Сзади глазное яблоко покрыто теноновой капсулой, выполняющей роль суставной сумки для вращения глаза."
+          },
+          "id": "b11",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_a90a6657e048",
+              "fg_8cddc8f00802"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Связанные сведения"
+          },
+          "id": "b12",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Защиту глазного яблока обеспечивают несколько структур:"
+          },
+          "id": "b13",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_e9ce95755bc0",
+              "fg_9d13f4bd0a88",
+              "fg_b3451e446a49"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Веки — подвижные заслонки, прикрывающие глаз снаружи; их заднее ребро плотно прилегает к поверхности яблока.",
+              "Жировая ткань глазницы — служит эластичной подушкой, предохраняющей глаз от сотрясений.",
+              "Конъюнктива — тонкая оболочка, выстилающая яблоко вплоть до роговицы."
+            ],
+            "style": "unordered"
+          },
+          "id": "b14",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_e9ce95755bc0",
+              "fg_c933d69e836c",
+              "fg_9d13f4bd0a88",
+              "fg_b3451e446a49"
+            ]
+          },
+          "type": "list"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "organ_or_body_system",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/organ_or_body_system/organ_or_body_system_Глазное яблоко.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/organ_or_body_system/organ_or_body_system_Глазное яблоко_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/organ_or_body_system_Глазное яблоко.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/organ_or_body_system/organ_or_body_system_88ca7a2d07.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/organ_or_body_system/organ_or_body_system_88ca7a2d07.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_8b637b100d9a",
+        "fg_a90a6657e048",
+        "fg_6adc6225763b",
+        "fg_b3451e446a49",
+        "fg_8cddc8f00802",
+        "fg_9d13f4bd0a88",
+        "fg_e9ce95755bc0",
+        "fg_8e28de77a580",
+        "fg_9cf4df487e6c",
+        "fg_c933d69e836c"
+      ],
+      "source_doc_ids": [
+        "doc_000996_86119390"
+      ],
+      "source_documents_count": 1,
+      "used_fact_group_ids": [
+        "fg_8b637b100d9a",
+        "fg_a90a6657e048",
+        "fg_6adc6225763b",
+        "fg_b3451e446a49",
+        "fg_8cddc8f00802",
+        "fg_9d13f4bd0a88",
+        "fg_e9ce95755bc0",
+        "fg_8e28de77a580",
+        "fg_9cf4df487e6c",
+        "fg_c933d69e836c"
+      ]
+    },
+    "tag_id": "organ_or_body_system_88ca7a2d07"
+  }
+}

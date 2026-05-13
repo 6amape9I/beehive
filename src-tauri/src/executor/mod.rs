@@ -4,6 +4,7 @@ use std::time::Instant;
 use chrono::{DateTime, Duration, Utc};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -19,7 +20,7 @@ use crate::database::{
 };
 use crate::domain::{
     AppEventLevel, ArtifactLocation, CommandErrorInfo, EntityFileRecord, RunDueTasksSummary,
-    S3StorageConfig, StageStatus, StorageProvider,
+    S3StorageConfig, StageRecord, StageStatus, StorageProvider,
 };
 use crate::file_ops;
 use crate::file_safety::read_stable_file;
@@ -27,6 +28,7 @@ use crate::s3_manifest::{
     parse_and_validate_s3_manifest, S3ManifestStatus, S3ManifestValidationContext,
     S3ManifestValidationErrorKind,
 };
+use crate::save_path::parse_s3_uri;
 use crate::state_machine::RuntimeTransitionReason;
 
 pub fn run_due_tasks(
@@ -454,19 +456,32 @@ fn execute_s3_task(
     let source_stage = find_stage_by_id(&connection, &task.stage_id)?
         .ok_or_else(|| format!("Source stage '{}' was not found.", task.stage_id))?;
     let active_stages = load_active_stages_from_connection(&connection)?;
-    let request_json = json!({
-        "mode": "s3_artifact_pointer",
-        "workspace_id": workspace_id.clone(),
-        "run_id": run_id.clone(),
-        "stage_id": task.stage_id.clone(),
-        "source": {
-            "bucket": source_bucket.clone(),
-            "key": source_key.clone(),
-            "version_id": source_file.version_id.clone(),
-            "etag": source_file.etag.clone(),
-        },
-        "manifest_prefix": manifest_prefix.clone(),
-    });
+    let Some(source_artifact_id) = source_file.artifact_id.clone() else {
+        return block_task(
+            database_path,
+            &task,
+            "S3 source artifact is missing artifact_id metadata.",
+        );
+    };
+    let target_prefix = resolve_s3_control_target_prefix(&source_stage, &active_stages, &storage)?;
+    let control_envelope = S3ControlEnvelope {
+        schema: "beehive.s3_control_envelope.v1".to_string(),
+        workspace_id: workspace_id.clone(),
+        run_id: run_id.clone(),
+        stage_id: task.stage_id.clone(),
+        source_bucket: source_bucket.clone(),
+        source_key: source_key.clone(),
+        source_version_id: source_file.version_id.clone(),
+        source_etag: source_file.etag.clone(),
+        source_entity_id: source_file.entity_id.clone(),
+        source_artifact_id,
+        manifest_prefix: manifest_prefix.clone(),
+        workspace_prefix: storage.workspace_prefix.clone(),
+        target_prefix: target_prefix.clone(),
+        save_path: target_prefix,
+    };
+    let request_json = serde_json::to_value(&control_envelope)
+        .map_err(|error| format!("Failed to serialize S3 control envelope: {error}"))?;
     let stage_run_input = NewStageRunInput {
         run_id: run_id.clone(),
         entity_id: task.entity_id.clone(),
@@ -499,29 +514,8 @@ fn execute_s3_task(
     drop(connection);
 
     let timer = Instant::now();
-    let http_result = call_s3_webhook(
-        &task.workflow_url,
-        &S3WebhookPointer {
-            workspace_id: request_json["workspace_id"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            run_id: run_id.clone(),
-            stage_id: task.stage_id.clone(),
-            source_bucket: request_json["source"]["bucket"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            source_key: request_json["source"]["key"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            source_version_id: source_file.version_id.clone(),
-            source_etag: source_file.etag.clone(),
-            manifest_prefix: manifest_prefix.clone(),
-        },
-        request_timeout_sec,
-    );
+    let http_result =
+        call_s3_control_webhook(&task.workflow_url, &control_envelope, request_timeout_sec);
     let finished_at = Utc::now();
     let duration_ms = timer.elapsed().as_millis() as u64;
     let connection = open_connection(database_path)?;
@@ -567,8 +561,8 @@ fn execute_s3_task(
         source: ArtifactLocation {
             provider: StorageProvider::S3,
             local_path: None,
-            bucket: source_file.bucket.clone(),
-            key: source_file.key.clone(),
+            bucket: Some(control_envelope.source_bucket.clone()),
+            key: Some(control_envelope.source_key.clone()),
             version_id: source_file.version_id.clone(),
             etag: source_file.etag.clone(),
             checksum_sha256: source_file.checksum_sha256.clone(),
@@ -954,7 +948,9 @@ fn call_webhook(
     Ok(HttpResponse { status, body })
 }
 
-struct S3WebhookPointer {
+#[derive(Debug, Clone, Serialize)]
+struct S3ControlEnvelope {
+    schema: String,
     workspace_id: String,
     run_id: String,
     stage_id: String,
@@ -962,12 +958,17 @@ struct S3WebhookPointer {
     source_key: String,
     source_version_id: Option<String>,
     source_etag: Option<String>,
+    source_entity_id: String,
+    source_artifact_id: String,
     manifest_prefix: String,
+    workspace_prefix: String,
+    target_prefix: String,
+    save_path: String,
 }
 
-fn call_s3_webhook(
+fn call_s3_control_webhook(
     workflow_url: &str,
-    pointer: &S3WebhookPointer,
+    control_envelope: &S3ControlEnvelope,
     timeout_sec: u64,
 ) -> Result<HttpResponse, AttemptFailure> {
     let client = Client::builder()
@@ -979,24 +980,11 @@ fn call_s3_webhook(
             http_status: None,
             response_json: None,
         })?;
-    let mut request = client
+    let response = client
         .post(workflow_url)
-        .header(CONTENT_TYPE, "application/octet-stream")
+        .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json")
-        .header("X-Beehive-Workspace-Id", &pointer.workspace_id)
-        .header("X-Beehive-Run-Id", &pointer.run_id)
-        .header("X-Beehive-Stage-Id", &pointer.stage_id)
-        .header("X-Beehive-Source-Bucket", &pointer.source_bucket)
-        .header("X-Beehive-Source-Key", &pointer.source_key)
-        .header("X-Beehive-Manifest-Prefix", &pointer.manifest_prefix);
-    if let Some(version_id) = pointer.source_version_id.as_deref() {
-        request = request.header("X-Beehive-Source-Version-Id", version_id);
-    }
-    if let Some(etag) = pointer.source_etag.as_deref() {
-        request = request.header("X-Beehive-Source-Etag", etag);
-    }
-    let response = request
-        .body(Vec::new())
+        .json(control_envelope)
         .send()
         .map_err(|error| AttemptFailure {
             error_type: if error.is_timeout() {
@@ -1017,6 +1005,75 @@ fn call_s3_webhook(
         response_json: None,
     })?;
     Ok(HttpResponse { status, body })
+}
+
+fn resolve_s3_control_target_prefix(
+    source_stage: &StageRecord,
+    active_stages: &[StageRecord],
+    storage: &S3StorageConfig,
+) -> Result<String, String> {
+    if let Some(next_stage_id) = source_stage.next_stage.as_ref() {
+        if let Some(target_stage) = active_stages
+            .iter()
+            .find(|stage| stage.id == *next_stage_id && stage.is_active)
+        {
+            if let Some(prefix) = s3_stage_input_prefix(target_stage, storage)? {
+                return Ok(prefix);
+            }
+        }
+    }
+
+    if let Some(target_stage) = active_stages
+        .iter()
+        .filter(|stage| stage.id != source_stage.id && stage.is_active)
+        .filter_map(|stage| {
+            let prefix = s3_stage_input_prefix(stage, storage).ok().flatten()?;
+            Some((stage, prefix))
+        })
+        .find(|(_, prefix)| {
+            prefix.starts_with(storage.workspace_prefix.trim_end_matches('/'))
+                && !prefix.ends_with("/raw")
+        })
+        .or_else(|| {
+            active_stages
+                .iter()
+                .filter(|stage| stage.id != source_stage.id && stage.is_active)
+                .filter_map(|stage| {
+                    let prefix = s3_stage_input_prefix(stage, storage).ok().flatten()?;
+                    Some((stage, prefix))
+                })
+                .next()
+        })
+    {
+        return Ok(target_stage.1);
+    }
+
+    Ok(format!(
+        "{}/processed",
+        storage.workspace_prefix.trim_end_matches('/')
+    ))
+}
+
+fn s3_stage_input_prefix(
+    stage: &StageRecord,
+    storage: &S3StorageConfig,
+) -> Result<Option<String>, String> {
+    let Some(input_uri) = stage.input_uri.as_deref() else {
+        return Ok(None);
+    };
+    if !input_uri.starts_with("s3://") {
+        return Ok(None);
+    }
+    let (bucket, prefix) = parse_s3_uri(input_uri).map_err(|error| {
+        format!(
+            "Invalid S3 input_uri on stage '{}': {}",
+            stage.id, error.message
+        )
+    })?;
+    if bucket != storage.bucket {
+        return Ok(None);
+    }
+    Ok(Some(prefix))
 }
 
 struct HttpResponse {
@@ -1651,7 +1708,7 @@ mod tests {
                 relation_to_source: None,
                 stage_id: "raw".to_string(),
                 bucket: "steos-s3-data".to_string(),
-                key: "main_dir/raw/input_001.json".to_string(),
+                key: s3_source_key().to_string(),
                 version_id: None,
                 etag: Some("etag-source".to_string()),
                 checksum_sha256: None,
@@ -1663,16 +1720,28 @@ mod tests {
             },
         )
         .expect("register source");
+        let connection = open_connection(&database_path).expect("open db");
+        connection
+            .execute(
+                "UPDATE entity_files SET payload_json = ?1 WHERE stage_id = 'raw'",
+                [r#"{"title":"hello beehive","body":"business payload must not be sent"}"#],
+            )
+            .expect("seed S3 business payload");
         (tempdir, workdir, database_path)
     }
 
+    fn s3_source_key() -> &'static str {
+        "main_dir/raw/smoke_entity_001__порфирия.json"
+    }
+
     fn s3_success_manifest(run_id: &str, save_path: &str, key: &str) -> String {
+        let source_key = s3_source_key();
         format!(
             r#"{{
   "schema":"beehive.s3_artifact_manifest.v1",
   "workspace_id":"beehive-s3-dev",
   "run_id":"{run_id}",
-  "source":{{"bucket":"steos-s3-data","key":"main_dir/raw/input_001.json","version_id":null,"etag":"etag-source"}},
+  "source":{{"bucket":"steos-s3-data","key":"{source_key}","version_id":null,"etag":"etag-source"}},
   "status":"success",
   "outputs":[{{"artifact_id":"art_001","entity_id":"entity-1-child","relation_to_source":"child_entity","bucket":"steos-s3-data","key":"{key}","save_path":"{save_path}","content_type":"application/json","checksum_sha256":null,"size":456}}],
   "created_at":"2026-05-12T00:00:00Z"
@@ -1681,9 +1750,11 @@ mod tests {
     }
 
     #[test]
-    fn s3_mode_sends_empty_body_headers_and_registers_output_pointer() {
+    fn s3_mode_sends_json_control_body_and_registers_output_pointer() {
         let server = mock_server_dynamic(1, |request| {
-            let run_id = header_value(request, "X-Beehive-Run-Id").expect("run header");
+            let control = serde_json::from_str::<Value>(request_body(request))
+                .expect("S3 control envelope JSON");
+            let run_id = control["run_id"].as_str().expect("run id").to_string();
             (
                 200,
                 s3_success_manifest(
@@ -1701,17 +1772,31 @@ mod tests {
         let request = requests.first().expect("request");
         let target_files = files_for_stage(&database_path, "raw_entities");
         let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+        let control = serde_json::from_str::<Value>(request_body(request)).expect("control JSON");
 
         assert_eq!(summary.succeeded, 1);
-        assert!(request_body(request).is_empty());
         assert_eq!(
-            header_value(request, "X-Beehive-Source-Bucket").as_deref(),
-            Some("steos-s3-data")
+            header_value(request, "Content-Type").as_deref(),
+            Some("application/json")
         );
         assert_eq!(
-            header_value(request, "X-Beehive-Source-Key").as_deref(),
-            Some("main_dir/raw/input_001.json")
+            control["schema"].as_str(),
+            Some("beehive.s3_control_envelope.v1")
         );
+        assert_eq!(control["source_bucket"].as_str(), Some("steos-s3-data"));
+        assert_eq!(control["source_key"].as_str(), Some(s3_source_key()));
+        assert!(request_body(request).contains("порфирия"));
+        assert_eq!(control["source_entity_id"].as_str(), Some("entity-1"));
+        assert_eq!(control["source_artifact_id"].as_str(), Some("source-001"));
+        assert_eq!(
+            control["target_prefix"].as_str(),
+            Some("main_dir/processed/raw_entities")
+        );
+        assert_eq!(
+            control["save_path"].as_str(),
+            Some("main_dir/processed/raw_entities")
+        );
+        assert!(header_value(request, "X-Beehive-Source-Key").is_none());
         assert_eq!(target_files.len(), 1);
         assert_eq!(target_files[0].storage_provider, StorageProvider::S3);
         assert_eq!(
@@ -1720,14 +1805,22 @@ mod tests {
         );
         assert!(target_files[0].producer_run_id.is_some());
         assert_eq!(stage_status(&database_path, "raw"), "done");
-        assert!(runs[0].request_json.contains("s3_artifact_pointer"));
+        assert!(runs[0]
+            .request_json
+            .contains("beehive.s3_control_envelope.v1"));
+        assert!(runs[0].request_json.contains("порфирия"));
         assert!(!runs[0].request_json.contains("hello beehive"));
+        assert!(!request_body(request).contains("hello beehive"));
+        assert!(!request_body(request).contains("business payload must not be sent"));
     }
 
     #[test]
     fn s3_error_manifest_fails_without_child_outputs() {
         let server = mock_server_dynamic(1, |request| {
-            let run_id = header_value(request, "X-Beehive-Run-Id").expect("run header");
+            let control = serde_json::from_str::<Value>(request_body(request))
+                .expect("S3 control envelope JSON");
+            let run_id = control["run_id"].as_str().expect("run id");
+            let source_key = control["source_key"].as_str().expect("source key");
             (
                 200,
                 format!(
@@ -1735,7 +1828,7 @@ mod tests {
   "schema":"beehive.s3_artifact_manifest.v1",
   "workspace_id":"beehive-s3-dev",
   "run_id":"{run_id}",
-  "source":{{"bucket":"steos-s3-data","key":"main_dir/raw/input_001.json"}},
+  "source":{{"bucket":"steos-s3-data","key":"{source_key}"}},
   "status":"error",
   "error_type":"llm_invalid_json",
   "error_message":"Model returned invalid JSON",
@@ -1760,7 +1853,9 @@ mod tests {
     #[test]
     fn s3_invalid_save_path_manifest_blocks_run() {
         let server = mock_server_dynamic(1, |request| {
-            let run_id = header_value(request, "X-Beehive-Run-Id").expect("run header");
+            let control = serde_json::from_str::<Value>(request_body(request))
+                .expect("S3 control envelope JSON");
+            let run_id = control["run_id"].as_str().expect("run id");
             (
                 200,
                 s3_success_manifest(
@@ -1785,7 +1880,10 @@ mod tests {
     #[test]
     fn s3_success_with_no_outputs_requires_stage_opt_in() {
         let server = mock_server_dynamic(1, |request| {
-            let run_id = header_value(request, "X-Beehive-Run-Id").expect("run header");
+            let control = serde_json::from_str::<Value>(request_body(request))
+                .expect("S3 control envelope JSON");
+            let run_id = control["run_id"].as_str().expect("run id");
+            let source_key = control["source_key"].as_str().expect("source key");
             (
                 200,
                 format!(
@@ -1793,7 +1891,7 @@ mod tests {
   "schema":"beehive.s3_artifact_manifest.v1",
   "workspace_id":"beehive-s3-dev",
   "run_id":"{run_id}",
-  "source":{{"bucket":"steos-s3-data","key":"main_dir/raw/input_001.json"}},
+  "source":{{"bucket":"steos-s3-data","key":"{source_key}"}},
   "status":"success",
   "outputs":[],
   "created_at":"2026-05-12T00:00:00Z"
@@ -1819,7 +1917,10 @@ mod tests {
     #[test]
     fn s3_terminal_success_with_no_outputs_marks_done() {
         let server = mock_server_dynamic(1, |request| {
-            let run_id = header_value(request, "X-Beehive-Run-Id").expect("run header");
+            let control = serde_json::from_str::<Value>(request_body(request))
+                .expect("S3 control envelope JSON");
+            let run_id = control["run_id"].as_str().expect("run id");
+            let source_key = control["source_key"].as_str().expect("source key");
             (
                 200,
                 format!(
@@ -1827,7 +1928,7 @@ mod tests {
   "schema":"beehive.s3_artifact_manifest.v1",
   "workspace_id":"beehive-s3-dev",
   "run_id":"{run_id}",
-  "source":{{"bucket":"steos-s3-data","key":"main_dir/raw/input_001.json"}},
+  "source":{{"bucket":"steos-s3-data","key":"{source_key}"}},
   "status":"success",
   "outputs":[],
   "created_at":"2026-05-12T00:00:00Z"

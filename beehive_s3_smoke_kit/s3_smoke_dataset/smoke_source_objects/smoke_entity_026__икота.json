@@ -1,0 +1,271 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_026",
+  "artifact_id": "smoke_source_artifact_026",
+  "canonical_tag_ru": "Икота",
+  "canonical_tag_latin": "Singultus",
+  "entity_type": "symptom",
+  "tag_id": "symptom_960c46f52d",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/26__symptom__Икота.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Икота представляет собой внезапное, непроизвольное и кратковременное сокращение диафрагмы — основной дыхательной мышцы. Данный спазм сопровождается резким вдохом, который мгновенно прерывается смыканием голосовой щели. Икота считается хронической, если ее продолжительность превышает 48 часов."
+    },
+    {
+      "type": "header",
+      "text": "Механизм развития и причины"
+    },
+    {
+      "type": "paragraph",
+      "text": "Икота является рефлекторным действием, запускаемым при раздражении диафрагмального и блуждающего нервов. Затяжную икоту могут вызывать нарушения центральной нервной системы, такие как инсульт (ишемические или геморрагические поражения ствола мозга), опухоли мозга или рассеянный склероз."
+    },
+    {
+      "type": "paragraph",
+      "text": "В некоторых случаях, особенно у мужчин, икота может выступать нетипичным симптомом инфаркта миокарда. Также длительную икоту может спровоцировать прием определенных медикаментов: анестетиков, бензодиазепинов, стероидов и средств для химиотерапии."
+    },
+    {
+      "type": "header",
+      "text": "Методы купирования и лечение"
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Singultus",
+    "canonical_tag_ru": "Икота",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "h1",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Икота представляет собой внезапное, непроизвольное и кратковременное сокращение диафрагмы — основной дыхательной мышцы. Данный спазм сопровождается резким вдохом, который мгновенно прерывается смыканием голосовой щели. Икота считается хронической, если ее продолжительность превышает 48 часов."
+          },
+          "id": "p1",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_08266240b1eb",
+              "fg_05e7361371e9"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Механизм развития и причины"
+          },
+          "id": "h2",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Икота является рефлекторным действием, запускаемым при раздражении диафрагмального и блуждающего нервов. Затяжную икоту могут вызывать нарушения центральной нервной системы, такие как инсульт (ишемические или геморрагические поражения ствола мозга), опухоли мозга или рассеянный склероз."
+          },
+          "id": "p2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_30ccd8975c5c",
+              "fg_3bc5d6bf2aaa"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "В некоторых случаях, особенно у мужчин, икота может выступать нетипичным симптомом инфаркта миокарда. Также длительную икоту может спровоцировать прием определенных медикаментов: анестетиков, бензодиазепинов, стероидов и средств для химиотерапии."
+          },
+          "id": "p3",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_a50b9bbbcb90",
+              "fg_dbe1fe641627"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Методы купирования и лечение"
+          },
+          "id": "h3",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Для самостоятельного прекращения икоты применяются методы, повышающие уровень углекислого газа в крови: задержка дыхания на 10–15 секунд или дыхание в бумажный пакет. Также помогает питье воды мелкими непрерывными глотками, что активизирует блуждающий нерв."
+          },
+          "id": "p4",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_263aef60a21e",
+              "fg_bc60a713308f",
+              "fg_1c3b23530f2f"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Медикаментозная терапия может включать блокаторы дофаминовых рецепторов (например, метоклопрамид) для снижения возбудимости нервов желудка и пищевода, антиконвульсанты (габапентин, прегабалин) при неврологической природе симптома или кортикостероиды при воспалительных процессах. В редких случаях при анатомической компрессии нервов требуется хирургическое вмешательство."
+          },
+          "id": "p5",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_3d60a82054c3",
+              "fg_3ab5ed2fda2d",
+              "fg_ddf635d8aad0",
+              "fg_0ffbae009c45"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Профилактика и образ жизни"
+          },
+          "id": "h4",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Для предупреждения икоты рекомендуется избегать переедания, быстрого поглощения пищи, газированных напитков и алкоголя. Важно соблюдать температурный режим пищи, обеспечивать полноценный сон и снижать уровень стресса."
+          },
+          "id": "p6",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_1fc97a4cb74f",
+              "fg_7e47b1f61c09",
+              "fg_daa6af6d10c1",
+              "fg_e6f78b63f922"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Когда обратиться к врачу"
+          },
+          "id": "h5",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "items": [
+              "Икота длится более 48 часов без перерывов.",
+              "Симптом сопровождается сильной болью в груди или животе."
+            ],
+            "style": "unordered"
+          },
+          "id": "list1",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_e23e07769509",
+              "fg_8b3a4ae23eaa"
+            ]
+          },
+          "type": "list"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "symptom",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/symptom/symptom_Икота.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/symptom/symptom_Икота_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/symptom_Икота.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/symptom/symptom_960c46f52d.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/symptom/symptom_960c46f52d.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_05e7361371e9",
+        "fg_08266240b1eb",
+        "fg_3d60a82054c3",
+        "fg_3ab5ed2fda2d",
+        "fg_30ccd8975c5c",
+        "fg_e6f78b63f922",
+        "fg_bc60a713308f",
+        "fg_7e47b1f61c09",
+        "fg_ddf635d8aad0",
+        "fg_263aef60a21e",
+        "fg_1c3b23530f2f",
+        "fg_0ffbae009c45",
+        "fg_e23e07769509",
+        "fg_8b3a4ae23eaa",
+        "fg_a50b9bbbcb90",
+        "fg_3bc5d6bf2aaa",
+        "fg_1fc97a4cb74f",
+        "fg_dbe1fe641627",
+        "fg_daa6af6d10c1"
+      ],
+      "source_doc_ids": [
+        "doc_005859_1b81a28d"
+      ],
+      "source_documents_count": 1,
+      "used_fact_group_ids": [
+        "fg_05e7361371e9",
+        "fg_08266240b1eb",
+        "fg_3d60a82054c3",
+        "fg_3ab5ed2fda2d",
+        "fg_30ccd8975c5c",
+        "fg_e6f78b63f922",
+        "fg_bc60a713308f",
+        "fg_7e47b1f61c09",
+        "fg_ddf635d8aad0",
+        "fg_263aef60a21e",
+        "fg_1c3b23530f2f",
+        "fg_0ffbae009c45",
+        "fg_e23e07769509",
+        "fg_8b3a4ae23eaa",
+        "fg_a50b9bbbcb90",
+        "fg_3bc5d6bf2aaa",
+        "fg_1fc97a4cb74f",
+        "fg_dbe1fe641627",
+        "fg_daa6af6d10c1"
+      ]
+    },
+    "tag_id": "symptom_960c46f52d"
+  }
+}

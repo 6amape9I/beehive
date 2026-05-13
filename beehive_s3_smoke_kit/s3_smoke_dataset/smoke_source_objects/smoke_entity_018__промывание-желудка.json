@@ -1,0 +1,393 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_018",
+  "artifact_id": "smoke_source_artifact_018",
+  "canonical_tag_ru": "Промывание желудка",
+  "canonical_tag_latin": "Gastric lavage",
+  "entity_type": "procedure",
+  "tag_id": "procedure_5a20fbf7ac",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/18__procedure__Промывание желудка.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Промывание желудка (желудочный лаваж) — это процедура, целью которой является механическое удаление из организма остатков пищи и токсичных веществ. Метод может быть беззондовым (вызывание рвоты) или зондовым."
+    },
+    {
+      "type": "header",
+      "text": "Когда применяется"
+    },
+    {
+      "type": "paragraph",
+      "text": "Процедура проводится в рамках детоксикации при попадании ядов и опасных веществ внутрь. Показаниями являются отравления:"
+    },
+    {
+      "type": "list",
+      "items": [
+        "Химическими веществами: ацетоном, бензином, бензолом, бромом, йодом, кислотами, скипидаром, ФОС.",
+        "Лекарственными средствами: атропином, барбитуратами, морфином, сердечными гликозидами, салициловой кислотой, сульфаниламидами, кокаином.",
+        "Растениями и грибами: вехом, болиголовом, красным мухомором, коричневыми поганками, растениями с циангликозидами.",
+        "Спиртами: метиловым и этиловым спиртами, антифризом.",
+        "Наркотическими веществами: гашишем (марихуаной)."
+      ]
+    },
+    {
+      "type": "header",
+      "text": "Порядок выполнения"
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Gastric lavage",
+    "canonical_tag_ru": "Промывание желудка",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "block_101",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Промывание желудка (желудочный лаваж) — это процедура, целью которой является механическое удаление из организма остатков пищи и токсичных веществ. Метод может быть беззондовым (вызывание рвоты) или зондовым."
+          },
+          "id": "block_102",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_331c99783134",
+              "fg_6a71432accff"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Когда применяется"
+          },
+          "id": "block_103",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Процедура проводится в рамках детоксикации при попадании ядов и опасных веществ внутрь. Показаниями являются отравления:"
+          },
+          "id": "block_104",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_72be668c5ad3",
+              "fg_35b734a14a1d"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Химическими веществами: ацетоном, бензином, бензолом, бромом, йодом, кислотами, скипидаром, ФОС.",
+              "Лекарственными средствами: атропином, барбитуратами, морфином, сердечными гликозидами, салициловой кислотой, сульфаниламидами, кокаином.",
+              "Растениями и грибами: вехом, болиголовом, красным мухомором, коричневыми поганками, растениями с циангликозидами.",
+              "Спиртами: метиловым и этиловым спиртами, антифризом.",
+              "Наркотическими веществами: гашишем (марихуаной)."
+            ],
+            "style": "unordered"
+          },
+          "id": "block_105",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_b1d0eb7664a5",
+              "fg_860e1b040d39",
+              "fg_e9dd09eefd81",
+              "fg_20782fc9987a",
+              "fg_93dd65770add",
+              "fg_68b8e0a05ade",
+              "fg_3c627ae340dc",
+              "fg_73e34bd26654",
+              "fg_d7c4bbb6af6d",
+              "fg_16f549b81a54",
+              "fg_194a0d8f0352",
+              "fg_aacec66f4fe7",
+              "fg_e016c87d8395",
+              "fg_471340689b8f",
+              "fg_b78314d57a42",
+              "fg_d9febce5d2c8"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Порядок выполнения"
+          },
+          "id": "block_106",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Для взрослых пациентов требуется не менее 10–12 литров воды комнатной температуры (при кровотечении — 8–10 °С). Одномоментный объем вводимой жидкости не должен превышать 300–350 мл. Зондовое промывание при отравлении прижигающими веществами (кислотами) проводят как можно раньше, используя зонд, обильно смазанный маслом, и только после обезболивания."
+          },
+          "id": "block_107",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_3232c86e6c60",
+              "fg_2a0abab42270",
+              "fg_68b8e0a05ade",
+              "fg_68b168e35112"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "В зависимости от типа яда применяются специфические растворы:"
+          },
+          "id": "block_108",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_4499234adc6a"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "0,1% раствор перманганата калия или 0,5% раствор тиосульфата натрия.",
+              "2% или 3% раствор гидрокарбоната натрия.",
+              "1% раствор сульфата магния или натрия (при отравлении солями бария).",
+              "Взвесь крахмала (при отравлении йодом).",
+              "5% раствор хлорида натрия или 3% раствор хлорида аммония."
+            ],
+            "style": "unordered"
+          },
+          "id": "block_109",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_4499234adc6a",
+              "fg_39b80bc362c8",
+              "fg_998e74d15233",
+              "fg_1d4fe85e179c",
+              "fg_93dd65770add",
+              "fg_b7690a20aea2"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "text": "Процедура часто завершается введением энтеросорбентов (активированный уголь, ваулен, СКН в дозе 20–40 г), солевых слабительных или вазелинового масла. При определенных отравлениях через зонд вводят унитиол или димеркапрол."
+          },
+          "id": "block_110",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_ef614eec9985",
+              "fg_ad9109326426",
+              "fg_e9dd09eefd81",
+              "fg_5f8f982cec8d",
+              "fg_8229d253360f"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Меры безопасности"
+          },
+          "id": "block_111",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Пациентам в состоянии комы, при судорогах или выраженной гиповентиляции промывание желудка проводят исключительно после предварительной интубации трахеи для предотвращения аспирации."
+          },
+          "id": "block_112",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_374279c2653a",
+              "fg_f29c4e3f3dfa",
+              "fg_a9916eda9e40"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Ограничения"
+          },
+          "id": "block_113",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Беззондовое промывание (вызывание рвоты) противопоказано при отравлении прижигающими ядами, в коме и при приеме веществ с противорвотным действием. Самостоятельное промывание запрещено при высокой температуре, потере сознания, тяжелых болезнях сердца, беременности и в детском возрасте."
+          },
+          "id": "block_114",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_183266116c55",
+              "fg_e0fb9001fc43"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "procedure",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/procedure/procedure_Промывание желудка.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/procedure/procedure_Промывание желудка_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/procedure_Промывание желудка.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/procedure/procedure_5a20fbf7ac.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/procedure/procedure_5a20fbf7ac.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_6a71432accff",
+        "fg_4499234adc6a",
+        "fg_39b80bc362c8",
+        "fg_3232c86e6c60",
+        "fg_b1d0eb7664a5",
+        "fg_20782fc9987a",
+        "fg_72be668c5ad3",
+        "fg_d9febce5d2c8",
+        "fg_860e1b040d39",
+        "fg_e016c87d8395",
+        "fg_194a0d8f0352",
+        "fg_73e34bd26654",
+        "fg_02a5e0d520a3",
+        "fg_b78314d57a42",
+        "fg_16f549b81a54",
+        "fg_471340689b8f",
+        "fg_3c627ae340dc",
+        "fg_68b168e35112",
+        "fg_aacec66f4fe7",
+        "fg_d7c4bbb6af6d",
+        "fg_374279c2653a",
+        "fg_998e74d15233",
+        "fg_93dd65770add",
+        "fg_f29c4e3f3dfa",
+        "fg_2a0abab42270",
+        "fg_1d4fe85e179c",
+        "fg_8229d253360f",
+        "fg_68b8e0a05ade",
+        "fg_35b734a14a1d",
+        "fg_e9dd09eefd81",
+        "fg_5f8f982cec8d",
+        "fg_ef614eec9985",
+        "fg_ea953e131457",
+        "fg_6800dfcbeb43",
+        "fg_5e090359568d",
+        "fg_8e4f4c292a31",
+        "fg_ad9109326426",
+        "fg_1253a27686e3",
+        "fg_5779d144363b",
+        "fg_10ac99365887",
+        "fg_331c99783134",
+        "fg_a9916eda9e40",
+        "fg_183266116c55",
+        "fg_e0fb9001fc43",
+        "fg_e781901eafdb",
+        "fg_40c15fbd7336",
+        "fg_3dc707616595",
+        "fg_b7690a20aea2",
+        "fg_5e91f3e0a655"
+      ],
+      "source_doc_ids": [
+        "doc_004189_d7fe9180",
+        "doc_009282_1877e7a5",
+        "doc_011292_3b684313"
+      ],
+      "source_documents_count": 3,
+      "used_fact_group_ids": [
+        "fg_6a71432accff",
+        "fg_4499234adc6a",
+        "fg_39b80bc362c8",
+        "fg_3232c86e6c60",
+        "fg_b1d0eb7664a5",
+        "fg_20782fc9987a",
+        "fg_72be668c5ad3",
+        "fg_d9febce5d2c8",
+        "fg_860e1b040d39",
+        "fg_e016c87d8395",
+        "fg_194a0d8f0352",
+        "fg_73e34bd26654",
+        "fg_02a5e0d520a3",
+        "fg_b78314d57a42",
+        "fg_16f549b81a54",
+        "fg_471340689b8f",
+        "fg_3c627ae340dc",
+        "fg_68b168e35112",
+        "fg_aacec66f4fe7",
+        "fg_d7c4bbb6af6d",
+        "fg_374279c2653a",
+        "fg_998e74d15233",
+        "fg_93dd65770add",
+        "fg_f29c4e3f3dfa",
+        "fg_2a0abab42270",
+        "fg_1d4fe85e179c",
+        "fg_8229d253360f",
+        "fg_68b8e0a05ade",
+        "fg_35b734a14a1d",
+        "fg_e9dd09eefd81",
+        "fg_5f8f982cec8d",
+        "fg_ef614eec9985",
+        "fg_ea953e131457",
+        "fg_6800dfcbeb43",
+        "fg_5e090359568d",
+        "fg_8e4f4c292a31",
+        "fg_ad9109326426",
+        "fg_1253a27686e3",
+        "fg_5779d144363b",
+        "fg_10ac99365887",
+        "fg_331c99783134",
+        "fg_a9916eda9e40",
+        "fg_183266116c55",
+        "fg_e0fb9001fc43",
+        "fg_e781901eafdb",
+        "fg_40c15fbd7336",
+        "fg_3dc707616595",
+        "fg_b7690a20aea2",
+        "fg_5e91f3e0a655"
+      ]
+    },
+    "tag_id": "procedure_5a20fbf7ac"
+  }
+}

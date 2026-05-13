@@ -1,0 +1,380 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_005",
+  "artifact_id": "smoke_source_artifact_005",
+  "canonical_tag_ru": "Пищевая аллергия",
+  "canonical_tag_latin": "Food allergy",
+  "entity_type": "disease",
+  "tag_id": "disease_bd5dd9de2e",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/05__disease__Пищевая аллергия.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Пищевая аллергия представляет собой патологическую реакцию иммунной системы на белки, содержащиеся в продуктах питания. Организм ошибочно идентифицирует эти безвредные белки как угрозу (антигены) и запускает защитный ответ."
+    },
+    {
+      "type": "paragraph",
+      "text": "Важно отличать аллергию от пищевой непереносимости: последняя не вовлекает иммунные механизмы и часто связана с дефицитом ферментов, например, лактазы."
+    },
+    {
+      "type": "paragraph",
+      "text": "Механизм развития включает две фазы: сенсибилизацию, при которой вырабатываются специфические антитела класса IgE, и фазу реакции, когда при повторном контакте с аллергеном происходит выброс гистамина и других медиаторов воспаления."
+    },
+    {
+      "type": "list",
+      "items": [
+        "IgE-опосредованная аллергия (классический механизм с участием антител);",
+        "Не IgE-опосредованная аллергия (клеточно-опосредованные реакции);",
+        "Смешанная аллергия (сочетает оба механизма)."
+      ]
+    },
+    {
+      "type": "header",
+      "text": "Причины и факторы риска"
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Food allergy",
+    "canonical_tag_ru": "Пищевая аллергия",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "b1",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Пищевая аллергия представляет собой патологическую реакцию иммунной системы на белки, содержащиеся в продуктах питания. Организм ошибочно идентифицирует эти безвредные белки как угрозу (антигены) и запускает защитный ответ."
+          },
+          "id": "b2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_7749d9d4cfc9",
+              "fg_00610d6afd2a"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Важно отличать аллергию от пищевой непереносимости: последняя не вовлекает иммунные механизмы и часто связана с дефицитом ферментов, например, лактазы."
+          },
+          "id": "b3",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_c75e238b6c85"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Механизм развития включает две фазы: сенсибилизацию, при которой вырабатываются специфические антитела класса IgE, и фазу реакции, когда при повторном контакте с аллергеном происходит выброс гистамина и других медиаторов воспаления."
+          },
+          "id": "b4",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_ed02bd63f7eb"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "IgE-опосредованная аллергия (классический механизм с участием антител);",
+              "Не IgE-опосредованная аллергия (клеточно-опосредованные реакции);",
+              "Смешанная аллергия (сочетает оба механизма)."
+            ],
+            "style": "unordered"
+          },
+          "id": "b5",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_7a34307067b6"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Причины и факторы риска"
+          },
+          "id": "b6",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Основными триггерами заболевания являются белки, содержащиеся в молоке, яйцах, орехах, рыбе, морепродуктах, пшенице и сое."
+          },
+          "id": "b7",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_2a2348f16582"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Симптомы"
+          },
+          "id": "b8",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Клинические проявления зависят от формы аллергии:"
+          },
+          "id": "b9",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_a0f9da02c460",
+              "fg_cbd66686078f"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Оральный аллергический синдром: зуд, отек и покраснение в области рта и глотки после употребления сырых овощей, фруктов или орехов.",
+              "Эозинофильный эзофагит: воспаление пищевода, вызывающее затрудненное глотание (дисфагию), изжогу и боль в груди."
+            ],
+            "style": "unordered"
+          },
+          "id": "b10",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_a0f9da02c460",
+              "fg_cbd66686078f"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Диагностика"
+          },
+          "id": "b11",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Для подтверждения диагноза применяются следующие методы:"
+          },
+          "id": "b12",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_d1152a1adc7c"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Кожные пробы для выявления специфических IgE-антител;",
+              "Лабораторные анализы крови на уровень специфических IgE;",
+              "Элиминационная диета (исключение подозреваемых продуктов);",
+              "Провокационные тесты под строгим медицинским контролем."
+            ],
+            "style": "unordered"
+          },
+          "id": "b13",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_d1152a1adc7c"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Лечение"
+          },
+          "id": "b14",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Основным методом управления состоянием является полное исключение контакта с выявленными аллергенами. В некоторых случаях симптомы орального аллергического синдрома могут значительно ослабнуть после проведения аллерген-специфической иммунотерапии (АСИТ)."
+          },
+          "id": "b15",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_0054bcba31fa",
+              "fg_bc0984dd813c"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Профилактика"
+          },
+          "id": "b16",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Согласно современным рекомендациям, раннее введение потенциальных аллергенов в рацион младенцев может способствовать снижению риска развития сенсибилизации."
+          },
+          "id": "b17",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_3cc15f46d668"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Осложнения"
+          },
+          "id": "b18",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Пищевая аллергия может приводить к тяжелым последствиям, таким как анафилактический шок, отек Квинке, астматические приступы, а также к хроническим кожным заболеваниям (экзема, крапивница)."
+          },
+          "id": "b19",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_19d6e0ad229f"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Связанные сведения"
+          },
+          "id": "b20",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Прогноз заболевания зависит от типа аллергена и возраста. У детей аллергия на молоко, яйца, пшеницу или сою часто проходит со временем. Напротив, аллергия на арахис, орехи, рыбу и морепродукты обычно сохраняется на всю жизнь."
+          },
+          "id": "b21",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_6e07c0e5452e",
+              "fg_76708130785c",
+              "fg_7331e060ff09"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "disease",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/disease/disease_Пищевая аллергия.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/disease/disease_Пищевая аллергия_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/disease_Пищевая аллергия.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/disease/disease_bd5dd9de2e.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/disease/disease_bd5dd9de2e.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_7749d9d4cfc9",
+        "fg_00610d6afd2a",
+        "fg_7a34307067b6",
+        "fg_ed02bd63f7eb",
+        "fg_d1152a1adc7c",
+        "fg_0054bcba31fa",
+        "fg_6e07c0e5452e",
+        "fg_76708130785c",
+        "fg_7331e060ff09",
+        "fg_a0f9da02c460",
+        "fg_cbd66686078f",
+        "fg_bc0984dd813c",
+        "fg_3cc15f46d668",
+        "fg_2a2348f16582",
+        "fg_19d6e0ad229f",
+        "fg_c75e238b6c85"
+      ],
+      "source_doc_ids": [
+        "doc_010544_8a5063a7",
+        "doc_010545_641d42e5"
+      ],
+      "source_documents_count": 2,
+      "used_fact_group_ids": [
+        "fg_7749d9d4cfc9",
+        "fg_00610d6afd2a",
+        "fg_7a34307067b6",
+        "fg_ed02bd63f7eb",
+        "fg_d1152a1adc7c",
+        "fg_0054bcba31fa",
+        "fg_6e07c0e5452e",
+        "fg_76708130785c",
+        "fg_7331e060ff09",
+        "fg_a0f9da02c460",
+        "fg_cbd66686078f",
+        "fg_bc0984dd813c",
+        "fg_3cc15f46d668",
+        "fg_2a2348f16582",
+        "fg_19d6e0ad229f",
+        "fg_c75e238b6c85"
+      ]
+    },
+    "tag_id": "disease_bd5dd9de2e"
+  }
+}

@@ -1,0 +1,41 @@
+project:
+  name: beehive-s3-smoke
+  workdir: .
+
+storage:
+  provider: s3
+  bucket: steos-s3-data
+  workspace_prefix: beehive-smoke/test_workflow
+  region: ru-1
+  endpoint: https://s3.ru-1.storage.selcloud.ru
+
+runtime:
+  scan_interval_sec: 5
+  max_parallel_tasks: 1
+  stuck_task_timeout_sec: 300
+  request_timeout_sec: 300
+  file_stability_delay_ms: 0
+
+stages:
+  - id: smoke_source
+    input_uri: s3://steos-s3-data/beehive-smoke/test_workflow/raw
+    workflow_url: https://n8n-dev.steos.io/webhook/REPLACE_WITH_IMPORTED_SMOKE_WEBHOOK_PATH
+    max_attempts: 2
+    retry_delay_sec: 10
+    next_stage:
+    save_path_aliases:
+      - beehive-smoke/test_workflow/raw
+      - /beehive-smoke/test_workflow/raw
+    allow_empty_outputs: false
+
+  - id: smoke_processed
+    input_uri: s3://steos-s3-data/beehive-smoke/test_workflow/processed
+    workflow_url: http://localhost:5678/webhook/not-used-terminal-smoke-target
+    max_attempts: 1
+    retry_delay_sec: 0
+    next_stage:
+    save_path_aliases:
+      - beehive-smoke/test_workflow/processed
+      - /beehive-smoke/test_workflow/processed
+      - s3://steos-s3-data/beehive-smoke/test_workflow/processed
+    allow_empty_outputs: true

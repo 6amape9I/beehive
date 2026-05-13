@@ -1,0 +1,16 @@
+{
+  "schema": "beehive.s3_control_envelope.v1",
+  "workspace_id": "beehive-s3-smoke",
+  "run_id": "manual_curl_smoke_001",
+  "stage_id": "smoke_source",
+  "source_bucket": "steos-s3-data",
+  "source_key": "beehive-smoke/test_workflow/raw/smoke_entity_001__порфирия.json",
+  "source_version_id": null,
+  "source_etag": null,
+  "source_entity_id": "smoke_entity_001",
+  "source_artifact_id": "smoke_artifact_001",
+  "manifest_prefix": "beehive-smoke/test_workflow/runs/manual_curl_smoke_001/",
+  "workspace_prefix": "beehive-smoke/test_workflow",
+  "target_prefix": "beehive-smoke/test_workflow/processed",
+  "save_path": "beehive-smoke/test_workflow/processed"
+}

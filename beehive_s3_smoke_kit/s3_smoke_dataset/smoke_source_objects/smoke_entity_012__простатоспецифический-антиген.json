@@ -1,0 +1,219 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_012",
+  "artifact_id": "smoke_source_artifact_012",
+  "canonical_tag_ru": "Простатоспецифический антиген",
+  "canonical_tag_latin": "Prostate-specific antigen",
+  "entity_type": "diagnostic_method",
+  "tag_id": "diagnostic_method_76df69aae2",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/12__diagnostic_method__Простатоспецифический антиген.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Простатоспецифический антиген (ПСА) является основным ранним маркером, позволяющим выявить потенциальные патологические изменения в предстательной железе. Повышение его уровня в крови служит важным сигналом, требующим дальнейшего медицинского обследования для исключения или подтверждения аденокарциномы простаты."
+    },
+    {
+      "type": "header",
+      "text": "Для чего применяется"
+    },
+    {
+      "type": "paragraph",
+      "text": "Определение уровня ПСА в крови применяется для диагностики различных форм новообразований, включая коллоидную аденокарциному простаты, так как наличие опухоли часто сопровождается ростом этого показателя. Также анализ используется в качестве регулярного скрининга для профилактики заболеваний у мужчин."
+    },
+    {
+      "type": "list",
+      "items": [
+        "Скрининг рекомендуется всем мужчинам с 40 лет, особенно при наличии семейного анамнеза рака простаты.",
+        "Регулярное обследование показано мужчинам в возрасте старше 45-50 лет.",
+        "Мониторинг уровня ПСА проводится после радикального лечения для раннего обнаружения возможного рецидива."
+      ]
+    },
+    {
+      "type": "header",
+      "text": "Особенности исследования"
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Prostate-specific antigen",
+    "canonical_tag_ru": "Простатоспецифический антиген",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "psa_h1",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Простатоспецифический антиген (ПСА) является основным ранним маркером, позволяющим выявить потенциальные патологические изменения в предстательной железе. Повышение его уровня в крови служит важным сигналом, требующим дальнейшего медицинского обследования для исключения или подтверждения аденокарциномы простаты."
+          },
+          "id": "psa_p1",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_94945d4de385",
+              "fg_a23be5a1a877"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Для чего применяется"
+          },
+          "id": "psa_h2",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Определение уровня ПСА в крови применяется для диагностики различных форм новообразований, включая коллоидную аденокарциному простаты, так как наличие опухоли часто сопровождается ростом этого показателя. Также анализ используется в качестве регулярного скрининга для профилактики заболеваний у мужчин."
+          },
+          "id": "psa_p2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_1989bcaeb82f",
+              "fg_7fd9a1f8ad52"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Скрининг рекомендуется всем мужчинам с 40 лет, особенно при наличии семейного анамнеза рака простаты.",
+              "Регулярное обследование показано мужчинам в возрасте старше 45-50 лет.",
+              "Мониторинг уровня ПСА проводится после радикального лечения для раннего обнаружения возможного рецидива."
+            ],
+            "style": "unordered"
+          },
+          "id": "psa_l1",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_ec1d78e6c855",
+              "fg_7fd9a1f8ad52",
+              "fg_d6e6fcd6bb60",
+              "fg_b80d3ed0255e"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Особенности исследования"
+          },
+          "id": "psa_h3",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Для получения более точных данных в рамках комплексного онкологического скрининга может измеряться не только общий, но и свободный ПСА. В случае обнаружения повышенных показателей пациенту необходимо незамедлительно обратиться за консультацией к урологу или онкоурологу."
+          },
+          "id": "psa_p3",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_bdf6569f2af0",
+              "fg_51df0e85d74c"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Подготовка"
+          },
+          "id": "psa_h4",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Для обеспечения достоверности результатов перед сдачей анализа крови на ПСА, а также перед проведением трансректального обследования, необходимо соблюдать режим воздержания от половых контактов и эякуляции в течение как минимум двух дней."
+          },
+          "id": "psa_p4",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_a2ceda7b1af8"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "diagnostic_method",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/diagnostic_method/diagnostic_method_Простатоспецифический антиген.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/diagnostic_method/diagnostic_method_Простатоспецифический антиген_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/diagnostic_method_Простатоспецифический антиген.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/diagnostic_method/diagnostic_method_76df69aae2.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/diagnostic_method/diagnostic_method_76df69aae2.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_94945d4de385",
+        "fg_a23be5a1a877",
+        "fg_1989bcaeb82f",
+        "fg_7fd9a1f8ad52",
+        "fg_ec1d78e6c855",
+        "fg_bdf6569f2af0",
+        "fg_d6e6fcd6bb60",
+        "fg_b80d3ed0255e",
+        "fg_51df0e85d74c",
+        "fg_a2ceda7b1af8"
+      ],
+      "source_doc_ids": [
+        "doc_000365_7ace6653",
+        "doc_006787_40db6050",
+        "doc_006906_6d39afd8"
+      ],
+      "source_documents_count": 3,
+      "used_fact_group_ids": [
+        "fg_94945d4de385",
+        "fg_a23be5a1a877",
+        "fg_1989bcaeb82f",
+        "fg_7fd9a1f8ad52",
+        "fg_ec1d78e6c855",
+        "fg_bdf6569f2af0",
+        "fg_d6e6fcd6bb60",
+        "fg_b80d3ed0255e",
+        "fg_51df0e85d74c",
+        "fg_a2ceda7b1af8"
+      ]
+    },
+    "tag_id": "diagnostic_method_76df69aae2"
+  }
+}

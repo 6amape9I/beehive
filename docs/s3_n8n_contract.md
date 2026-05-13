@@ -4,41 +4,50 @@
 
 In S3 mode Beehive does not send business JSON to n8n. Beehive sends only a technical pointer to one claimed S3 artifact. n8n downloads that artifact from S3, writes outputs back to S3, and returns a technical manifest.
 
+B2.2 uses JSON control envelope body.
+Headers are deprecated for S3 object keys and should not be used for source_key.
+The control envelope is technical metadata, not business JSON.
+
 ## Webhook Request
 
-Beehive sends:
+B2.2 request mode:
 
 ```text
 POST workflow_url
-Content-Type: application/octet-stream
+Content-Type: application/json
 Accept: application/json
 ```
 
-The HTTP body is empty.
+Body:
 
-Required headers:
-
-```text
-X-Beehive-Workspace-Id
-X-Beehive-Run-Id
-X-Beehive-Stage-Id
-X-Beehive-Source-Bucket
-X-Beehive-Source-Key
-X-Beehive-Manifest-Prefix
+```json
+{
+  "schema": "beehive.s3_control_envelope.v1",
+  "workspace_id": "beehive-s3-smoke",
+  "run_id": "run_uuid",
+  "stage_id": "smoke_source",
+  "source_bucket": "steos-s3-data",
+  "source_key": "beehive-smoke/test_workflow/raw/smoke_entity_001__порфирия.json",
+  "source_version_id": null,
+  "source_etag": null,
+  "source_entity_id": "smoke_entity_001",
+  "source_artifact_id": "smoke_source_artifact_001",
+  "manifest_prefix": "beehive-smoke/test_workflow/runs/run_uuid/",
+  "workspace_prefix": "beehive-smoke/test_workflow",
+  "target_prefix": "beehive-smoke/test_workflow/processed",
+  "save_path": "beehive-smoke/test_workflow/processed"
+}
 ```
 
-Optional headers:
+This body is a technical control envelope, not business JSON. It must not include source document text, content blocks, `payload_json`, `raw_article`, or other business payload fields.
 
-```text
-X-Beehive-Source-Version-Id
-X-Beehive-Source-Etag
-```
+The older empty-body plus `X-Beehive-*` header mode is deprecated for S3 mode. In particular, S3 `source_key` should not be sent through headers because real object keys may contain Cyrillic and other non-ASCII characters.
 
 ## n8n Responsibilities
 
 n8n should:
 
-1. Read the source bucket/key headers.
+1. Read the JSON control envelope body.
 2. Download exactly that S3 object.
 3. Parse and transform the business JSON.
 4. Upload output business JSON artifacts to configured S3 prefixes.
@@ -171,6 +180,6 @@ The real one-artifact smoke path is:
 2. Ensure one source object is tagged or manually registered.
 3. Run S3 reconciliation or manual registration so Beehive has one pending source pointer.
 4. Run `run_due_tasks` or `run_entity_stage`.
-5. Confirm n8n receives empty body plus Beehive S3 pointer headers.
+5. Confirm n8n receives a JSON control envelope with the exact Cyrillic `source_key`.
 6. Confirm n8n returns a synchronous `beehive.s3_artifact_manifest.v1` manifest.
 7. Confirm Beehive registers output pointers with `artifact_id`, `entity_id`, `relation_to_source`, `bucket`, `key`, and `save_path`.

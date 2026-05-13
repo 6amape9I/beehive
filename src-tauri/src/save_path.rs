@@ -111,7 +111,7 @@ pub(crate) fn resolve_s3_save_path_route(
             }
         }
         for alias in &stage.save_path_aliases {
-            stage_paths.push(normalize_save_path(alias)?);
+            stage_paths.push(normalize_s3_requested_route(alias, storage)?);
         }
         stage_paths.sort();
         stage_paths.dedup();
@@ -209,6 +209,17 @@ fn normalize_s3_requested_route(
             });
         }
         Ok(key)
+    } else if let Some(stripped) = trimmed.strip_prefix('/') {
+        let requested = normalize_relative_logical_path(stripped, "save_path")?;
+        let workspace_prefix = storage.workspace_prefix.trim_matches('/');
+        if !workspace_prefix.is_empty()
+            && (requested == workspace_prefix
+                || requested.starts_with(&format!("{workspace_prefix}/")))
+        {
+            Ok(requested)
+        } else {
+            normalize_save_path(trimmed)
+        }
     } else {
         normalize_save_path(trimmed)
     }
@@ -389,7 +400,10 @@ mod tests {
         let stages = vec![s3_stage(
             "raw_entities",
             "s3://steos-s3-data/main_dir/processed/raw_entities",
-            vec!["/main_dir/processed/raw_entities"],
+            vec![
+                "/main_dir/processed/raw_entities",
+                "s3://steos-s3-data/main_dir/processed/raw_entities",
+            ],
         )];
         let storage = s3_config();
 

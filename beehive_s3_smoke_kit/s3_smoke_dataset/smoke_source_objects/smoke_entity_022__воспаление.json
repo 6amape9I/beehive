@@ -1,0 +1,274 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_022",
+  "artifact_id": "smoke_source_artifact_022",
+  "canonical_tag_ru": "Воспаление",
+  "canonical_tag_latin": "Inflammation",
+  "entity_type": "medical_concept",
+  "tag_id": "medical_concept_e8f5eb4a55",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/22__medical_concept__Воспаление.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что такое воспаление"
+    },
+    {
+      "type": "paragraph",
+      "text": "Воспаление представляет собой универсальный защитный ответ организма на воздействие повреждающих факторов, таких как инфекции, травмы или токсины. Основная цель этого процесса — устранение повреждающего агента и последующее восстановление целостности тканей."
+    },
+    {
+      "type": "header",
+      "text": "Типы воспаления"
+    },
+    {
+      "type": "paragraph",
+      "text": "Выделяют две основные формы воспалительного процесса:"
+    },
+    {
+      "type": "list",
+      "items": [
+        "Острое воспаление: интенсивная кратковременная реакция (от нескольких дней до недель), направленная на быструю локализацию угрозы и запуск репарации.",
+        "Хроническое воспаление: вялотекущий процесс, длящийся месяцы или годы, при котором утрачивается защитная функция и происходит повреждение здоровых тканей."
+      ]
+    },
+    {
+      "type": "header",
+      "text": "Клинические признаки и причины"
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Inflammation",
+    "canonical_tag_ru": "Воспаление",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что такое воспаление"
+          },
+          "id": "b1",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Воспаление представляет собой универсальный защитный ответ организма на воздействие повреждающих факторов, таких как инфекции, травмы или токсины. Основная цель этого процесса — устранение повреждающего агента и последующее восстановление целостности тканей."
+          },
+          "id": "b2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_6f66decf971c"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Типы воспаления"
+          },
+          "id": "b3",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Выделяют две основные формы воспалительного процесса:"
+          },
+          "id": "b4",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_5daaaae468a0",
+              "fg_be10b6775ab8"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Острое воспаление: интенсивная кратковременная реакция (от нескольких дней до недель), направленная на быструю локализацию угрозы и запуск репарации.",
+              "Хроническое воспаление: вялотекущий процесс, длящийся месяцы или годы, при котором утрачивается защитная функция и происходит повреждение здоровых тканей."
+            ],
+            "style": "unordered"
+          },
+          "id": "b5",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_5daaaae468a0",
+              "fg_be10b6775ab8"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Клинические признаки и причины"
+          },
+          "id": "b6",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Острое воспаление проявляется такими симптомами, как боль в горле и температура (при ангине), покраснение и отек (при травмах кожи) или острые боли при аппендиците. Хроническое воспаление часто имеет неспецифические признаки: постоянную усталость, склонность к частым инфекциям, боли в мышцах и суставах, а также проблемы с кожей и ЖКТ."
+          },
+          "id": "b7",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_852ac830fad5",
+              "fg_c443580f157d"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "К развитию хронической формы могут приводить невылеченные инфекции, аутоиммунные заболевания, воздействие токсинов (включая курение), хронический стресс и ожирение, при котором жировая ткань вырабатывает провоспалительные цитокины."
+          },
+          "id": "b8",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_681f00845de0"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Диагностика и риски"
+          },
+          "id": "b9",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Для оценки воспалительной активности используются лабораторные маркеры:"
+          },
+          "id": "b10",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_3b0e16c93fec"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "С-реактивный белок (СРБ) — чувствительный индикатор активности процесса.",
+              "Скорость оседания эритроцитов (СОЭ) — неспецифический показатель хронических процессов.",
+              "Фибриноген и интерлейкины (IL-6, IL-1β) — молекулы, участвующие в поддержании воспалительного ответа."
+            ],
+            "style": "unordered"
+          },
+          "id": "b11",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_3b0e16c93fec"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "text": "Длительное системное воспаление повышает риск развития тяжелых заболеваний, включая атеросклероз, сахарный диабет 2-го типа, болезнь Альцгеймера и онкологические патологии."
+          },
+          "id": "b12",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_88cc33451661"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Меры по снижению воспаления"
+          },
+          "id": "b13",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Для подавления системного воспаления рекомендуется нормализация веса, регулярная физическая активность и управление стрессом. В рацион следует включать овощи, источники Омега-3 и куркуму, ограничивая при этом потребление сахара и трансжиров."
+          },
+          "id": "b14",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_f5904ec24984"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "medical_concept",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/medical_concept/medical_concept_Воспаление.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/medical_concept/medical_concept_Воспаление_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/medical_concept_Воспаление.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/medical_concept/medical_concept_e8f5eb4a55.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/medical_concept/medical_concept_e8f5eb4a55.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_6f66decf971c",
+        "fg_be10b6775ab8",
+        "fg_5daaaae468a0",
+        "fg_3b0e16c93fec",
+        "fg_f5904ec24984",
+        "fg_852ac830fad5",
+        "fg_c443580f157d",
+        "fg_88cc33451661",
+        "fg_681f00845de0"
+      ],
+      "source_doc_ids": [
+        "doc_003191_60c781c4"
+      ],
+      "source_documents_count": 1,
+      "used_fact_group_ids": [
+        "fg_6f66decf971c",
+        "fg_be10b6775ab8",
+        "fg_5daaaae468a0",
+        "fg_3b0e16c93fec",
+        "fg_f5904ec24984",
+        "fg_852ac830fad5",
+        "fg_c443580f157d",
+        "fg_88cc33451661",
+        "fg_681f00845de0"
+      ]
+    },
+    "tag_id": "medical_concept_e8f5eb4a55"
+  }
+}

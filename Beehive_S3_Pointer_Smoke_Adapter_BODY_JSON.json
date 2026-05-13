@@ -1,0 +1,233 @@
+{
+  "name": "Beehive S3 Pointer Smoke Adapter BODY JSON",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "beehive-s3-pointer-smoke-body-json",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "webhook-smoke-body",
+      "name": "Webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = ($json.body && typeof $json.body === 'object') ? $json.body : $json;\nconst required = ['schema', 'workspace_id', 'run_id', 'stage_id', 'source_bucket', 'source_key', 'source_entity_id', 'source_artifact_id', 'manifest_prefix', 'workspace_prefix', 'target_prefix', 'save_path'];\nfor (const key of required) {\n  if (body[key] === undefined || body[key] === null || String(body[key]).trim() === '') {\n    throw new Error(`Missing required Beehive control envelope field: ${key}`);\n  }\n}\nif (body.schema !== 'beehive.s3_control_envelope.v1') {\n  throw new Error(`Unsupported control envelope schema: ${body.schema}`);\n}\nreturn [{ json: body }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ],
+      "id": "read-control-body",
+      "name": "Read control JSON body"
+    },
+    {
+      "parameters": {
+        "bucketName": "={{ $json.source_bucket }}",
+        "fileKey": "={{ $json.source_key }}"
+      },
+      "type": "n8n-nodes-base.s3",
+      "typeVersion": 1,
+      "position": [
+        520,
+        0
+      ],
+      "id": "download-source",
+      "name": "Download source object"
+    },
+    {
+      "parameters": {
+        "operation": "fromJson",
+        "destinationKey": "source_json",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        780,
+        0
+      ],
+      "id": "extract-json",
+      "name": "Extract JSON"
+    },
+    {
+      "parameters": {
+        "jsCode": "const control = $('Read control JSON body').first().json;\nconst source = $json.source_json || $json.json || $json;\nconst compactRun = control.run_id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 16);\nconst outputArtifactId = `smoke_output_${compactRun}_${control.source_artifact_id}`.slice(0, 180);\nconst outputKey = `${control.target_prefix.replace(/\\/+$/, '')}/${outputArtifactId}.json`;\nconst canonical = source.canonical_tag_ru || source.raw_article?.canonical_tag_ru || source.tag_id || control.source_entity_id;\nconst output = {\n  schema: 'beehive.s3_smoke_output.v1',\n  smoke_status: 'ok',\n  created_at: new Date().toISOString(),\n  beehive_run_id: control.run_id,\n  source: {\n    bucket: control.source_bucket,\n    key: control.source_key,\n    version_id: control.source_version_id || null,\n    etag: control.source_etag || null,\n    entity_id: control.source_entity_id,\n    artifact_id: control.source_artifact_id\n  },\n  entity_id: control.source_entity_id,\n  artifact_id: outputArtifactId,\n  canonical_tag_ru: canonical,\n  entity_type: source.entity_type || source.raw_article?.entity_type || null,\n  preview_blocks: source.preview_blocks || []\n};\nconst manifest = {\n  schema: 'beehive.s3_artifact_manifest.v1',\n  workspace_id: control.workspace_id,\n  run_id: control.run_id,\n  source: {\n    bucket: control.source_bucket,\n    key: control.source_key,\n    version_id: control.source_version_id || null,\n    etag: control.source_etag || null\n  },\n  status: 'success',\n  outputs: [\n    {\n      artifact_id: outputArtifactId,\n      entity_id: control.source_entity_id,\n      relation_to_source: 'same_entity',\n      bucket: control.source_bucket,\n      key: outputKey,\n      save_path: control.save_path,\n      content_type: 'application/json',\n      checksum_sha256: null,\n      size: Buffer.byteLength(JSON.stringify(output), 'utf8')\n    }\n  ],\n  created_at: new Date().toISOString()\n};\nconst data = await this.helpers.prepareBinaryData(\n  Buffer.from(JSON.stringify(output, null, 2), 'utf8'),\n  `${outputArtifactId}.json`,\n  'application/json'\n);\nreturn [{\n  json: {\n    ...control,\n    output_bucket: control.source_bucket,\n    output_key: outputKey,\n    output_artifact_id: outputArtifactId,\n    output_entity_id: control.source_entity_id,\n    manifest\n  },\n  binary: { data }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        0
+      ],
+      "id": "prepare-output",
+      "name": "Build output document and manifest"
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "={{ $json.output_bucket }}",
+        "fileKey": "={{ $json.output_key }}",
+        "fileName": "={{ $json.output_key }}",
+        "binaryPropertyName": "data",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.s3",
+      "typeVersion": 1,
+      "position": [
+        1300,
+        0
+      ],
+      "id": "upload-output",
+      "name": "Upload smoke output"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: $('Build output document and manifest').first().json.manifest }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        0
+      ],
+      "id": "return-manifest",
+      "name": "Build success manifest"
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1820,
+        0
+      ],
+      "id": "respond",
+      "name": "Respond to Webhook"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Read control JSON body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read control JSON body": {
+      "main": [
+        [
+          {
+            "node": "Download source object",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download source object": {
+      "main": [
+        [
+          {
+            "node": "Extract JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract JSON": {
+      "main": [
+        [
+          {
+            "node": "Build output document and manifest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build output document and manifest": {
+      "main": [
+        [
+          {
+            "node": "Upload smoke output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload smoke output": {
+      "main": [
+        [
+          {
+            "node": "Build success manifest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build success manifest": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {
+    "Webhook": [
+      {
+        "json": {
+          "body": {
+            "schema": "beehive.s3_control_envelope.v1",
+            "workspace_id": "beehive-s3-smoke",
+            "run_id": "manual-test-run",
+            "stage_id": "smoke_source",
+            "source_bucket": "steos-s3-data",
+            "source_key": "beehive-smoke/test_workflow/raw/smoke_entity_001__порфирия.json",
+            "source_version_id": null,
+            "source_etag": null,
+            "source_entity_id": "smoke_entity_001",
+            "source_artifact_id": "smoke_source_artifact_001",
+            "manifest_prefix": "beehive-smoke/test_workflow/runs/manual-test-run/",
+            "workspace_prefix": "beehive-smoke/test_workflow",
+            "target_prefix": "beehive-smoke/test_workflow/processed",
+            "save_path": "beehive-smoke/test_workflow/processed"
+          }
+        }
+      }
+    ]
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "b2-2-body-json",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

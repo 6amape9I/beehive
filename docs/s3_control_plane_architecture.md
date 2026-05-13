@@ -4,6 +4,10 @@
 
 B1 moves Beehive toward a storage-aware control plane for S3+n8n pipelines. n8n remains the data-plane transformer. S3 stores business artifacts. Beehive owns runtime state, routing validation, attempts, lineage, and operator visibility.
 
+B2.2 uses JSON control envelope body.
+Headers are deprecated for S3 object keys and should not be used for source_key.
+The control envelope is technical metadata, not business JSON.
+
 ## Control/Data Split
 
 Beehive does:
@@ -12,7 +16,7 @@ Beehive does:
 - stores artifact pointers;
 - claims one eligible artifact for a stage run;
 - creates `run_id`;
-- triggers n8n with technical S3 pointer headers;
+- triggers n8n with a technical S3 control envelope JSON body;
 - validates the technical manifest returned by n8n;
 - registers child artifact pointers;
 - updates `entity_stage_states`, `stage_runs`, and `app_events`.
@@ -67,13 +71,15 @@ S3 execution path:
 
 1. `entity_stage_states` claim moves an S3 artifact to `queued`.
 2. Beehive creates a `stage_runs` row with a technical audit envelope.
-3. Beehive sends an empty-body webhook request with S3 pointer headers.
+3. Beehive sends a JSON `beehive.s3_control_envelope.v1` body with bucket/key, source identity, route hints, and manifest prefix.
 4. n8n returns `beehive.s3_artifact_manifest.v1`.
 5. Beehive validates schema, run id, source, output bucket, output route, output key prefix, `entity_id`, `artifact_id`, and `relation_to_source`.
 6. Valid outputs become S3 artifact pointer rows in one SQLite transaction.
 7. Source state becomes `done`; child states become `pending`.
 
 Local execution path remains the B0 payload-only behavior.
+
+B2.2 changed S3 mode away from `X-Beehive-*` pointer headers for source object keys. Headers are deprecated for S3 `source_key` because real object keys may contain Cyrillic and other non-ASCII characters. The control envelope is technical metadata, not business JSON, and must not include source document bodies or `payload_json`.
 
 Zero-output success manifests are valid only when the source stage has `allow_empty_outputs = true`. The default is false even if a stage has no `next_stage`.
 

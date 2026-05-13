@@ -1,0 +1,303 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_010",
+  "artifact_id": "smoke_source_artifact_010",
+  "canonical_tag_ru": "Аугментин",
+  "canonical_tag_latin": "Augmentin",
+  "entity_type": "drug_trade_name",
+  "tag_id": "drug_trade_name_2a6ecc26f2",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/10__drug_trade_name__Аугментин.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Аугментин представляет собой антибактериальный препарат, предназначенный для терапии инфекций, вызванных микроорганизмами, чувствительными к комбинации амоксициллина и клавулановой кислоты."
+    },
+    {
+      "type": "header",
+      "text": "Показания"
+    },
+    {
+      "type": "paragraph",
+      "text": "Препарат применяется для лечения бактериальных инфекций верхних и нижних дыхательных путей (включая ЛОР-органы, такие как синусит, средний отит и рецидивирующий тонзиллит), мочеполового тракта, костей, суставов и кожных покровов."
+    },
+    {
+      "type": "header",
+      "text": "Применение"
+    },
+    {
+      "type": "paragraph",
+      "text": "Для оптимального всасывания действующих веществ и снижения риска побочных эффектов со стороны желудочно-кишечного тракта Аугментин рекомендуется принимать в начале приема пищи."
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Augmentin",
+    "canonical_tag_ru": "Аугментин",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "aug_h1",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Аугментин представляет собой антибактериальный препарат, предназначенный для терапии инфекций, вызванных микроорганизмами, чувствительными к комбинации амоксициллина и клавулановой кислоты."
+          },
+          "id": "aug_p1",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_a3e257296f1f"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Показания"
+          },
+          "id": "aug_h2",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Препарат применяется для лечения бактериальных инфекций верхних и нижних дыхательных путей (включая ЛОР-органы, такие как синусит, средний отит и рецидивирующий тонзиллит), мочеполового тракта, костей, суставов и кожных покровов."
+          },
+          "id": "aug_p2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_a3e257296f1f"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Применение"
+          },
+          "id": "aug_h3",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Для оптимального всасывания действующих веществ и снижения риска побочных эффектов со стороны желудочно-кишечного тракта Аугментин рекомендуется принимать в начале приема пищи."
+          },
+          "id": "aug_p3",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_181e1b45398f"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Взрослым и детям старше 12 лет (или с массой тела от 40 кг) при использовании дозировки 875 мг + 125 мг назначают по 1 таблетке дважды в сутки.",
+              "При использовании дозировки 500 мг + 125 мг стандартная доза для той же возрастной группы составляет 1 таблетку трижды в сутки.",
+              "Минимальный курс лечения составляет 5 дней. Максимальная продолжительность терапии без повторного осмотра врачом — 14 дней."
+            ],
+            "style": "unordered"
+          },
+          "id": "aug_l1",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_414adc1585cd",
+              "fg_3ba4b39c1864",
+              "fg_5b7fc27c804a"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "text": "Важно учитывать, что две таблетки по 250 мг не являются эквивалентной заменой одной таблетке 500 мг из-за различий в содержании клавулановой кислоты."
+          },
+          "id": "aug_p4",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_2c635d028de4"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Противопоказания"
+          },
+          "id": "aug_h4",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "items": [
+              "Детский возраст до 12 лет или масса тела менее 40 кг (для таблетированных форм 500 мг + 125 мг и 875 мг + 125 мг).",
+              "Тяжелые нарушения функции почек (клиренс креатинина менее 30 мл/мин) для дозировки 875 мг + 125 мг."
+            ],
+            "style": "unordered"
+          },
+          "id": "aug_l2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_4fc43a140d30",
+              "fg_dd68d6ab187e"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Побочные эффекты"
+          },
+          "id": "aug_h5",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "У взрослых пациентов очень часто отмечается развитие диареи при приеме препарата."
+          },
+          "id": "aug_p5",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_8826693b0bda"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Особые указания"
+          },
+          "id": "aug_h6",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Препарат не следует использовать при подозрении на инфекционный мононуклеоз, так как амоксициллин может спровоцировать появление кореподобной сыпи. Порошок для приготовления суспензии содержит аспартам, что требует осторожности при назначении пациентам с фенилкетонурией."
+          },
+          "id": "aug_p6",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_a56d6112b869",
+              "fg_633b7866d57b"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Связанные сведения"
+          },
+          "id": "aug_h7",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Готовую суспензию необходимо хранить в холодильнике при температуре 2–8 °C, не допуская её замораживания."
+          },
+          "id": "aug_p7",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_3f87e415c8e1"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "drug_trade_name",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/drug_trade_name/drug_trade_name_Аугментин.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/drug_trade_name/drug_trade_name_Аугментин_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/drug_trade_name_Аугментин.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/drug_trade_name/drug_trade_name_2a6ecc26f2.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/drug_trade_name/drug_trade_name_2a6ecc26f2.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_181e1b45398f",
+        "fg_414adc1585cd",
+        "fg_3ba4b39c1864",
+        "fg_a3e257296f1f",
+        "fg_5b7fc27c804a",
+        "fg_2c635d028de4",
+        "fg_4fc43a140d30",
+        "fg_dd68d6ab187e",
+        "fg_633b7866d57b",
+        "fg_8826693b0bda",
+        "fg_3f87e415c8e1",
+        "fg_a56d6112b869"
+      ],
+      "source_doc_ids": [
+        "doc_001513_8bd2013d",
+        "doc_001514_a9fb422b",
+        "doc_001515_7f66de21",
+        "doc_001516_43e7c8de"
+      ],
+      "source_documents_count": 4,
+      "used_fact_group_ids": [
+        "fg_181e1b45398f",
+        "fg_414adc1585cd",
+        "fg_3ba4b39c1864",
+        "fg_a3e257296f1f",
+        "fg_5b7fc27c804a",
+        "fg_2c635d028de4",
+        "fg_4fc43a140d30",
+        "fg_dd68d6ab187e",
+        "fg_633b7866d57b",
+        "fg_8826693b0bda",
+        "fg_3f87e415c8e1",
+        "fg_a56d6112b869"
+      ]
+    },
+    "tag_id": "drug_trade_name_2a6ecc26f2"
+  }
+}

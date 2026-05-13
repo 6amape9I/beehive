@@ -1,0 +1,208 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_014",
+  "artifact_id": "smoke_source_artifact_014",
+  "canonical_tag_ru": "Скорость оседания эритроцитов",
+  "canonical_tag_latin": "Erythrocyte Sedimentation Rate",
+  "entity_type": "diagnostic_method",
+  "tag_id": "diagnostic_method_15f21b758d",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/14__diagnostic_method__Скорость оседания эритроцитов.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Скорость оседания эритроцитов (СОЭ, ESR) представляет собой неспецифический лабораторный показатель крови. Он отражает соотношение фракций белков плазмы и является косвенным признаком патологического процесса."
+    },
+    {
+      "type": "paragraph",
+      "text": "Измерение показателя основано на скорости, с которой эритроциты оседают в вертикальной пробирке под воздействием гравитации. СОЭ служит маркером воспаления, аутоиммунных реакций или разрушения тканей в рамках общего анализа крови."
+    },
+    {
+      "type": "header",
+      "text": "Механизм и причины изменений"
+    },
+    {
+      "type": "paragraph",
+      "text": "Ускорение оседания эритроцитов связано с изменением белкового состава плазмы, в частности с повышением концентрации белков острой фазы, таких как фибриноген."
+    },
+    {
+      "type": "paragraph",
+      "text": "Повышение СОЭ может свидетельствовать об инфекциях и заболеваниях иммунной системы. Умеренное повышение (20–30 мм/ч) встречается при анемиях, гипопротеинемии, а также является физиологической нормой в период менструации и при беременности."
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Erythrocyte Sedimentation Rate",
+    "canonical_tag_ru": "Скорость оседания эритроцитов",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "b1",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Скорость оседания эритроцитов (СОЭ, ESR) представляет собой неспецифический лабораторный показатель крови. Он отражает соотношение фракций белков плазмы и является косвенным признаком патологического процесса."
+          },
+          "id": "b2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_229c874f3fd2",
+              "fg_3b9c1a110bff"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Измерение показателя основано на скорости, с которой эритроциты оседают в вертикальной пробирке под воздействием гравитации. СОЭ служит маркером воспаления, аутоиммунных реакций или разрушения тканей в рамках общего анализа крови."
+          },
+          "id": "b3",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_b882601aac8d",
+              "fg_106ccaf19bea"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Механизм и причины изменений"
+          },
+          "id": "b4",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Ускорение оседания эритроцитов связано с изменением белкового состава плазмы, в частности с повышением концентрации белков острой фазы, таких как фибриноген."
+          },
+          "id": "b5",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_0a3bd5ba45b2"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Повышение СОЭ может свидетельствовать об инфекциях и заболеваниях иммунной системы. Умеренное повышение (20–30 мм/ч) встречается при анемиях, гипопротеинемии, а также является физиологической нормой в период менструации и при беременности."
+          },
+          "id": "b6",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_88d9c6613f79"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Нормальные значения"
+          },
+          "id": "b7",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Нормативные показатели СОЭ зависят от пола:"
+          },
+          "id": "b8",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_0ff468a5815d",
+              "fg_bd51662adf62"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Для мужчин: 1–10 мм/ч (по некоторым данным до 15 мм/ч);",
+              "Для женщин: 2–15 мм/ч (по некоторым данным до 20 мм/ч)."
+            ],
+            "style": "unordered"
+          },
+          "id": "b9",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_0ff468a5815d",
+              "fg_bd51662adf62"
+            ]
+          },
+          "type": "list"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "diagnostic_method",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/diagnostic_method/diagnostic_method_Скорость оседания эритроцитов.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/diagnostic_method/diagnostic_method_Скорость оседания эритроцитов_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/diagnostic_method_Скорость оседания эритроцитов.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/diagnostic_method/diagnostic_method_15f21b758d.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/diagnostic_method/diagnostic_method_15f21b758d.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_229c874f3fd2",
+        "fg_3b9c1a110bff",
+        "fg_b882601aac8d",
+        "fg_106ccaf19bea",
+        "fg_0a3bd5ba45b2",
+        "fg_0ff468a5815d",
+        "fg_88d9c6613f79",
+        "fg_bd51662adf62"
+      ],
+      "source_doc_ids": [
+        "doc_009283_16af6454",
+        "doc_016181_65a6b38f"
+      ],
+      "source_documents_count": 2,
+      "used_fact_group_ids": [
+        "fg_229c874f3fd2",
+        "fg_3b9c1a110bff",
+        "fg_b882601aac8d",
+        "fg_106ccaf19bea",
+        "fg_0a3bd5ba45b2",
+        "fg_0ff468a5815d",
+        "fg_88d9c6613f79",
+        "fg_bd51662adf62"
+      ]
+    },
+    "tag_id": "diagnostic_method_15f21b758d"
+  }
+}

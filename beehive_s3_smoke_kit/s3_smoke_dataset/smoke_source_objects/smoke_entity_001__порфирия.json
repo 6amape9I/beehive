@@ -1,0 +1,419 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_001",
+  "artifact_id": "smoke_source_artifact_001",
+  "canonical_tag_ru": "Порфирия",
+  "canonical_tag_latin": "Porphyria",
+  "entity_type": "disease",
+  "tag_id": "disease_0c7cf52089",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/01__disease__Порфирия.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Порфирия представляет собой обширную группу редких наследственных метаболических нарушений, обусловленных дефектами в биохимическом пути синтеза гема — ключевого компонента гемоглобина. Нарушение работы ферментов в этом процессе ведет к накоплению промежуточных метаболитов (порфиринов или их предшественников), которые оказывают токсическое воздействие на организм."
+    },
+    {
+      "type": "paragraph",
+      "text": "Распространенность заболевания составляет около 7–12 случаев на 100 тысяч человек, однако носительство дефектного гена встречается значительно чаще — примерно у одного человека из тысячи."
+    },
+    {
+      "type": "header",
+      "text": "Классификация"
+    },
+    {
+      "type": "list",
+      "items": [
+        "По клинической форме: острые (проявляются нейровисцеральными атаками) и кожные формы.",
+        "По месту нарушения синтеза: печёночные и эритропоэтические порфирии."
+      ]
+    },
+    {
+      "type": "header",
+      "text": "Причины и факторы риска"
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Porphyria",
+    "canonical_tag_ru": "Порфирия",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "b1",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Порфирия представляет собой обширную группу редких наследственных метаболических нарушений, обусловленных дефектами в биохимическом пути синтеза гема — ключевого компонента гемоглобина. Нарушение работы ферментов в этом процессе ведет к накоплению промежуточных метаболитов (порфиринов или их предшественников), которые оказывают токсическое воздействие на организм."
+          },
+          "id": "b2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_554a3a375e1b",
+              "fg_7e8a61e0e88a",
+              "fg_e03c081ef40f"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Распространенность заболевания составляет около 7–12 случаев на 100 тысяч человек, однако носительство дефектного гена встречается значительно чаще — примерно у одного человека из тысячи."
+          },
+          "id": "b3",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_501ae9d73874"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 3,
+            "text": "Классификация"
+          },
+          "id": "b4",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "items": [
+              "По клинической форме: острые (проявляются нейровисцеральными атаками) и кожные формы.",
+              "По месту нарушения синтеза: печёночные и эритропоэтические порфирии."
+            ],
+            "style": "unordered"
+          },
+          "id": "b5",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_0f0ca246b8d4",
+              "fg_ab00d2630dd5"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Причины и факторы риска"
+          },
+          "id": "b6",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "В группу риска входят лица с генетической предрасположенностью, женщины репродуктивного возраста, а также люди, злоупотребляющие алкоголем или подверженные частым стрессам."
+          },
+          "id": "b7",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_e87b0a16227e"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Острые приступы могут провоцироваться следующими триггерами:"
+          },
+          "id": "b8",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_5514c78e0c5b",
+              "fg_409e5d460975"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Прием определенных лекарств (барбитураты, сульфаниламиды, НПВП, некоторые антибиотики, КОК).",
+              "Употребление алкоголя.",
+              "Инфекционные заболевания (включая гепатиты B, C и цитомегаловирус).",
+              "Голодание, низкоуглеводные диеты или сильный стресс.",
+              "Гормональные изменения (менструация, беременность).",
+              "Воздействие солнечного излучения (инсоляция)."
+            ],
+            "style": "unordered"
+          },
+          "id": "b9",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_5514c78e0c5b",
+              "fg_409e5d460975"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Симптомы"
+          },
+          "id": "b10",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "К основным клиническим проявлениям относятся:"
+          },
+          "id": "b11",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_5a46835237f4",
+              "fg_e03c081ef40f"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Острая боль в животе.",
+              "Неврологические нарушения: судороги, параличи, вегетативные симптомы.",
+              "Кожные проявления: повышенная светочувствительность, повреждение тканей под действием ультрафиолета.",
+              "Потемнение мочи: она может приобретать пурпурный или красновато-коричневый оттенок."
+            ],
+            "style": "unordered"
+          },
+          "id": "b12",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_5a46835237f4",
+              "fg_e03c081ef40f",
+              "fg_063431ccee79"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Диагностика"
+          },
+          "id": "b13",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Наиболее надежным методом подтверждения диагноза является биохимический анализ мочи на содержание порфобилиногена (ПБГ) и дельта-аминолевулиновой кислоты (АЛК). При обострении концентрация ПБГ может превышать норму в 10–50 раз. Также проводятся анализы крови и кала на содержание порфиринов."
+          },
+          "id": "b14",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_0e4e3948e12e",
+              "fg_f8ecf0d9e275",
+              "fg_f46f92bbe896"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Для точной идентификации типа заболевания рекомендуется генетическое тестирование (выявление мутаций в генах HMBS, CPO, PPOX и др.). Инструментальные методы (УЗИ, КТ, МРТ) применяются для исключения сопутствующих патологий, вызывающих боли в животе или поражения мозга."
+          },
+          "id": "b15",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_cb5bff8394ba",
+              "fg_0e4e3948e12e",
+              "fg_aa05f9d2a268"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Дифференциальная диагностика проводится с острым аппендицитом, пищевым отравлением, гепатитом, системной красной волчанкой, депрессией и синдромом Гийена — Барре."
+          },
+          "id": "b16",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_4210c1ce5d22"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Лечение"
+          },
+          "id": "b17",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Терапия острых атак включает:"
+          },
+          "id": "b18",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_be26f70864a2"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Немедленную отмену провоцирующих факторов (лекарств, алкоголя).",
+              "Введение гемина для подавления синтеза порфиринов.",
+              "Углеводную нагрузку (инфузии глюкозы, диета).",
+              "Симптоматическое лечение (обезболивание, коррекция электролитов)."
+            ],
+            "style": "unordered"
+          },
+          "id": "b19",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_be26f70864a2"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Осложнения"
+          },
+          "id": "b20",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Без адекватной терапии смертельные осложнения при острых формах возникают в 10–30% случаев. К ним относятся острая дыхательная и почечная недостаточность, тяжелые поражения печени (цирроз, рак), стойкие параличи, психические расстройства, а также рубцевание кожи и потеря зрения при кожных формах."
+          },
+          "id": "b21",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_6c83a4a6f58a",
+              "fg_56a353ade0d4"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Важно помнить, что прием таких препаратов, как Миконазол, Беладонна или Ксилометазолин, может вызвать резкое ухудшение состояния."
+          },
+          "id": "b22",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_e57e32ab7ae9"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "disease",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/disease/disease_Порфирия.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/disease/disease_Порфирия_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/disease_Порфирия.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/disease/disease_0c7cf52089.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/disease/disease_0c7cf52089.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_554a3a375e1b",
+        "fg_7e8a61e0e88a",
+        "fg_0f0ca246b8d4",
+        "fg_ab00d2630dd5",
+        "fg_e03c081ef40f",
+        "fg_5a46835237f4",
+        "fg_cb5bff8394ba",
+        "fg_0e4e3948e12e",
+        "fg_4210c1ce5d22",
+        "fg_f8ecf0d9e275",
+        "fg_be26f70864a2",
+        "fg_063431ccee79",
+        "fg_501ae9d73874",
+        "fg_d61584237913",
+        "fg_aa05f9d2a268",
+        "fg_6c83a4a6f58a",
+        "fg_f46f92bbe896",
+        "fg_e57e32ab7ae9",
+        "fg_5514c78e0c5b",
+        "fg_56a353ade0d4",
+        "fg_409e5d460975",
+        "fg_e87b0a16227e"
+      ],
+      "source_doc_ids": [
+        "doc_010859_ddd80580",
+        "doc_010860_aa91eb3d"
+      ],
+      "source_documents_count": 2,
+      "used_fact_group_ids": [
+        "fg_554a3a375e1b",
+        "fg_7e8a61e0e88a",
+        "fg_0f0ca246b8d4",
+        "fg_ab00d2630dd5",
+        "fg_e03c081ef40f",
+        "fg_5a46835237f4",
+        "fg_cb5bff8394ba",
+        "fg_0e4e3948e12e",
+        "fg_4210c1ce5d22",
+        "fg_f8ecf0d9e275",
+        "fg_be26f70864a2",
+        "fg_063431ccee79",
+        "fg_501ae9d73874",
+        "fg_aa05f9d2a268",
+        "fg_6c83a4a6f58a",
+        "fg_f46f92bbe896",
+        "fg_e57e32ab7ae9",
+        "fg_5514c78e0c5b",
+        "fg_56a353ade0d4",
+        "fg_409e5d460975",
+        "fg_e87b0a16227e"
+      ]
+    },
+    "tag_id": "disease_0c7cf52089"
+  }
+}

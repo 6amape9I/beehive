@@ -1,0 +1,232 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_032",
+  "artifact_id": "smoke_source_artifact_032",
+  "canonical_tag_ru": "Цефуроксим",
+  "canonical_tag_latin": "Cefuroxime",
+  "entity_type": "drug_class",
+  "tag_id": "drug_class_e11bce5f9e",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/32__drug_class__Цефуроксим.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Описание и механизм действия"
+    },
+    {
+      "type": "paragraph",
+      "text": "Цефуроксим относится к группе цефалоспориновых антибиотиков и обладает бактерицидным действием. Его механизм работы заключается в подавлении синтеза клеточной стенки бактерий путем связывания с основными белками-мишенями. Препарат характеризуется устойчивостью к воздействию большинства бета-лактамаз и активен против широкого спектра грамотрицательных и грамположительных микроорганизмов."
+    },
+    {
+      "type": "header",
+      "text": "Показания и дозировка"
+    },
+    {
+      "type": "paragraph",
+      "text": "Препарат применяется для лечения бактериальных инфекций, включая менингит. При бактериальном менингите у детей дозировка составляет 150–250 мг/кг в сутки внутривенно."
+    },
+    {
+      "type": "paragraph",
+      "text": "Для лечения гонореи у взрослых рекомендуется однократное введение 1,5 г препарата. Эту дозу разделяют на две инъекции (по 750 мг), которые вводятся в разные участки тела (например, в обе ягодицы)."
+    },
+    {
+      "type": "header",
+      "text": "Противопоказания и меры предосторожности"
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Cefuroxime",
+    "canonical_tag_ru": "Цефуроксим",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Описание и механизм действия"
+          },
+          "id": "c1",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Цефуроксим относится к группе цефалоспориновых антибиотиков и обладает бактерицидным действием. Его механизм работы заключается в подавлении синтеза клеточной стенки бактерий путем связывания с основными белками-мишенями. Препарат характеризуется устойчивостью к воздействию большинства бета-лактамаз и активен против широкого спектра грамотрицательных и грамположительных микроорганизмов."
+          },
+          "id": "c2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_2ee52fe24282",
+              "fg_11980dd34058",
+              "fg_021016c7b1ee",
+              "fg_f015fa2e89d7"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Показания и дозировка"
+          },
+          "id": "c3",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Препарат применяется для лечения бактериальных инфекций, включая менингит. При бактериальном менингите у детей дозировка составляет 150–250 мг/кг в сутки внутривенно."
+          },
+          "id": "c4",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_8821d1058a69",
+              "fg_6635981cfffd"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Для лечения гонореи у взрослых рекомендуется однократное введение 1,5 г препарата. Эту дозу разделяют на две инъекции (по 750 мг), которые вводятся в разные участки тела (например, в обе ягодицы)."
+          },
+          "id": "c5",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_2038cd2131fa",
+              "fg_f9cd0383b4a3"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Противопоказания и меры предосторожности"
+          },
+          "id": "c6",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Цефуроксим противопоказан при гиперчувствительности к самому препарату, другим цефалоспоринам или любым его компонентам. Также его нельзя применять при наличии в анамнезе тяжелых реакций (например, анафилактических) на другие бета-лактамные антибиотики. Использование препарата у детей в возрасте до одного года не рекомендуется."
+          },
+          "id": "c7",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_7d98d8dfa087",
+              "fg_764594c33b0c",
+              "fg_8d1b258c2379"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "С осторожностью следует назначать высокие дозы цефалоспоринов пациентам, принимающим сильные диуретики (такие как фуросемид) или аминогликозиды, из-за повышенного риска развития почечной недостаточности."
+          },
+          "id": "c8",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_47bfa8eb7b72"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Побочные эффекты"
+          },
+          "id": "c9",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "К наиболее частым нежелательным реакциям относятся эозинофилия, нейтропения, а также кратковременное повышение уровня билирубина или печеночных ферментов."
+          },
+          "id": "c10",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_71a66b507fb5"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1700000000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "drug_class",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/drug_class/drug_class_Цефуроксим.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/drug_class/drug_class_Цефуроксим_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/drug_class_Цефуроксим.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/drug_class/drug_class_e11bce5f9e.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/drug_class/drug_class_e11bce5f9e.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_2ee52fe24282",
+        "fg_11980dd34058",
+        "fg_6635981cfffd",
+        "fg_2038cd2131fa",
+        "fg_f9cd0383b4a3",
+        "fg_8821d1058a69",
+        "fg_021016c7b1ee",
+        "fg_f015fa2e89d7",
+        "fg_7d98d8dfa087",
+        "fg_764594c33b0c",
+        "fg_47bfa8eb7b72",
+        "fg_71a66b507fb5",
+        "fg_8d1b258c2379"
+      ],
+      "source_doc_ids": [
+        "doc_015344_69203160",
+        "doc_015345_45ec9733",
+        "doc_015346_0b76b4c2",
+        "doc_015347_9c2636bc",
+        "doc_015348_68cd43bb",
+        "doc_015349_fa97e28b"
+      ],
+      "source_documents_count": 6,
+      "used_fact_group_ids": [
+        "fg_2ee52fe24282",
+        "fg_11980dd34058",
+        "fg_6635981cfffd",
+        "fg_2038cd2131fa",
+        "fg_f9cd0383b4a3",
+        "fg_8821d1058a69",
+        "fg_021016c7b1ee",
+        "fg_f015fa2e89d7",
+        "fg_7d98d8dfa087",
+        "fg_764594c33b0c",
+        "fg_47bfa8eb7b72",
+        "fg_71a66b507fb5",
+        "fg_8d1b258c2379"
+      ]
+    },
+    "tag_id": "drug_class_e11bce5f9e"
+  }
+}

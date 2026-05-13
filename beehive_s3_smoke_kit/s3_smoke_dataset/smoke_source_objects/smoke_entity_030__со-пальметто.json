@@ -1,0 +1,224 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_030",
+  "artifact_id": "smoke_source_artifact_030",
+  "canonical_tag_ru": "Со Пальметто",
+  "canonical_tag_latin": "Saw Palmetto",
+  "entity_type": "supplement",
+  "tag_id": "supplement_edc0ee7819",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/30__supplement__Со Пальметто.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Со Пальметто — это добавка, действие которой направлено на нормализацию функции предстательной железы и сохранение репродуктивной функции у мужчин. Она также способствует поддержанию нормальной работы мочевыделительной системы."
+    },
+    {
+      "type": "header",
+      "text": "Состав"
+    },
+    {
+      "type": "paragraph",
+      "text": "Каждая капсула содержит 550 мг плодов сереноа ползучей (Serenoa repens). В качестве вспомогательного вещества используется желатин."
+    },
+    {
+      "type": "header",
+      "text": "Способ применения"
+    },
+    {
+      "type": "paragraph",
+      "text": "Взрослым рекомендуется принимать по 1 капсуле 2 раза в день во время еды. В некоторых случаях суточная дозировка для взрослых может варьироваться от 2 до 3 капсул. Принимать добавку следует во время или сразу после еды. Рекомендованная продолжительность приема составляет 3 месяца."
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Saw Palmetto",
+    "canonical_tag_ru": "Со Пальметто",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "h1_2",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Со Пальметто — это добавка, действие которой направлено на нормализацию функции предстательной железы и сохранение репродуктивной функции у мужчин. Она также способствует поддержанию нормальной работы мочевыделительной системы."
+          },
+          "id": "p1_2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_ea1494cafd7e"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Состав"
+          },
+          "id": "h2_2",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Каждая капсула содержит 550 мг плодов сереноа ползучей (Serenoa repens). В качестве вспомогательного вещества используется желатин."
+          },
+          "id": "p2_2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_54c8398fb9bb"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Способ применения"
+          },
+          "id": "h3_2",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Взрослым рекомендуется принимать по 1 капсуле 2 раза в день во время еды. В некоторых случаях суточная дозировка для взрослых может варьироваться от 2 до 3 капсул. Принимать добавку следует во время или сразу после еды. Рекомендованная продолжительность приема составляет 3 месяца."
+          },
+          "id": "p3_2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_43e82c000a29",
+              "fg_33a29e9938f1",
+              "fg_c408b7995c5b"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Для детей с 8 лет дозировка составляет 1 капсулу. Детям младше 8 лет прием препарата не рекомендуется."
+          },
+          "id": "p4_2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_c940e876407a"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Предосторожности"
+          },
+          "id": "h4_2",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Основным противопоказанием к применению является индивидуальная непереносимость компонентов продукта."
+          },
+          "id": "p5_2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_129c47f0b4d8"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Связанные сведения"
+          },
+          "id": "h5_2",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Добавку необходимо хранить в сухом, прохладном и защищенном от света месте."
+          },
+          "id": "p6_2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_1e26b26d9047"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "supplement",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/supplement/supplement_Со Пальметто.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/supplement/supplement_Со Пальметто_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/supplement_Со Пальметто.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/supplement/supplement_edc0ee7819.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/supplement/supplement_edc0ee7819.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_43e82c000a29",
+        "fg_ea1494cafd7e",
+        "fg_33a29e9938f1",
+        "fg_c408b7995c5b",
+        "fg_c940e876407a",
+        "fg_54c8398fb9bb",
+        "fg_129c47f0b4d8",
+        "fg_1e26b26d9047"
+      ],
+      "source_doc_ids": [
+        "doc_013538_1cfc1087",
+        "doc_013539_71d9f1bf"
+      ],
+      "source_documents_count": 2,
+      "used_fact_group_ids": [
+        "fg_43e82c000a29",
+        "fg_ea1494cafd7e",
+        "fg_33a29e9938f1",
+        "fg_c408b7995c5b",
+        "fg_c940e876407a",
+        "fg_54c8398fb9bb",
+        "fg_129c47f0b4d8",
+        "fg_1e26b26d9047"
+      ]
+    },
+    "tag_id": "supplement_edc0ee7819"
+  }
+}

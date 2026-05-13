@@ -1,0 +1,203 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_015",
+  "artifact_id": "smoke_source_artifact_015",
+  "canonical_tag_ru": "Реакция нейтрализации",
+  "canonical_tag_latin": "Neutralization test",
+  "entity_type": "diagnostic_method",
+  "tag_id": "diagnostic_method_1f4d3e31db",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/15__diagnostic_method__Реакция нейтрализации.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Реакция нейтрализации основана на механизме, при котором антитела иммунной сыворотки блокируют активные центры микробных антигенов или токсинов. В случае вирусов антитела нейтрализуют поверхностные рецепторы, препятствуя их проникновению в живые клетки и предотвращая повреждающее воздействие на живые системы."
+    },
+    {
+      "type": "header",
+      "text": "Для чего применяется"
+    },
+    {
+      "type": "paragraph",
+      "text": "РН используется для серологической идентификации вирусов путем изучения их антигенных свойств."
+    },
+    {
+      "type": "header",
+      "text": "Как проводится"
+    },
+    {
+      "type": "paragraph",
+      "text": "Методика проведения заключается в смешивании антигена (вируса или токсина) с антителами (сывороткой) и последующем введении этой смеси в чувствительный тест-объект. В качестве тест-объектов могут использоваться:"
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Neutralization test",
+    "canonical_tag_ru": "Реакция нейтрализации",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "r1",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Реакция нейтрализации основана на механизме, при котором антитела иммунной сыворотки блокируют активные центры микробных антигенов или токсинов. В случае вирусов антитела нейтрализуют поверхностные рецепторы, препятствуя их проникновению в живые клетки и предотвращая повреждающее воздействие на живые системы."
+          },
+          "id": "r2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_bbe16988e233",
+              "fg_8e4f5ba7ff3c"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Для чего применяется"
+          },
+          "id": "r3",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "РН используется для серологической идентификации вирусов путем изучения их антигенных свойств."
+          },
+          "id": "r4",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_da6af5c9f6c2"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Как проводится"
+          },
+          "id": "r5",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Методика проведения заключается в смешивании антигена (вируса или токсина) с антителами (сывороткой) и последующем введении этой смеси в чувствительный тест-объект. В качестве тест-объектов могут использоваться:"
+          },
+          "id": "r6",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_d9c053b97e61",
+              "fg_69e81b630187"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Лабораторные животные",
+              "Культуры клеток (в том числе с индикатором pH)",
+              "Куриные эмбрионы"
+            ],
+            "style": "unordered"
+          },
+          "id": "r7",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_d9c053b97e61",
+              "fg_69e81b630187"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Что показывает"
+          },
+          "id": "r8",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Положительный результат реакции подтверждается отсутствием повреждающего действия вируса на используемый тест-объект."
+          },
+          "id": "r9",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_e1fd9b65dc3b"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "diagnostic_method",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/diagnostic_method/diagnostic_method_Реакция нейтрализации.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/diagnostic_method/diagnostic_method_Реакция нейтрализации_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/diagnostic_method_Реакция нейтрализации.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/diagnostic_method/diagnostic_method_1f4d3e31db.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/diagnostic_method/diagnostic_method_1f4d3e31db.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_bbe16988e233",
+        "fg_8e4f5ba7ff3c",
+        "fg_da6af5c9f6c2",
+        "fg_d9c053b97e61",
+        "fg_69e81b630187",
+        "fg_e1fd9b65dc3b"
+      ],
+      "source_doc_ids": [
+        "doc_000033_b3452e17",
+        "doc_000048_c436d5e1"
+      ],
+      "source_documents_count": 2,
+      "used_fact_group_ids": [
+        "fg_bbe16988e233",
+        "fg_8e4f5ba7ff3c",
+        "fg_da6af5c9f6c2",
+        "fg_d9c053b97e61",
+        "fg_69e81b630187",
+        "fg_e1fd9b65dc3b"
+      ]
+    },
+    "tag_id": "diagnostic_method_1f4d3e31db"
+  }
+}

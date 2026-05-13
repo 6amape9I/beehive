@@ -1,0 +1,364 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_006",
+  "artifact_id": "smoke_source_artifact_006",
+  "canonical_tag_ru": "Амприлан",
+  "canonical_tag_latin": "Amprilan",
+  "entity_type": "drug_trade_name",
+  "tag_id": "drug_trade_name_b1e2754fcd",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/06__drug_trade_name__Амприлан.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Амприлан — это лекарственный препарат, действие которого приводит к расширению кровеносных сосудов и снижению артериального давления."
+    },
+    {
+      "type": "paragraph",
+      "text": "Препарат выпускается в форме овальных плоских таблеток с фаской, внешний вид которых зависит от дозировки:"
+    },
+    {
+      "type": "list",
+      "items": [
+        "1,25 мг: белого или почти белого цвета;",
+        "2,5 мг: светло-желтого цвета;",
+        "5 мг: розового цвета с видимыми вкраплениями."
+      ]
+    },
+    {
+      "type": "header",
+      "text": "Показания"
+    },
+    {
+      "type": "paragraph",
+      "text": "Амприлан применяется при следующих состояниях:"
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Amprilan",
+    "canonical_tag_ru": "Амприлан",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "b1",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Амприлан — это лекарственный препарат, действие которого приводит к расширению кровеносных сосудов и снижению артериального давления."
+          },
+          "id": "b2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_deb728f2b730"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Препарат выпускается в форме овальных плоских таблеток с фаской, внешний вид которых зависит от дозировки:"
+          },
+          "id": "b3",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_7f37b73e7985",
+              "fg_86814453ada3",
+              "fg_1b219cad3bf8"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "1,25 мг: белого или почти белого цвета;",
+              "2,5 мг: светло-желтого цвета;",
+              "5 мг: розового цвета с видимыми вкраплениями."
+            ],
+            "style": "unordered"
+          },
+          "id": "b4",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_7f37b73e7985",
+              "fg_86814453ada3",
+              "fg_1b219cad3bf8"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Показания"
+          },
+          "id": "b5",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Амприлан применяется при следующих состояниях:"
+          },
+          "id": "b6",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_9839615febb5",
+              "fg_2f6c09837111",
+              "fg_98a2fccba56a"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "артериальная гипертензия (повышенное артериальное давление) в качестве монотерапии или в комбинации с другими средствами;",
+              "хроническая сердечная недостаточность (в составе комбинированной терапии);",
+              "заболевания почек (диабетическая и недиабетическая нефропатия), в том числе сопровождающиеся выраженной протеинурией."
+            ],
+            "style": "unordered"
+          },
+          "id": "b7",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_9839615febb5",
+              "fg_2f6c09837111",
+              "fg_98a2fccba56a"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Применение"
+          },
+          "id": "b8",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Таблетки следует принимать внутрь целиком, не разжевывая и не измельчая, запивая достаточным количеством воды (около 1/2 стакана). Прием возможен независимо от времени приема пищи."
+          },
+          "id": "b9",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_3df10d4f2946",
+              "fg_121537dc3881"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Режим дозирования устанавливается индивидуально:"
+          },
+          "id": "b10",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_f6cb44aba04b",
+              "fg_a8a96fc1eb14",
+              "fg_4b21ce68bc9a"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "При артериальной гипертензии: обычная начальная доза составляет 2,5 мг один раз в сутки утром.",
+              "При хронической сердечной недостаточности: рекомендуемая начальная доза — 1,25 мг один раз в сутки.",
+              "При нефропатии: начальная доза составляет 1,25 мг один раз в сутки; максимальная суточная доза может быть увеличена до 5 мг."
+            ],
+            "style": "unordered"
+          },
+          "id": "b11",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_f6cb44aba04b",
+              "fg_a8a96fc1eb14",
+              "fg_4b21ce68bc9a"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Противопоказания"
+          },
+          "id": "b12",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Препарат противопоказан в следующих случаях:"
+          },
+          "id": "b13",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_ba376826b278",
+              "fg_0302378d3a3f"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "беременность и период грудного вскармливания;",
+              "аллергия на рамиприл или другие компоненты препарата;",
+              "ангионевротический отек в анамнезе (в том числе наследственный);",
+              "выраженный стеноз почечных артерий;",
+              "очень низкое артериальное давление (систолическое АД ниже 90 мм рт. ст.)."
+            ],
+            "style": "unordered"
+          },
+          "id": "b14",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_ba376826b278",
+              "fg_0302378d3a3f"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Побочные эффекты"
+          },
+          "id": "b15",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Частым побочным эффектом при приеме препарата является сухой кашель, который может усиливаться в положении лежа и в ночное время."
+          },
+          "id": "b16",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_5be616903769"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Особые указания"
+          },
+          "id": "b17",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Во время лечения Амприланом запрещено употребление алкоголя, так как этанол и гипотензивные препараты взаимно усиливают действие друг друга."
+          },
+          "id": "b18",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_93c96eb3aab8"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "drug_trade_name",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/drug_trade_name/drug_trade_name_Амприлан.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/drug_trade_name/drug_trade_name_Амприлан_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/drug_trade_name_Амприлан.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/drug_trade_name/drug_trade_name_b1e2754fcd.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/drug_trade_name/drug_trade_name_b1e2754fcd.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_f6cb44aba04b",
+        "fg_3df10d4f2946",
+        "fg_a8a96fc1eb14",
+        "fg_4b21ce68bc9a",
+        "fg_9839615febb5",
+        "fg_2f6c09837111",
+        "fg_98a2fccba56a",
+        "fg_7f37b73e7985",
+        "fg_86814453ada3",
+        "fg_1b219cad3bf8",
+        "fg_deb728f2b730",
+        "fg_ba376826b278",
+        "fg_0302378d3a3f",
+        "fg_93c96eb3aab8",
+        "fg_5be616903769",
+        "fg_121537dc3881"
+      ],
+      "source_doc_ids": [
+        "doc_000959_cb85f273",
+        "doc_000960_3d025b63",
+        "doc_000961_ff411fd8",
+        "doc_000962_172263fc"
+      ],
+      "source_documents_count": 4,
+      "used_fact_group_ids": [
+        "fg_f6cb44aba04b",
+        "fg_3df10d4f2946",
+        "fg_a8a96fc1eb14",
+        "fg_4b21ce68bc9a",
+        "fg_9839615febb5",
+        "fg_2f6c09837111",
+        "fg_98a2fccba56a",
+        "fg_7f37b73e7985",
+        "fg_86814453ada3",
+        "fg_1b219cad3bf8",
+        "fg_deb728f2b730",
+        "fg_ba376826b278",
+        "fg_0302378d3a3f",
+        "fg_93c96eb3aab8",
+        "fg_5be616903769",
+        "fg_121537dc3881"
+      ]
+    },
+    "tag_id": "drug_trade_name_b1e2754fcd"
+  }
+}

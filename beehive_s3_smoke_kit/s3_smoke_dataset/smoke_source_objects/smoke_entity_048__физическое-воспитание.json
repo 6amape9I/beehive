@@ -1,0 +1,199 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_048",
+  "artifact_id": "smoke_source_artifact_048",
+  "canonical_tag_ru": "физическое воспитание",
+  "canonical_tag_latin": null,
+  "entity_type": "instruction",
+  "tag_id": "instruction_e63b6a326d",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/48__instruction__физическое воспитание.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Физическое воспитание является фундаментальным условием для всестороннего развития ребенка, укрепления его здоровья и повышения резистентности организма."
+    },
+    {
+      "type": "header",
+      "text": "Порядок выполнения"
+    },
+    {
+      "type": "paragraph",
+      "text": "Физкультурные занятия должны проводиться не менее 3 раз в неделю. Общий объем двигательной активности в организованных формах должен составлять не менее 50% от суточной активности, достигая 6–8 часов в неделю."
+    },
+    {
+      "type": "paragraph",
+      "text": "Продолжительность одного занятия зависит от возрастной группы:"
+    },
+    {
+      "type": "list",
+      "items": [
+        "Младшая группа (3–4 года): 15 минут;",
+        "Средняя группа (4–5 лет): 20 минут;",
+        "Старшая группа (5–6 лет): 25 минут;",
+        "Подготовительная группа (6–7 лет): 30 минут."
+      ]
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": null,
+    "canonical_tag_ru": "физическое воспитание",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "b8",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Физическое воспитание является фундаментальным условием для всестороннего развития ребенка, укрепления его здоровья и повышения резистентности организма."
+          },
+          "id": "b9",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_1996a5b07271"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Порядок выполнения"
+          },
+          "id": "b10",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Физкультурные занятия должны проводиться не менее 3 раз в неделю. Общий объем двигательной активности в организованных формах должен составлять не менее 50% от суточной активности, достигая 6–8 часов в неделю."
+          },
+          "id": "b11",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_9393ed55d837",
+              "fg_1ad4e4204a6f",
+              "fg_dab44268a5ed"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Продолжительность одного занятия зависит от возрастной группы:"
+          },
+          "id": "b12",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_a923b85255e4"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Младшая группа (3–4 года): 15 минут;",
+              "Средняя группа (4–5 лет): 20 минут;",
+              "Старшая группа (5–6 лет): 25 минут;",
+              "Подготовительная группа (6–7 лет): 30 минут."
+            ],
+            "style": "unordered"
+          },
+          "id": "b13",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_a923b85255e4"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Меры безопасности"
+          },
+          "id": "b14",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Медицинский контроль осуществляется врачом дошкольного учреждения, который обязан проводить наблюдение на занятиях не менее 2 раз в год в каждой группе. Эффективность воспитания оценивается дважды в год (в начале и конце учебного года) на основе динамики здоровья и результатов тестирования физической подготовленности."
+          },
+          "id": "b15",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_148f03f07c5b",
+              "fg_f6eb8ff0b37a"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "instruction",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/instruction/instruction_физическое воспитание.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/instruction/instruction_физическое воспитание_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/instruction_физическое воспитание.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/instruction/instruction_e63b6a326d.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/instruction/instruction_e63b6a326d.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_9393ed55d837",
+        "fg_1ad4e4204a6f",
+        "fg_dab44268a5ed",
+        "fg_a923b85255e4",
+        "fg_1996a5b07271",
+        "fg_148f03f07c5b",
+        "fg_f6eb8ff0b37a"
+      ],
+      "source_doc_ids": [
+        "doc_009525_3d6116d9"
+      ],
+      "source_documents_count": 1,
+      "used_fact_group_ids": [
+        "fg_9393ed55d837",
+        "fg_1ad4e4204a6f",
+        "fg_dab44268a5ed",
+        "fg_a923b85255e4",
+        "fg_1996a5b07271",
+        "fg_148f03f07c5b",
+        "fg_f6eb8ff0b37a"
+      ]
+    },
+    "tag_id": "instruction_e63b6a326d"
+  }
+}

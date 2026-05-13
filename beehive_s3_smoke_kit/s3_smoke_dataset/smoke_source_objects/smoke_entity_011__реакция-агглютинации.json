@@ -1,0 +1,217 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_011",
+  "artifact_id": "smoke_source_artifact_011",
+  "canonical_tag_ru": "Реакция агглютинации",
+  "canonical_tag_latin": "Agglutinatio",
+  "entity_type": "diagnostic_method",
+  "tag_id": "diagnostic_method_3f8782b7dc",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/11__diagnostic_method__Реакция агглютинации.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Реакция агглютинации (РА) представляет собой процесс связывания антителами нерастворимых (корпускулярных) антигенов, таких как бактерии, эритроциты или частицы с адсорбированными на них антигенами. Процесс протекает в присутствии электролитов (например, изотонического раствора хлорида натрия) и проявляется визуально в виде образования хлопьев или осадка из склеенных клеток."
+    },
+    {
+      "type": "header",
+      "text": "Для чего применяется"
+    },
+    {
+      "type": "paragraph",
+      "text": "Метод используется для выявления специфических антител в сыворотке крови при диагностике бруцеллеза (реакции Райта и Хеддльсона), брюшного тифа и паратифов (реакция Видаля). Также РА применяется для серотипирования — идентификации возбудителя, выделенного от пациента."
+    },
+    {
+      "type": "header",
+      "text": "Как проводится"
+    },
+    {
+      "type": "paragraph",
+      "text": "Существует два основных варианта постановки реакции:"
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Agglutinatio",
+    "canonical_tag_ru": "Реакция агглютинации",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "b9",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Реакция агглютинации (РА) представляет собой процесс связывания антителами нерастворимых (корпускулярных) антигенов, таких как бактерии, эритроциты или частицы с адсорбированными на них антигенами. Процесс протекает в присутствии электролитов (например, изотонического раствора хлорида натрия) и проявляется визуально в виде образования хлопьев или осадка из склеенных клеток."
+          },
+          "id": "b10",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_792e3b37890c",
+              "fg_b75bd198c129"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Для чего применяется"
+          },
+          "id": "b11",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Метод используется для выявления специфических антител в сыворотке крови при диагностике бруцеллеза (реакции Райта и Хеддльсона), брюшного тифа и паратифов (реакция Видаля). Также РА применяется для серотипирования — идентификации возбудителя, выделенного от пациента."
+          },
+          "id": "b12",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_e4354c2c0553"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Как проводится"
+          },
+          "id": "b13",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Существует два основных варианта постановки реакции:"
+          },
+          "id": "b14",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_1ed82035d4d7",
+              "fg_8407938d360a"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Ориентировочная (качественная) реакция: выполняется на предметном стекле для предварительной идентификации культуры. Появление хлопьев при смешивании культуры с диагностической сывороткой считается положительным результатом.",
+              "Развернутая (количественная) реакция: проводится в пробирках с последовательными разведениями сыворотки для определения титра антител (наибольшего разведения, при котором виден осадок)."
+            ],
+            "style": "unordered"
+          },
+          "id": "b15",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_1ed82035d4d7",
+              "fg_8407938d360a"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Особенности"
+          },
+          "id": "b16",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "В зависимости от способа подготовки бактерий выделяют:"
+          },
+          "id": "b17",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_b484a5796cd2"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "О-агглютинация: использование бактерий, убитых нагреванием; образуется мелкозернистый осадок.",
+              "Н-агглютинация: использование бактерий, убитых формалином (с сохранением жгутиков); протекает быстрее с образованием крупнохлопчатого осадка."
+            ],
+            "style": "unordered"
+          },
+          "id": "b18",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_b484a5796cd2"
+            ]
+          },
+          "type": "list"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "diagnostic_method",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/diagnostic_method/diagnostic_method_Реакция агглютинации.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/diagnostic_method/diagnostic_method_Реакция агглютинации_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/diagnostic_method_Реакция агглютинации.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/diagnostic_method/diagnostic_method_3f8782b7dc.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/diagnostic_method/diagnostic_method_3f8782b7dc.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_792e3b37890c",
+        "fg_e4354c2c0553",
+        "fg_b75bd198c129",
+        "fg_b484a5796cd2",
+        "fg_1ed82035d4d7",
+        "fg_8407938d360a"
+      ],
+      "source_doc_ids": [
+        "doc_000024_0776a5d3"
+      ],
+      "source_documents_count": 1,
+      "used_fact_group_ids": [
+        "fg_792e3b37890c",
+        "fg_e4354c2c0553",
+        "fg_b75bd198c129",
+        "fg_b484a5796cd2",
+        "fg_1ed82035d4d7",
+        "fg_8407938d360a"
+      ]
+    },
+    "tag_id": "diagnostic_method_3f8782b7dc"
+  }
+}

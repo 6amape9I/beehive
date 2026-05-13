@@ -1,0 +1,224 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_035",
+  "artifact_id": "smoke_source_artifact_035",
+  "canonical_tag_ru": "Микоплазма гениталиум",
+  "canonical_tag_latin": "Mycoplasma genitalium",
+  "entity_type": "microorganism",
+  "tag_id": "microorganism_b9a8e300f9",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/35__microorganism__Микоплазма гениталиум.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Mycoplasma genitalium классифицируется как абсолютный патоген. Это означает, что обнаружение данного микроорганизма в организме человека всегда считается патологическим состоянием. Инфекция часто характеризуется стойким, длительным и нередко бессимптомным течением."
+    },
+    {
+      "type": "header",
+      "text": "Классификация и типы течения"
+    },
+    {
+      "type": "paragraph",
+      "text": "Выделяют несколько вариантов течения инфекции:"
+    },
+    {
+      "type": "list",
+      "items": [
+        "Хроническая инфекция: часто протекает без жалоб и явных признаков воспаления.",
+        "Носительство: определяется при выявлении Mycoplasma genitalium в отсутствие каких-либо клинических проявлений."
+      ]
+    },
+    {
+      "type": "header",
+      "text": "Диагностика"
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Mycoplasma genitalium",
+    "canonical_tag_ru": "Микоплазма гениталиум",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "b1",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Mycoplasma genitalium классифицируется как абсолютный патоген. Это означает, что обнаружение данного микроорганизма в организме человека всегда считается патологическим состоянием. Инфекция часто характеризуется стойким, длительным и нередко бессимптомным течением."
+          },
+          "id": "b2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_bc079c97915c",
+              "fg_a54f6732665b"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Классификация и типы течения"
+          },
+          "id": "b3",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Выделяют несколько вариантов течения инфекции:"
+          },
+          "id": "b4",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_633afa760519",
+              "fg_9c005645aa93"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Хроническая инфекция: часто протекает без жалоб и явных признаков воспаления.",
+              "Носительство: определяется при выявлении Mycoplasma genitalium в отсутствие каких-либо клинических проявлений."
+            ],
+            "style": "unordered"
+          },
+          "id": "b5",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_633afa760519",
+              "fg_9c005645aa93"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Диагностика"
+          },
+          "id": "b6",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Золотым стандартом диагностики Mycoplasma genitalium является метод полимеразной цепной реакции (ПЦР). Использование серологических методов (поиск антител в крови) считается недопустимым для диагностики заболеваний, ассоциированных с этим патогеном."
+          },
+          "id": "b7",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_10971fe999a6",
+              "fg_cbfc9eeab99d"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Лечение и контроль"
+          },
+          "id": "b8",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Обнаружение Mycoplasma genitalium в мазке требует обязательного лечения, даже если у пациента отсутствуют клинические жалобы. Традиционно препаратами выбора являются доксициклина моногидрат и джозамицин, однако из-за снижения эффективности доксициклина в ряде случаев применяется азитромицин."
+          },
+          "id": "b9",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_bf7dec3fb2dd",
+              "fg_e6bd5ee05f57"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Контроль излеченности проводится методом ПЦР через 4 недели после завершения курса терапии."
+          },
+          "id": "b10",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_ae7a603c8f2f"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "microorganism",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/microorganism/microorganism_Микоплазма гениталиум.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/microorganism/microorganism_Микоплазма гениталиум_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/microorganism_Микоплазма гениталиум.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/microorganism/microorganism_b9a8e300f9.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/microorganism/microorganism_b9a8e300f9.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_bc079c97915c",
+        "fg_10971fe999a6",
+        "fg_ae7a603c8f2f",
+        "fg_e6bd5ee05f57",
+        "fg_bf7dec3fb2dd",
+        "fg_a54f6732665b",
+        "fg_633afa760519",
+        "fg_9c005645aa93",
+        "fg_cbfc9eeab99d"
+      ],
+      "source_doc_ids": [
+        "doc_008002_f6d0f7ad"
+      ],
+      "source_documents_count": 1,
+      "used_fact_group_ids": [
+        "fg_bc079c97915c",
+        "fg_10971fe999a6",
+        "fg_ae7a603c8f2f",
+        "fg_e6bd5ee05f57",
+        "fg_bf7dec3fb2dd",
+        "fg_a54f6732665b",
+        "fg_633afa760519",
+        "fg_9c005645aa93",
+        "fg_cbfc9eeab99d"
+      ]
+    },
+    "tag_id": "microorganism_b9a8e300f9"
+  }
+}

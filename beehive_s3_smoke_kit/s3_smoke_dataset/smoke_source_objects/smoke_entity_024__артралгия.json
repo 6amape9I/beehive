@@ -1,0 +1,288 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_024",
+  "artifact_id": "smoke_source_artifact_024",
+  "canonical_tag_ru": "Артралгия",
+  "canonical_tag_latin": "Arthralgia",
+  "entity_type": "symptom",
+  "tag_id": "symptom_a1f9ba26ef",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/24__symptom__Артралгия.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что такое артралгия"
+    },
+    {
+      "type": "paragraph",
+      "text": "Артралгия представляет собой суставную боль и является ключевым проявлением артропатии. Это медицинский термин, обозначающий болевой синдром в одном или нескольких суставах, который не сопровождается объективными признаками воспалительного процесса, такими как отек, покраснение, повышение температуры или ограничение объема движений."
+    },
+    {
+      "type": "paragraph",
+      "text": "Важно понимать, что артралгия является симптомом, а не самостоятельным заболеванием. Она никогда не считается нормой и требует обязательного обращения к ревматологу или травматологу-ортопеду для установления точного диагноза."
+    },
+    {
+      "type": "header",
+      "text": "Классификация и типы боли"
+    },
+    {
+      "type": "paragraph",
+      "text": "Для дифференциальной диагностики суставную боль разделяют на два основных типа:"
+    },
+    {
+      "type": "list",
+      "items": [
+        "Воспалительная артралгия: является признаком артрита, сопровождается отеком, утренней скованностью и усиливается ночью или ранним утром.",
+        "Механическая артралгия: связана с физической нагрузкой, облегчается в покое и может возникать в начале движения (стартовые боли)."
+      ]
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": "Arthralgia",
+    "canonical_tag_ru": "Артралгия",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что такое артралгия"
+          },
+          "id": "b1",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Артралгия представляет собой суставную боль и является ключевым проявлением артропатии. Это медицинский термин, обозначающий болевой синдром в одном или нескольких суставах, который не сопровождается объективными признаками воспалительного процесса, такими как отек, покраснение, повышение температуры или ограничение объема движений."
+          },
+          "id": "b2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_a0d0aeb917c1",
+              "fg_6cfd5ba5141b",
+              "fg_f6f22bbf66dc"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Важно понимать, что артралгия является симптомом, а не самостоятельным заболеванием. Она никогда не считается нормой и требует обязательного обращения к ревматологу или травматологу-ортопеду для установления точного диагноза."
+          },
+          "id": "b3",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_5bc56392a1b3",
+              "fg_68cdececbd76"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Классификация и типы боли"
+          },
+          "id": "b4",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Для дифференциальной диагностики суставную боль разделяют на два основных типа:"
+          },
+          "id": "b5",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_f5fa243062f1",
+              "fg_73f83e451fc8"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Воспалительная артралгия: является признаком артрита, сопровождается отеком, утренней скованностью и усиливается ночью или ранним утром.",
+              "Механическая артралгия: связана с физической нагрузкой, облегчается в покое и может возникать в начале движения (стартовые боли)."
+            ],
+            "style": "unordered"
+          },
+          "id": "b6",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_c6ac9bde181d",
+              "fg_15d603be9968"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "text": "По количеству вовлеченных суставов поражение может быть моноартикулярным (один сустав) или полиартикулярным (несколько суставов)."
+          },
+          "id": "b7",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_3b84054c857a"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Причины и механизмы развития"
+          },
+          "id": "b8",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Суставной хрящ не имеет нервных окончаний и сосудов, поэтому он не может быть прямым источником боли. Боль возникает вследствие различных патологических процессов:"
+          },
+          "id": "b9",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_6d1814210365"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "При системной красной волчанке боль вызвана прикреплением иммунных комплексов к сосудам синовиальной оболочки.",
+              "При сахарном диабете артралгия развивается из-за нарушения нервной регуляции и кровоснабжения.",
+              "Инфекционные агенты (боррелиоз, гепатиты, ВИЧ, тонзиллит) и хронические очаги воспаления (цистит, кариес) могут провоцировать суставную боль."
+            ],
+            "style": "unordered"
+          },
+          "id": "b10",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_786c3cfd2cce",
+              "fg_7549a8e01716",
+              "fg_3af2836693a4"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "text": "К факторам риска также относятся травмы, возраст старше 40 лет, гипермобильность суставов, дефицит витамина D и прием некоторых лекарств (например, ингибиторов ароматазы)."
+          },
+          "id": "b11",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_f88782f26c47"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Особенности у детей и прогноз"
+          },
+          "id": "b12",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "У детей в возрасте от 4 до 12 лет могут наблюдаться симметричные ночные «боли роста» в голенях или бедрах. В случае инфекционных артралгий прогноз обычно благоприятный: после лечения основной инфекции боль проходит без деформации суставов. Однако при воспалительных заболеваниях отсутствие лечения может привести к разрушению хряща и утрате трудоспособности."
+          },
+          "id": "b13",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_3215a00f3ae2",
+              "fg_d8db8b3a5306",
+              "fg_b24be0f13963"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "symptom",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/symptom/symptom_Артралгия.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/symptom/symptom_Артралгия_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/symptom_Артралгия.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/symptom/symptom_a1f9ba26ef.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/symptom/symptom_a1f9ba26ef.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_a0d0aeb917c1",
+        "fg_6cfd5ba5141b",
+        "fg_f6f22bbf66dc",
+        "fg_c6ac9bde181d",
+        "fg_15d603be9968",
+        "fg_5bc56392a1b3",
+        "fg_f5fa243062f1",
+        "fg_68cdececbd76",
+        "fg_3b84054c857a",
+        "fg_73f83e451fc8",
+        "fg_7549a8e01716",
+        "fg_6d1814210365",
+        "fg_786c3cfd2cce",
+        "fg_3215a00f3ae2",
+        "fg_b24be0f13963",
+        "fg_3af2836693a4",
+        "fg_f88782f26c47",
+        "fg_d8db8b3a5306"
+      ],
+      "source_doc_ids": [
+        "doc_001299_0dab17f4",
+        "doc_001322_b611150e"
+      ],
+      "source_documents_count": 2,
+      "used_fact_group_ids": [
+        "fg_a0d0aeb917c1",
+        "fg_6cfd5ba5141b",
+        "fg_f6f22bbf66dc",
+        "fg_5bc56392a1b3",
+        "fg_68cdececbd76",
+        "fg_f5fa243062f1",
+        "fg_73f83e451fc8",
+        "fg_c6ac9bde181d",
+        "fg_15d603be9968",
+        "fg_3b84054c857a",
+        "fg_6d1814210365",
+        "fg_786c3cfd2cce",
+        "fg_7549a8e01716",
+        "fg_3af2836693a4",
+        "fg_f88782f26c47",
+        "fg_3215a00f3ae2",
+        "fg_d8db8b3a5306",
+        "fg_b24be0f13963"
+      ]
+    },
+    "tag_id": "symptom_a1f9ba26ef"
+  }
+}

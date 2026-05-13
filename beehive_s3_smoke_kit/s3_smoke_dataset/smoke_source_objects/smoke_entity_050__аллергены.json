@@ -1,0 +1,185 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_050",
+  "artifact_id": "smoke_source_artifact_050",
+  "canonical_tag_ru": "Аллергены",
+  "canonical_tag_latin": null,
+  "entity_type": "immunobiological_preparation",
+  "tag_id": "immunobiological_preparation_0cc71bf00d",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/50__immunobiological_preparation__Аллергены.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Аллергены представляют собой антигены микроорганизмов (белки или белково-нуклеиновые комплексы), которые способны вызывать сенсибилизацию организма."
+    },
+    {
+      "type": "header",
+      "text": "Классификация и применение"
+    },
+    {
+      "type": "paragraph",
+      "text": "Аллергены относятся к категории иммунологических препаратов, применяемых для диагностики инфекционных заболеваний. Основным назначением данных препаратов является постановка аллергических проб."
+    },
+    {
+      "type": "paragraph",
+      "text": "В диагностической практике аллергены используются для реализации аллергического метода диагностики, в частности для проведения кожно-аллергических тестов."
+    },
+    {
+      "type": "header",
+      "text": "Механизм действия и интерпретация"
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": null,
+    "canonical_tag_ru": "Аллергены",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "b1",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Аллергены представляют собой антигены микроорганизмов (белки или белково-нуклеиновые комплексы), которые способны вызывать сенсибилизацию организма."
+          },
+          "id": "b2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_61f1925e5b0f"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Классификация и применение"
+          },
+          "id": "b3",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Аллергены относятся к категории иммунологических препаратов, применяемых для диагностики инфекционных заболеваний. Основным назначением данных препаратов является постановка аллергических проб."
+          },
+          "id": "b4",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_d55321ee9c08",
+              "fg_76f4a96375d4"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "В диагностической практике аллергены используются для реализации аллергического метода диагностики, в частности для проведения кожно-аллергических тестов."
+          },
+          "id": "b5",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_d948fcc60d7b"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Механизм действия и интерпретация"
+          },
+          "id": "b6",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "При введении препарата в сенсибилизированный организм возникает аллергическая реакция. Данный процесс обычно обусловлен реакцией сенсибилизированных лимфоцитов и классифицируется как гиперчувствительность замедленного типа (ГЗТ)."
+          },
+          "id": "b7",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_d945df5a2365"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Результат пробы считается положительным, если в месте введения аллергена клинически наблюдается зона инфильтрации и гиперемии, развивающаяся по механизму IV типа ГЗТ."
+          },
+          "id": "b8",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_7965cba72afe"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "immunobiological_preparation",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/immunobiological_preparation/immunobiological_preparation_Аллергены.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/immunobiological_preparation/immunobiological_preparation_Аллергены_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/immunobiological_preparation_Аллергены.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/immunobiological_preparation/immunobiological_preparation_0cc71bf00d.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/immunobiological_preparation/immunobiological_preparation_0cc71bf00d.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_61f1925e5b0f",
+        "fg_d55321ee9c08",
+        "fg_76f4a96375d4",
+        "fg_d948fcc60d7b",
+        "fg_d945df5a2365",
+        "fg_7965cba72afe"
+      ],
+      "source_doc_ids": [
+        "doc_000042_07164cf1",
+        "doc_000043_4020ccc5"
+      ],
+      "source_documents_count": 2,
+      "used_fact_group_ids": [
+        "fg_61f1925e5b0f",
+        "fg_d55321ee9c08",
+        "fg_76f4a96375d4",
+        "fg_d948fcc60d7b",
+        "fg_d945df5a2365",
+        "fg_7965cba72afe"
+      ]
+    },
+    "tag_id": "immunobiological_preparation_0cc71bf00d"
+  }
+}

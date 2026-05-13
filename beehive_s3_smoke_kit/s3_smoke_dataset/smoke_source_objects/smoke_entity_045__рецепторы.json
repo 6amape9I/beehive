@@ -1,0 +1,190 @@
+{
+  "schema": "beehive.s3_smoke_source.v1",
+  "entity_id": "smoke_entity_045",
+  "artifact_id": "smoke_source_artifact_045",
+  "canonical_tag_ru": "Рецепторы",
+  "canonical_tag_latin": null,
+  "entity_type": "cell_or_biological_structure",
+  "tag_id": "cell_or_biological_structure_4b0e5939c4",
+  "article_status": "compiled_article",
+  "needs_review_before_publication": false,
+  "source_zip_entry": "selected_50_for_n8n/raw/45__cell_or_biological_structure__Рецепторы.json",
+  "preview_blocks": [
+    {
+      "type": "header",
+      "text": "Что это"
+    },
+    {
+      "type": "paragraph",
+      "text": "Специфические рецепторы — это макромолекулярные структуры, которые обладают избирательной чувствительностью к определенным химическим соединениям."
+    },
+    {
+      "type": "header",
+      "text": "Классификация"
+    },
+    {
+      "type": "paragraph",
+      "text": "Рецепторы классифицируются по их чувствительности к различным веществам:"
+    },
+    {
+      "type": "list",
+      "items": [
+        "Холинергические (чувствительны к ацетилхолину): включают М-холинорецепторы и Н-холинорецепторы (в ганглиях и мускулатуре);",
+        "Адренергические (чувствительны к адреналину): подтипы α₁, α₂, β₂;",
+        "Гистаминовые: типы H₁ и H₂;",
+        "Другие группы: допаминные, серотониновые, опиоидные рецепторы."
+      ]
+    },
+    {
+      "type": "header",
+      "text": "Механизм действия"
+    }
+  ],
+  "raw_article": {
+    "article_status": "compiled_article",
+    "canonical_tag_latin": null,
+    "canonical_tag_ru": "Рецепторы",
+    "content": {
+      "blocks": [
+        {
+          "data": {
+            "level": 2,
+            "text": "Что это"
+          },
+          "id": "block_1",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Специфические рецепторы — это макромолекулярные структуры, которые обладают избирательной чувствительностью к определенным химическим соединениям."
+          },
+          "id": "block_2",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_a04483e2524b"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Классификация"
+          },
+          "id": "block_3",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Рецепторы классифицируются по их чувствительности к различным веществам:"
+          },
+          "id": "block_4",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_06c07ef7ed78"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "items": [
+              "Холинергические (чувствительны к ацетилхолину): включают М-холинорецепторы и Н-холинорецепторы (в ганглиях и мускулатуре);",
+              "Адренергические (чувствительны к адреналину): подтипы α₁, α₂, β₂;",
+              "Гистаминовые: типы H₁ и H₂;",
+              "Другие группы: допаминные, серотониновые, опиоидные рецепторы."
+            ],
+            "style": "unordered"
+          },
+          "id": "block_5",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_06c07ef7ed78"
+            ]
+          },
+          "type": "list"
+        },
+        {
+          "data": {
+            "level": 2,
+            "text": "Механизм действия"
+          },
+          "id": "block_6",
+          "metadata": {
+            "source_fact_group_ids": []
+          },
+          "type": "header"
+        },
+        {
+          "data": {
+            "text": "Взаимодействие химических веществ с рецептором вызывает физиологические и биохимические изменения в организме, которые определяют итоговый клинический эффект."
+          },
+          "id": "block_7",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_ed552b6eed87"
+            ]
+          },
+          "type": "paragraph"
+        },
+        {
+          "data": {
+            "text": "Рефлекторное действие лекарственных средств также опосредуется через влияние на чувствительные рецепторы. Их возбуждение приводит к изменению функционального состояния соответствующих исполнительных органов."
+          },
+          "id": "block_8",
+          "metadata": {
+            "source_fact_group_ids": [
+              "fg_cb7ce94e9dae"
+            ]
+          },
+          "type": "paragraph"
+        }
+      ],
+      "time": 1715856000,
+      "version": "2.28.0"
+    },
+    "content_format": "editorjs",
+    "entity_type": "cell_or_biological_structure",
+    "export": {
+      "exported_at": "2026-05-07T08:00:20Z",
+      "for_docs_path": "data/articles/final_exports/for_docs/cell_or_biological_structure/cell_or_biological_structure_Рецепторы.json",
+      "for_docs_quotes_path": "data/articles/final_exports/for_docs/cell_or_biological_structure/cell_or_biological_structure_Рецепторы_quotes.json",
+      "for_n8n_path": "data/articles/final_exports/for_n8n/cell_or_biological_structure_Рецепторы.json",
+      "stage": "article_a5_final_export_assembly"
+    },
+    "needs_review_before_publication": false,
+    "provenance": {
+      "a1_entity_json_path": "data/articles/entities/cell_or_biological_structure/cell_or_biological_structure_4b0e5939c4.json",
+      "a3_fact_groups_path": "data/articles/a3/fact_groups.jsonl",
+      "a4_draft_path": "data/articles/a4/production_v1/compiled_articles/cell_or_biological_structure/cell_or_biological_structure_4b0e5939c4.json"
+    },
+    "review_reasons": [],
+    "source_article_status": "compiled_article",
+    "source_stage": "A4",
+    "sources": {
+      "fact_group_ids": [
+        "fg_a04483e2524b",
+        "fg_06c07ef7ed78",
+        "fg_ed552b6eed87",
+        "fg_cb7ce94e9dae"
+      ],
+      "source_doc_ids": [
+        "doc_011274_a00f3ee1"
+      ],
+      "source_documents_count": 1,
+      "used_fact_group_ids": [
+        "fg_a04483e2524b",
+        "fg_06c07ef7ed78",
+        "fg_ed552b6eed87",
+        "fg_cb7ce94e9dae"
+      ]
+    },
+    "tag_id": "cell_or_biological_structure_4b0e5939c4"
+  }
+}
