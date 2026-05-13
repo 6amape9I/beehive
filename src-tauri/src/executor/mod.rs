@@ -18,8 +18,9 @@ use crate::database::{
     NewStageRunInput, RegisterS3ArtifactPointerInput, RuntimeTaskRecord,
 };
 use crate::domain::{
-    AppEventLevel, ArtifactLocation, CommandErrorInfo, EntityFileRecord, RunDueTasksSummary,
-    S3StorageConfig, StageRecord, StageStatus, StorageProvider,
+    AppEventLevel, ArtifactLocation, CommandErrorInfo, EntityFileRecord, PipelineWaveSummary,
+    RunDueTasksSummary, RunPipelineWavesSummary, S3StorageConfig, StageRecord, StageStatus,
+    StorageProvider,
 };
 use crate::file_ops;
 use crate::file_safety::read_stable_file;
@@ -80,6 +81,90 @@ pub fn run_due_tasks(
     }
 
     Ok(summary)
+}
+
+pub fn run_pipeline_waves(
+    workdir_path: &Path,
+    database_path: &Path,
+    max_waves: u64,
+    max_tasks_per_wave: u64,
+    stop_on_first_failure: bool,
+    request_timeout_sec: u64,
+    stuck_task_timeout_sec: u64,
+    file_stability_delay_ms: u64,
+) -> Result<RunPipelineWavesSummary, String> {
+    let limited_max_waves = max_waves.clamp(1, 10);
+    let limited_tasks_per_wave = max_tasks_per_wave.clamp(1, 5);
+    let mut aggregate = RunPipelineWavesSummary {
+        requested_max_waves: max_waves,
+        requested_max_tasks_per_wave: max_tasks_per_wave,
+        max_waves: limited_max_waves,
+        max_tasks_per_wave: limited_tasks_per_wave,
+        max_total_tasks: limited_max_waves * limited_tasks_per_wave,
+        stop_on_first_failure,
+        waves_executed: 0,
+        total_claimed: 0,
+        total_succeeded: 0,
+        total_retry_scheduled: 0,
+        total_failed: 0,
+        total_blocked: 0,
+        total_skipped: 0,
+        total_stuck_reconciled: 0,
+        total_errors: 0,
+        stopped_reason: "max_waves_reached".to_string(),
+        wave_summaries: Vec::new(),
+        errors: Vec::new(),
+    };
+
+    for wave_index in 1..=limited_max_waves {
+        let summary = match run_due_tasks(
+            workdir_path,
+            database_path,
+            limited_tasks_per_wave,
+            request_timeout_sec,
+            stuck_task_timeout_sec,
+            file_stability_delay_ms,
+        ) {
+            Ok(summary) => summary,
+            Err(message) => {
+                aggregate.stopped_reason = "runtime_error".to_string();
+                aggregate.errors.push(CommandErrorInfo {
+                    code: "pipeline_wave_runtime_error".to_string(),
+                    message,
+                    path: None,
+                });
+                return Ok(aggregate);
+            }
+        };
+
+        let wave_claimed = summary.claimed;
+        let wave_failed_or_blocked =
+            summary.failed > 0 || summary.blocked > 0 || !summary.errors.is_empty();
+        aggregate.waves_executed += 1;
+        aggregate.total_claimed += summary.claimed;
+        aggregate.total_succeeded += summary.succeeded;
+        aggregate.total_retry_scheduled += summary.retry_scheduled;
+        aggregate.total_failed += summary.failed;
+        aggregate.total_blocked += summary.blocked;
+        aggregate.total_skipped += summary.skipped;
+        aggregate.total_stuck_reconciled += summary.stuck_reconciled;
+        aggregate.total_errors += summary.errors.len() as u64;
+        aggregate.wave_summaries.push(PipelineWaveSummary {
+            wave_index,
+            summary,
+        });
+
+        if wave_claimed == 0 {
+            aggregate.stopped_reason = "idle".to_string();
+            break;
+        }
+        if stop_on_first_failure && wave_failed_or_blocked {
+            aggregate.stopped_reason = "failure_or_blocked".to_string();
+            break;
+        }
+    }
+
+    Ok(aggregate)
 }
 
 pub fn run_entity_stage(
@@ -1717,6 +1802,24 @@ mod tests {
 
     fn s3_success_manifest(run_id: &str, save_path: &str, key: &str) -> String {
         let source_key = s3_source_key();
+        s3_success_manifest_for_source(
+            run_id,
+            source_key,
+            save_path,
+            key,
+            "art_001",
+            "entity-1-child",
+        )
+    }
+
+    fn s3_success_manifest_for_source(
+        run_id: &str,
+        source_key: &str,
+        save_path: &str,
+        key: &str,
+        artifact_id: &str,
+        entity_id: &str,
+    ) -> String {
         format!(
             r#"{{
   "schema":"beehive.s3_artifact_manifest.v1",
@@ -1724,10 +1827,343 @@ mod tests {
   "run_id":"{run_id}",
   "source":{{"bucket":"steos-s3-data","key":"{source_key}","version_id":null,"etag":"etag-source"}},
   "status":"success",
-  "outputs":[{{"artifact_id":"art_001","entity_id":"entity-1-child","relation_to_source":"child_entity","bucket":"steos-s3-data","key":"{key}","save_path":"{save_path}","content_type":"application/json","checksum_sha256":null,"size":456}}],
+  "outputs":[{{"artifact_id":"{artifact_id}","entity_id":"{entity_id}","relation_to_source":"child_entity","bucket":"steos-s3-data","key":"{key}","save_path":"{save_path}","content_type":"application/json","checksum_sha256":null,"size":456}}],
   "created_at":"2026-05-12T00:00:00Z"
 }}"#
         )
+    }
+
+    fn s3_success_empty_manifest(run_id: &str, source_key: &str) -> String {
+        format!(
+            r#"{{
+  "schema":"beehive.s3_artifact_manifest.v1",
+  "workspace_id":"beehive-s3-dev",
+  "run_id":"{run_id}",
+  "source":{{"bucket":"steos-s3-data","key":"{source_key}"}},
+  "status":"success",
+  "outputs":[],
+  "created_at":"2026-05-12T00:00:00Z"
+}}"#
+        )
+    }
+
+    fn prepare_s3_terminal_sources(
+        workflow_url: &str,
+        count: u64,
+    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        let config = s3_test_config_with_allow_empty_outputs(workflow_url, None, true);
+        bootstrap_database(&database_path, &config).expect("bootstrap");
+        for index in 1..=count {
+            register_s3_artifact_pointer(
+                &database_path,
+                &RegisterS3ArtifactPointerInput {
+                    entity_id: format!("entity-{index}"),
+                    artifact_id: format!("source-{index:03}"),
+                    relation_to_source: None,
+                    stage_id: "raw".to_string(),
+                    bucket: "steos-s3-data".to_string(),
+                    key: format!("main_dir/raw/entity-{index}.json"),
+                    version_id: None,
+                    etag: Some(format!("etag-{index}")),
+                    checksum_sha256: None,
+                    size: Some(100 + index),
+                    last_modified: None,
+                    source_file_id: None,
+                    producer_run_id: None,
+                    status: StageStatus::Pending,
+                },
+            )
+            .expect("register terminal S3 source");
+        }
+        (tempdir, workdir, database_path)
+    }
+
+    fn s3_multistage_config(workflow_url: &str) -> PipelineConfig {
+        PipelineConfig {
+            project: ProjectConfig {
+                name: "beehive-s3-dev".to_string(),
+                workdir: ".".to_string(),
+            },
+            storage: Some(StorageConfig {
+                provider: StorageProvider::S3,
+                bucket: Some("steos-s3-data".to_string()),
+                workspace_prefix: Some("main_dir".to_string()),
+                region: None,
+                endpoint: None,
+            }),
+            runtime: RuntimeConfig::default(),
+            stages: vec![
+                StageDefinition {
+                    id: "raw".to_string(),
+                    input_folder: String::new(),
+                    input_uri: Some("s3://steos-s3-data/main_dir/raw".to_string()),
+                    output_folder: String::new(),
+                    workflow_url: workflow_url.to_string(),
+                    max_attempts: 1,
+                    retry_delay_sec: 0,
+                    next_stage: Some("raw_entities".to_string()),
+                    save_path_aliases: vec!["main_dir/raw".to_string()],
+                    allow_empty_outputs: false,
+                },
+                StageDefinition {
+                    id: "raw_entities".to_string(),
+                    input_folder: String::new(),
+                    input_uri: Some(
+                        "s3://steos-s3-data/main_dir/processed/raw_entities".to_string(),
+                    ),
+                    output_folder: String::new(),
+                    workflow_url: workflow_url.to_string(),
+                    max_attempts: 1,
+                    retry_delay_sec: 0,
+                    next_stage: Some("final".to_string()),
+                    save_path_aliases: vec!["main_dir/processed/raw_entities".to_string()],
+                    allow_empty_outputs: false,
+                },
+                StageDefinition {
+                    id: "final".to_string(),
+                    input_folder: String::new(),
+                    input_uri: Some("s3://steos-s3-data/main_dir/final".to_string()),
+                    output_folder: String::new(),
+                    workflow_url: workflow_url.to_string(),
+                    max_attempts: 1,
+                    retry_delay_sec: 0,
+                    next_stage: None,
+                    save_path_aliases: vec!["main_dir/final".to_string()],
+                    allow_empty_outputs: true,
+                },
+            ],
+        }
+    }
+
+    fn s3_branching_config(workflow_url: &str) -> PipelineConfig {
+        let mut config = s3_multistage_config(workflow_url);
+        config.stages[0].next_stage = Some("raw_entities".to_string());
+        config.stages[1].next_stage = None;
+        config.stages[2] = StageDefinition {
+            id: "raw_representations".to_string(),
+            input_folder: String::new(),
+            input_uri: Some(
+                "s3://steos-s3-data/main_dir/processed/raw_representations".to_string(),
+            ),
+            output_folder: String::new(),
+            workflow_url: workflow_url.to_string(),
+            max_attempts: 1,
+            retry_delay_sec: 0,
+            next_stage: None,
+            save_path_aliases: vec!["main_dir/processed/raw_representations".to_string()],
+            allow_empty_outputs: false,
+        };
+        config
+    }
+
+    fn prepare_s3_config_workdir(
+        workflow_url: &str,
+        config: PipelineConfig,
+    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(&database_path, &config).expect("bootstrap");
+        register_s3_artifact_pointer(
+            &database_path,
+            &RegisterS3ArtifactPointerInput {
+                entity_id: "entity-1".to_string(),
+                artifact_id: "source-001".to_string(),
+                relation_to_source: None,
+                stage_id: "raw".to_string(),
+                bucket: "steos-s3-data".to_string(),
+                key: s3_source_key().to_string(),
+                version_id: None,
+                etag: Some("etag-source".to_string()),
+                checksum_sha256: None,
+                size: Some(123),
+                last_modified: None,
+                source_file_id: None,
+                producer_run_id: None,
+                status: StageStatus::Pending,
+            },
+        )
+        .expect("register source");
+        assert!(
+            workflow_url.starts_with("http"),
+            "mock workflow URL should be HTTP"
+        );
+        (tempdir, workdir, database_path)
+    }
+
+    #[test]
+    fn run_pipeline_waves_stops_when_no_tasks_are_claimed() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(
+            &database_path,
+            &test_config("http://127.0.0.1/unused", 1, 0),
+        )
+        .expect("bootstrap");
+
+        let summary =
+            run_pipeline_waves(&workdir, &database_path, 5, 3, true, 5, 1, 0).expect("waves");
+
+        assert_eq!(summary.waves_executed, 1);
+        assert_eq!(summary.total_claimed, 0);
+        assert_eq!(summary.stopped_reason, "idle");
+        assert_eq!(summary.wave_summaries.len(), 1);
+        assert_eq!(summary.wave_summaries[0].summary.claimed, 0);
+    }
+
+    #[test]
+    fn run_pipeline_waves_clamps_limits_and_aggregates_per_wave_summaries() {
+        let server = mock_server_dynamic(3, |request| {
+            let control = serde_json::from_str::<Value>(request_body(request))
+                .expect("S3 control envelope JSON");
+            let run_id = control["run_id"].as_str().expect("run id");
+            let source_key = control["source_key"].as_str().expect("source key");
+            (200, s3_success_empty_manifest(run_id, source_key))
+        });
+        let (_tempdir, workdir, database_path) = prepare_s3_terminal_sources(&server.url, 3);
+
+        let summary =
+            run_pipeline_waves(&workdir, &database_path, 99, 99, true, 5, 1, 0).expect("waves");
+
+        assert_eq!(summary.requested_max_waves, 99);
+        assert_eq!(summary.requested_max_tasks_per_wave, 99);
+        assert_eq!(summary.max_waves, 10);
+        assert_eq!(summary.max_tasks_per_wave, 5);
+        assert_eq!(summary.max_total_tasks, 50);
+        assert_eq!(summary.waves_executed, 2);
+        assert_eq!(summary.total_claimed, 3);
+        assert_eq!(summary.total_succeeded, 3);
+        assert_eq!(summary.stopped_reason, "idle");
+        assert_eq!(summary.wave_summaries[0].summary.claimed, 3);
+        assert_eq!(summary.wave_summaries[0].summary.succeeded, 3);
+        assert_eq!(summary.wave_summaries[1].summary.claimed, 0);
+        assert_eq!(server.requests.lock().expect("requests").len(), 3);
+    }
+
+    #[test]
+    fn run_pipeline_waves_stops_on_failed_or_blocked_when_requested() {
+        let server = mock_server(vec![(500, r#"{"error":"upstream"}"#)]);
+        let (_tempdir, workdir, database_path) = prepare_s3_terminal_sources(&server.url, 1);
+
+        let summary =
+            run_pipeline_waves(&workdir, &database_path, 5, 1, true, 5, 1, 0).expect("waves");
+
+        assert_eq!(summary.waves_executed, 1);
+        assert_eq!(summary.total_claimed, 1);
+        assert_eq!(summary.total_failed, 1);
+        assert_eq!(summary.stopped_reason, "failure_or_blocked");
+        assert_eq!(server.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[test]
+    fn mock_s3_multistage_pipeline_moves_one_artifact_through_two_stages() {
+        let server = mock_server_dynamic(2, |request| {
+            let control = serde_json::from_str::<Value>(request_body(request))
+                .expect("S3 control envelope JSON");
+            let run_id = control["run_id"].as_str().expect("run id");
+            let source_key = control["source_key"].as_str().expect("source key");
+            match control["stage_id"].as_str() {
+                Some("raw") => (
+                    200,
+                    s3_success_manifest_for_source(
+                        run_id,
+                        source_key,
+                        "main_dir/processed/raw_entities",
+                        "main_dir/processed/raw_entities/stage-a.json",
+                        "stage-a-artifact",
+                        "entity-1-stage-a",
+                    ),
+                ),
+                Some("raw_entities") => (
+                    200,
+                    s3_success_manifest_for_source(
+                        run_id,
+                        source_key,
+                        "main_dir/final",
+                        "main_dir/final/stage-b.json",
+                        "stage-b-artifact",
+                        "entity-1-stage-b",
+                    ),
+                ),
+                other => panic!("unexpected stage {other:?}"),
+            }
+        });
+        let (_tempdir, workdir, database_path) =
+            prepare_s3_config_workdir(&server.url, s3_multistage_config(&server.url));
+
+        let summary =
+            run_pipeline_waves(&workdir, &database_path, 2, 1, true, 5, 1, 0).expect("waves");
+        let stage_a_files = files_for_stage(&database_path, "raw_entities");
+        let final_files = files_for_stage(&database_path, "final");
+
+        assert_eq!(summary.waves_executed, 2, "summary: {summary:?}");
+        assert_eq!(summary.total_claimed, 2, "summary: {summary:?}");
+        assert_eq!(summary.total_succeeded, 2, "summary: {summary:?}");
+        assert_eq!(summary.stopped_reason, "max_waves_reached");
+        assert_eq!(stage_a_files.len(), 1);
+        assert_eq!(final_files.len(), 1);
+        assert_eq!(
+            final_files[0].key.as_deref(),
+            Some("main_dir/final/stage-b.json")
+        );
+        assert_eq!(
+            captured_request_json(&server, 0)["stage_id"].as_str(),
+            Some("raw")
+        );
+        assert_eq!(
+            captured_request_json(&server, 1)["stage_id"].as_str(),
+            Some("raw_entities")
+        );
+    }
+
+    #[test]
+    fn mock_s3_branching_response_registers_outputs_by_save_path() {
+        let server = mock_server_dynamic(1, |request| {
+            let control = serde_json::from_str::<Value>(request_body(request))
+                .expect("S3 control envelope JSON");
+            let run_id = control["run_id"].as_str().expect("run id");
+            let source_key = control["source_key"].as_str().expect("source key");
+            (
+                200,
+                format!(
+                    r#"{{
+  "schema":"beehive.s3_artifact_manifest.v1",
+  "workspace_id":"beehive-s3-dev",
+  "run_id":"{run_id}",
+  "source":{{"bucket":"steos-s3-data","key":"{source_key}"}},
+  "status":"success",
+  "outputs":[
+    {{"artifact_id":"entity-artifact","entity_id":"entity-branch","relation_to_source":"child_entity","bucket":"steos-s3-data","key":"main_dir/processed/raw_entities/entity.json","save_path":"main_dir/processed/raw_entities","content_type":"application/json","checksum_sha256":null,"size":100}},
+    {{"artifact_id":"representation-artifact","entity_id":"representation-branch","relation_to_source":"representation_of","bucket":"steos-s3-data","key":"main_dir/processed/raw_representations/representation.json","save_path":"main_dir/processed/raw_representations","content_type":"application/json","checksum_sha256":null,"size":200}}
+  ],
+  "created_at":"2026-05-12T00:00:00Z"
+}}"#
+                ),
+            )
+        });
+        let (_tempdir, workdir, database_path) =
+            prepare_s3_config_workdir(&server.url, s3_branching_config(&server.url));
+
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+        let entity_files = files_for_stage(&database_path, "raw_entities");
+        let representation_files = files_for_stage(&database_path, "raw_representations");
+
+        assert_eq!(summary.succeeded, 1, "summary: {summary:?}; runs: {runs:?}");
+        assert_eq!(entity_files.len(), 1);
+        assert_eq!(representation_files.len(), 1);
+        assert_eq!(
+            entity_files[0].key.as_deref(),
+            Some("main_dir/processed/raw_entities/entity.json")
+        );
+        assert_eq!(
+            representation_files[0].key.as_deref(),
+            Some("main_dir/processed/raw_representations/representation.json")
+        );
     }
 
     #[test]

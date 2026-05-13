@@ -756,6 +756,12 @@ textarea.compact-textarea {
   margin-top: 16px;
 }
 
+.workspace-wave-summary {
+  display: grid;
+  gap: 14px;
+  margin-top: 14px;
+}
+
 .workspace-stage-content h3,
 .workspace-trail-panel h3 {
   margin: 0 0 12px;

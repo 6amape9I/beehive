@@ -12,11 +12,13 @@ import {
   reconcileS3Workspace,
   registerS3SourceArtifact,
   runDueTasksLimited,
+  runPipelineWaves,
   scanWorkspace,
 } from "../lib/runtimeApi";
 import type {
   CommandErrorInfo,
   EntityValidationStatus,
+  RunPipelineWavesSummary,
   RegisterS3SourceArtifactRequest,
   S3ReconciliationSummary,
   WorkspaceEntityTrail,
@@ -48,6 +50,12 @@ interface ManualS3RegistrationForm {
   size: string;
 }
 
+interface PipelineWaveControls {
+  max_waves: number;
+  max_tasks_per_wave: number;
+  stop_on_first_failure: boolean;
+}
+
 const defaultFilters: ExplorerFilters = {
   search: "",
   stageId: "",
@@ -71,6 +79,12 @@ const defaultManualS3RegistrationForm: ManualS3RegistrationForm = {
   size: "",
 };
 
+const defaultPipelineWaveControls: PipelineWaveControls = {
+  max_waves: 5,
+  max_tasks_per_wave: 3,
+  stop_on_first_failure: true,
+};
+
 export function WorkspaceExplorerPage() {
   const { state } = useBootstrap();
   const navigate = useNavigate();
@@ -86,6 +100,11 @@ export function WorkspaceExplorerPage() {
     defaultManualS3RegistrationForm,
   );
   const [batchLimit, setBatchLimit] = useState(3);
+  const [pipelineWaveControls, setPipelineWaveControls] = useState<PipelineWaveControls>(
+    defaultPipelineWaveControls,
+  );
+  const [pipelineWaveSummary, setPipelineWaveSummary] =
+    useState<RunPipelineWavesSummary | null>(null);
 
   const workdirPath = state.selected_workdir_path;
   const canQueryRuntime = state.phase === "fully_initialized" && !!workdirPath;
@@ -267,6 +286,30 @@ export function WorkspaceExplorerPage() {
     }
   }
 
+  async function handleRunPipelineWaves() {
+    if (!workdirPath) return;
+    setActiveAction("pipeline-waves");
+    setActionMessage(null);
+    try {
+      const result = await runPipelineWaves(
+        workdirPath,
+        pipelineWaveControls.max_waves,
+        pipelineWaveControls.max_tasks_per_wave,
+        pipelineWaveControls.stop_on_first_failure,
+      );
+      setErrors([...(result.errors ?? []), ...(result.summary?.errors ?? [])]);
+      setPipelineWaveSummary(result.summary);
+      setActionMessage(
+        result.summary
+          ? `Pipeline waves complete: ${result.summary.waves_executed} wave(s), ${result.summary.total_claimed} claimed, stopped ${result.summary.stopped_reason}.`
+          : "Pipeline waves finished with no summary.",
+      );
+      await loadExplorer();
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
   async function handleCopyS3Uri(file: WorkspaceFileNode) {
     const uri = s3UriForFile(file);
     if (!uri) return;
@@ -352,13 +395,17 @@ export function WorkspaceExplorerPage() {
             batchLimit={batchLimit}
             disabled={!canQueryRuntime || isLoading}
             form={manualS3Registration}
+            pipelineWaveControls={pipelineWaveControls}
+            pipelineWaveSummary={pipelineWaveSummary}
             stages={explorer.stages}
             summary={s3Summary}
             onBatchLimitChange={setBatchLimit}
             onFormChange={setManualS3Registration}
+            onPipelineWaveControlsChange={setPipelineWaveControls}
             onReconcile={() => void handleReconcileS3()}
             onRegister={() => void handleManualS3Registration()}
             onRunBatch={() => void handleRunSmallBatch()}
+            onRunPipelineWaves={() => void handleRunPipelineWaves()}
           />
           <ExplorerFiltersPanel
             filters={filters}
@@ -412,13 +459,17 @@ interface S3OperatorPanelProps {
   batchLimit: number;
   disabled: boolean;
   form: ManualS3RegistrationForm;
+  pipelineWaveControls: PipelineWaveControls;
+  pipelineWaveSummary: RunPipelineWavesSummary | null;
   stages: WorkspaceStageTree[];
   summary: S3ReconciliationSummary | null;
   onBatchLimitChange: (value: number) => void;
   onFormChange: (form: ManualS3RegistrationForm) => void;
+  onPipelineWaveControlsChange: (controls: PipelineWaveControls) => void;
   onReconcile: () => void;
   onRegister: () => void;
   onRunBatch: () => void;
+  onRunPipelineWaves: () => void;
 }
 
 function S3OperatorPanel({
@@ -426,13 +477,17 @@ function S3OperatorPanel({
   batchLimit,
   disabled,
   form,
+  pipelineWaveControls,
+  pipelineWaveSummary,
   stages,
   summary,
   onBatchLimitChange,
   onFormChange,
+  onPipelineWaveControlsChange,
   onReconcile,
   onRegister,
   onRunBatch,
+  onRunPipelineWaves,
 }: S3OperatorPanelProps) {
   const s3Stages = stages.filter(isS3CapableStage);
   const canRegister =
@@ -593,6 +648,113 @@ function S3OperatorPanel({
           {activeAction === "s3-register" ? "Registering..." : "Register S3 source"}
         </button>
       </div>
+
+      <h3>Pipeline Waves</h3>
+      <div className="stage-editor-form-grid">
+        <div className="form-row">
+          <label htmlFor="pipeline-wave-max-waves">Max waves</label>
+          <input
+            id="pipeline-wave-max-waves"
+            type="number"
+            min={1}
+            max={10}
+            value={pipelineWaveControls.max_waves}
+            disabled={disabled || activeAction === "pipeline-waves"}
+            onChange={(event) =>
+              onPipelineWaveControlsChange({
+                ...pipelineWaveControls,
+                max_waves: boundedNumber(event.target.value, 1, 10, 5),
+              })
+            }
+          />
+        </div>
+        <div className="form-row">
+          <label htmlFor="pipeline-wave-tasks">Tasks per wave</label>
+          <input
+            id="pipeline-wave-tasks"
+            type="number"
+            min={1}
+            max={5}
+            value={pipelineWaveControls.max_tasks_per_wave}
+            disabled={disabled || activeAction === "pipeline-waves"}
+            onChange={(event) =>
+              onPipelineWaveControlsChange({
+                ...pipelineWaveControls,
+                max_tasks_per_wave: boundedNumber(event.target.value, 1, 5, 3),
+              })
+            }
+          />
+        </div>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={pipelineWaveControls.stop_on_first_failure}
+            disabled={disabled || activeAction === "pipeline-waves"}
+            onChange={(event) =>
+              onPipelineWaveControlsChange({
+                ...pipelineWaveControls,
+                stop_on_first_failure: event.target.checked,
+              })
+            }
+          />
+          Stop on first failure or blocked task
+        </label>
+      </div>
+      <div className="button-row">
+        <button
+          type="button"
+          className="button primary"
+          disabled={disabled || activeAction === "pipeline-waves"}
+          onClick={onRunPipelineWaves}
+        >
+          {activeAction === "pipeline-waves" ? "Running waves..." : "Run pipeline waves"}
+        </button>
+      </div>
+      {pipelineWaveSummary ? (
+        <div className="workspace-wave-summary">
+          <div className="summary-card-grid">
+            <SummaryCard label="Waves" value={pipelineWaveSummary.waves_executed} />
+            <SummaryCard label="Claimed" value={pipelineWaveSummary.total_claimed} />
+            <SummaryCard label="Succeeded" value={pipelineWaveSummary.total_succeeded} />
+            <SummaryCard label="Retry" value={pipelineWaveSummary.total_retry_scheduled} />
+            <SummaryCard label="Failed" value={pipelineWaveSummary.total_failed} />
+            <SummaryCard label="Blocked" value={pipelineWaveSummary.total_blocked} />
+            <SummaryCard label="Skipped" value={pipelineWaveSummary.total_skipped} />
+            <SummaryCard label="Errors" value={pipelineWaveSummary.total_errors} />
+            <SummaryCard label="Stopped" value={formatStoppedReason(pipelineWaveSummary.stopped_reason)} />
+          </div>
+          <div className="table-wrap">
+            <table className="workspace-file-table">
+              <thead>
+                <tr>
+                  <th>Wave</th>
+                  <th>Claimed</th>
+                  <th>Succeeded</th>
+                  <th>Retry</th>
+                  <th>Failed</th>
+                  <th>Blocked</th>
+                  <th>Skipped</th>
+                  <th>Errors</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pipelineWaveSummary.wave_summaries.map((wave) => (
+                  <tr key={wave.wave_index}>
+                    <td>{wave.wave_index}</td>
+                    <td>{wave.summary.claimed}</td>
+                    <td>{wave.summary.succeeded}</td>
+                    <td>{wave.summary.retry_scheduled}</td>
+                    <td>{wave.summary.failed}</td>
+                    <td>{wave.summary.blocked}</td>
+                    <td>{wave.summary.skipped}</td>
+                    <td>{wave.summary.errors.length}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -1150,6 +1312,16 @@ function invalidItemMatchesSearch(
 function optionalText(value: string): string | null {
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+function boundedNumber(value: string, min: number, max: number, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function formatStoppedReason(reason: string): string {
+  return reason.replaceAll("_", " ");
 }
 
 function isS3CapableStage(stage: WorkspaceStageTree): boolean {

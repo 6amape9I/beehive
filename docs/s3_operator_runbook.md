@@ -37,7 +37,7 @@ stages:
 
 6. If reconciliation cannot map an object because metadata is absent, use `Register S3 source` with `stage_id`, `entity_id`, `artifact_id`, `bucket`, and `key`. Optional fields are `version_id`, `etag`, `checksum_sha256`, and `size`.
 
-7. Run a small batch from Workspace Explorer with a limit of 1-5 tasks.
+7. Run a small batch from Workspace Explorer with a limit of 1-5 tasks, or run `Run pipeline waves` for a bounded multi-stage pilot.
 
 8. Verify source state and child state in Workspace Explorer or Entity Detail:
 
@@ -63,7 +63,9 @@ aws --endpoint-url "https://${S3_HOST}" \
   s3 ls "s3://${S3_BUCKET_NAME}/${BEEHIVE_SMOKE_PREFIX}/processed/"
 ```
 
-11. Use Entity Detail actions to retry, reset to pending, or skip failed/blocked tasks.
+11. For B4 MVP pilots, use `max_waves=2`, `max_tasks_per_wave=3`, and `stop_on_first_failure=true` for the first multi-stage attempt.
+
+12. Use Entity Detail actions to retry, reset to pending, or skip failed/blocked tasks.
 
 ## Troubleshooting
 

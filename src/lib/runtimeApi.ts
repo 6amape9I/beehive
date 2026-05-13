@@ -17,6 +17,7 @@ import type {
   RegisterS3SourceArtifactResult,
   RunDueTasksResult,
   RunEntityStageResult,
+  RunPipelineWavesResult,
   RuntimeSummaryResult,
   S3ReconciliationResult,
   SaveEntityFileJsonResult,
@@ -129,6 +130,20 @@ export async function runDueTasksLimited(
   maxTasks: number,
 ): Promise<RunDueTasksResult> {
   return invoke<RunDueTasksResult>("run_due_tasks_limited", { path, maxTasks });
+}
+
+export async function runPipelineWaves(
+  path: string,
+  maxWaves: number,
+  maxTasksPerWave: number,
+  stopOnFirstFailure: boolean,
+): Promise<RunPipelineWavesResult> {
+  return invoke<RunPipelineWavesResult>("run_pipeline_waves", {
+    path,
+    maxWaves,
+    maxTasksPerWave,
+    stopOnFirstFailure,
+  });
 }
 
 export async function runEntityStage(

@@ -11,11 +11,11 @@ use crate::domain::{
     EntityListResult, FileCopyResult, ManualEntityStageActionResult, OpenEntityPathPayload,
     OpenEntityPathResult, PipelineConfigDraft, PipelineEditorStateResult,
     ReconcileStuckTasksResult, RegisterS3SourceArtifactPayload, RegisterS3SourceArtifactRequest,
-    RegisterS3SourceArtifactResult, RunDueTasksResult, RunEntityStageResult, RuntimeSummaryResult,
-    S3ReconciliationResult, SaveEntityFileJsonResult, SavePipelineConfigResult,
-    ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult, StageRunsResult,
-    ValidatePipelineConfigDraftResult, ValidationSeverity, WorkspaceExplorerResult,
-    WorkspaceExplorerTotals,
+    RegisterS3SourceArtifactResult, RunDueTasksResult, RunEntityStageResult,
+    RunPipelineWavesResult, RuntimeSummaryResult, S3ReconciliationResult, SaveEntityFileJsonResult,
+    SavePipelineConfigResult, ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult,
+    StageRunsResult, ValidatePipelineConfigDraftResult, ValidationSeverity,
+    WorkspaceExplorerResult, WorkspaceExplorerTotals,
 };
 use crate::executor;
 use crate::file_open::{self, OpenEntityPathKind};
@@ -444,6 +444,40 @@ pub fn run_due_tasks_limited(path: String, max_tasks: u64) -> RunDueTasksResult 
             },
         },
         Err(error) => RunDueTasksResult {
+            summary: None,
+            errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn run_pipeline_waves(
+    path: String,
+    max_waves: u64,
+    max_tasks_per_wave: u64,
+    stop_on_first_failure: bool,
+) -> RunPipelineWavesResult {
+    match load_runtime_context(&path) {
+        Ok(context) => match executor::run_pipeline_waves(
+            &context.workdir_path,
+            &context.database_path,
+            max_waves,
+            max_tasks_per_wave,
+            stop_on_first_failure,
+            context.config.runtime.request_timeout_sec,
+            context.config.runtime.stuck_task_timeout_sec,
+            context.config.runtime.file_stability_delay_ms,
+        ) {
+            Ok(summary) => RunPipelineWavesResult {
+                summary: Some(summary),
+                errors: Vec::new(),
+            },
+            Err(message) => RunPipelineWavesResult {
+                summary: None,
+                errors: vec![command_error("run_pipeline_waves_failed", message, None)],
+            },
+        },
+        Err(error) => RunPipelineWavesResult {
             summary: None,
             errors: vec![error],
         },

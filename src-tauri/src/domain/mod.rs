@@ -1054,6 +1054,40 @@ pub struct RunDueTasksResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineWaveSummary {
+    pub wave_index: u64,
+    pub summary: RunDueTasksSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunPipelineWavesSummary {
+    pub requested_max_waves: u64,
+    pub requested_max_tasks_per_wave: u64,
+    pub max_waves: u64,
+    pub max_tasks_per_wave: u64,
+    pub max_total_tasks: u64,
+    pub stop_on_first_failure: bool,
+    pub waves_executed: u64,
+    pub total_claimed: u64,
+    pub total_succeeded: u64,
+    pub total_retry_scheduled: u64,
+    pub total_failed: u64,
+    pub total_blocked: u64,
+    pub total_skipped: u64,
+    pub total_stuck_reconciled: u64,
+    pub total_errors: u64,
+    pub stopped_reason: String,
+    pub wave_summaries: Vec<PipelineWaveSummary>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunPipelineWavesResult {
+    pub summary: Option<RunPipelineWavesSummary>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunEntityStageResult {
     pub summary: Option<RunDueTasksSummary>,
     pub errors: Vec<CommandErrorInfo>,

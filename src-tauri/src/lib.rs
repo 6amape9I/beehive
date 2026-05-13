@@ -40,6 +40,7 @@ pub fn run() {
             commands::create_next_stage_copy,
             commands::run_due_tasks,
             commands::run_due_tasks_limited,
+            commands::run_pipeline_waves,
             commands::run_entity_stage,
             commands::list_stage_runs,
             commands::reconcile_stuck_tasks,

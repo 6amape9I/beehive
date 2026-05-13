@@ -834,6 +834,37 @@ export interface RunDueTasksResult {
   errors: CommandErrorInfo[];
 }
 
+export interface PipelineWaveSummary {
+  wave_index: number;
+  summary: RunDueTasksSummary;
+}
+
+export interface RunPipelineWavesSummary {
+  requested_max_waves: number;
+  requested_max_tasks_per_wave: number;
+  max_waves: number;
+  max_tasks_per_wave: number;
+  max_total_tasks: number;
+  stop_on_first_failure: boolean;
+  waves_executed: number;
+  total_claimed: number;
+  total_succeeded: number;
+  total_retry_scheduled: number;
+  total_failed: number;
+  total_blocked: number;
+  total_skipped: number;
+  total_stuck_reconciled: number;
+  total_errors: number;
+  stopped_reason: "idle" | "max_waves_reached" | "failure_or_blocked" | "runtime_error" | string;
+  wave_summaries: PipelineWaveSummary[];
+  errors: CommandErrorInfo[];
+}
+
+export interface RunPipelineWavesResult {
+  summary: RunPipelineWavesSummary | null;
+  errors: CommandErrorInfo[];
+}
+
 export interface RunEntityStageResult {
   summary: RunDueTasksSummary | null;
   errors: CommandErrorInfo[];

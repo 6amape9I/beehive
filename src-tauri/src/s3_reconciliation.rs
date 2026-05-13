@@ -921,6 +921,58 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "real S3+n8n MVP pipeline pilot; requires .env, uploaded smoke objects, and body-JSON n8n workflow URL(s)"]
+    fn real_s3_n8n_mvp_pipeline_pilot() {
+        require_real_mvp_pipeline_pilot_opt_in();
+        let limit = batch_smoke_limit();
+        let report =
+            run_real_s3_n8n_mvp_pipeline_pilot("/tmp/beehive_s3_mvp_pipeline_pilot_workdir", limit)
+                .expect("real S3+n8n MVP pipeline pilot");
+
+        assert!(
+            report.total_claimed >= limit,
+            "expected at least {limit} claimed source artifacts"
+        );
+        assert!(
+            report.total_succeeded >= 2,
+            "expected at least two successful n8n executions"
+        );
+        assert!(
+            !report.final_output_keys.is_empty(),
+            "expected at least one final output pointer"
+        );
+        assert!(
+            report
+                .final_outputs_exist
+                .iter()
+                .all(|(_, exists, _)| *exists),
+            "expected all final output objects to exist in S3"
+        );
+
+        println!("B4_PILOT_BATCH_LIMIT={limit}");
+        println!("B4_PILOT_REPORT={}", report.report_path.display());
+        println!("B4_PILOT_WAVES_EXECUTED={}", report.waves_executed);
+        println!("B4_PILOT_STOPPED_REASON={}", report.stopped_reason);
+        println!("B4_PILOT_TOTAL_CLAIMED={}", report.total_claimed);
+        println!("B4_PILOT_TOTAL_SUCCEEDED={}", report.total_succeeded);
+        for key in &report.source_keys {
+            println!("B4_PILOT_SOURCE_KEY={key}");
+        }
+        for run_id in &report.stage_run_ids {
+            println!("B4_PILOT_STAGE_RUN_ID={run_id}");
+        }
+        for key in &report.output_keys {
+            println!("B4_PILOT_OUTPUT_KEY={key}");
+        }
+        for (entity_id, stage_id, status) in &report.final_states {
+            println!("B4_PILOT_STATE entity_id={entity_id} stage_id={stage_id} status={status}");
+        }
+        for (key, exists, size) in &report.final_outputs_exist {
+            println!("B4_PILOT_S3_OUTPUT key={key} exists={exists} size={size:?}");
+        }
+    }
+
     struct RealSmokeReport {
         report_path: PathBuf,
         claimed: u64,
@@ -939,6 +991,20 @@ mod tests {
         s3_output_size: Option<u64>,
     }
 
+    struct RealPilotReport {
+        report_path: PathBuf,
+        waves_executed: u64,
+        stopped_reason: String,
+        total_claimed: u64,
+        total_succeeded: u64,
+        source_keys: Vec<String>,
+        stage_run_ids: Vec<String>,
+        output_keys: Vec<String>,
+        final_output_keys: Vec<String>,
+        final_states: Vec<(String, String, String)>,
+        final_outputs_exist: Vec<(String, bool, Option<u64>)>,
+    }
+
     fn batch_smoke_limit() -> u64 {
         env::var("BEEHIVE_SMOKE_BATCH_LIMIT")
             .or_else(|_| env::var("BEEHIVE_BATCH_SMOKE_LIMIT"))
@@ -954,6 +1020,216 @@ mod tests {
             Ok("1"),
             "set BEEHIVE_REAL_S3_BATCH_SMOKE=1 to run the real S3+n8n batch smoke"
         );
+    }
+
+    fn require_real_mvp_pipeline_pilot_opt_in() {
+        assert_eq!(
+            env::var("BEEHIVE_REAL_S3_MVP_PIPELINE_PILOT").as_deref(),
+            Ok("1"),
+            "set BEEHIVE_REAL_S3_MVP_PIPELINE_PILOT=1 to run the real S3+n8n MVP pipeline pilot"
+        );
+    }
+
+    fn run_real_s3_n8n_mvp_pipeline_pilot(
+        workdir_path: &str,
+        limit: u64,
+    ) -> Result<RealPilotReport, String> {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .ok_or_else(|| "missing repo root".to_string())?
+            .to_path_buf();
+        let env_values = load_smoke_env(&repo_root.join(".env"));
+        let s3_host = required_smoke_env(&env_values, "S3_HOST");
+        let s3_region = required_smoke_env(&env_values, "S3_REGION");
+        let s3_key = required_smoke_env(&env_values, "S3_KEY");
+        let s3_sec_key = required_smoke_env(&env_values, "S3_SEC_KEY");
+        let bucket = required_smoke_env(&env_values, "S3_BUCKET_NAME");
+        let prefix = required_smoke_env(&env_values, "BEEHIVE_SMOKE_PREFIX");
+        let stage_a_webhook = required_smoke_env(&env_values, "BEEHIVE_N8N_SMOKE_WEBHOOK");
+        let stage_b_webhook = env::var("BEEHIVE_N8N_STAGE_B_WEBHOOK")
+            .ok()
+            .or_else(|| env_values.get("BEEHIVE_N8N_STAGE_B_WEBHOOK").cloned())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| stage_a_webhook.clone());
+        let endpoint = format!("https://{}", s3_host.trim_start_matches("https://"));
+
+        env::set_var("S3_HOST", &s3_host);
+        env::set_var("S3_REGION", &s3_region);
+        env::set_var("S3_KEY", &s3_key);
+        env::set_var("S3_SEC_KEY", &s3_sec_key);
+        env::set_var("BEEHIVE_S3_ENDPOINT", &endpoint);
+        env::set_var("BEEHIVE_S3_REGION", &s3_region);
+
+        let workdir = PathBuf::from(workdir_path);
+        fs::create_dir_all(&workdir).map_err(|error| format!("create pilot workdir: {error}"))?;
+        let database_path = workdir.join("app.db");
+        if database_path.exists() {
+            fs::remove_file(&database_path).map_err(|error| {
+                format!(
+                    "reset pilot database '{}': {error}",
+                    database_path.display()
+                )
+            })?;
+        }
+        let config = real_mvp_pilot_config(
+            &bucket,
+            &prefix,
+            &s3_region,
+            &endpoint,
+            &stage_a_webhook,
+            &stage_b_webhook,
+        );
+        let pipeline_yaml = serde_yaml::to_string(&config)
+            .map_err(|error| format!("serialize pilot pipeline: {error}"))?;
+        fs::write(workdir.join("pipeline.yaml"), pipeline_yaml)
+            .map_err(|error| format!("write pilot pipeline: {error}"))?;
+
+        bootstrap_database(&database_path, &config)
+            .map_err(|error| format!("bootstrap pilot database: {error}"))?;
+        let reconciliation = reconcile_s3_workspace(&database_path, &config)
+            .map_err(|error| format!("real S3 reconciliation: {error}"))?;
+        println!(
+            "B4_RECONCILE listed={} tagged={} registered={} updated={} unchanged={} unmapped={} missing={} restored={}",
+            reconciliation.listed_object_count,
+            reconciliation.metadata_tagged_count,
+            reconciliation.registered_file_count,
+            reconciliation.updated_file_count,
+            reconciliation.unchanged_file_count,
+            reconciliation.unmapped_object_count,
+            reconciliation.missing_file_count,
+            reconciliation.restored_file_count
+        );
+
+        let available_sources =
+            reconciliation.metadata_tagged_count + reconciliation.unchanged_file_count;
+        if available_sources < limit {
+            return Err(format!(
+                "expected at least {limit} metadata-tagged or already registered source objects, got {available_sources}"
+            ));
+        }
+        let approved_source_keys =
+            approve_first_pending_sources_for_pilot(&database_path, "smoke_source", limit)?;
+
+        let wave_summary =
+            executor::run_pipeline_waves(&workdir, &database_path, 2, limit, true, 300, 300, 0)
+                .map_err(|error| format!("run pipeline waves: {error}"))?;
+        if wave_summary.total_succeeded < 2 {
+            if let Ok(latest_run) = latest_stage_run(&database_path) {
+                println!("B4_LATEST_RUN_ID={}", latest_run["run_id"]);
+                println!("B4_LATEST_RUN_STAGE_ID={}", latest_run["stage_id"]);
+                println!("B4_LATEST_RUN_SOURCE_KEY={}", latest_run["source_key"]);
+                println!("B4_LATEST_RUN_SUCCESS={}", latest_run["success"]);
+                println!("B4_LATEST_RUN_HTTP_STATUS={}", latest_run["http_status"]);
+                println!("B4_LATEST_RUN_ERROR_TYPE={}", latest_run["error_type"]);
+            }
+            return Err(format!(
+                "expected at least 2 successful n8n executions across pipeline waves, got {}",
+                wave_summary.total_succeeded
+            ));
+        }
+
+        let storage = config.storage.as_ref().unwrap().s3_config().unwrap();
+        let client = AwsS3MetadataClient::from_storage_config(&storage)
+            .map_err(|error| format!("S3 client: {error}"))?;
+        let source_runs = successful_stage_runs_for_stage(&database_path, "smoke_source", limit)?;
+        let processed_runs =
+            successful_stage_runs_for_stage(&database_path, "smoke_processed", limit)?;
+        let source_keys = if source_runs.is_empty() {
+            approved_source_keys
+        } else {
+            source_runs
+                .iter()
+                .map(|run| run.get("source_key").cloned().unwrap_or_default())
+                .collect::<Vec<_>>()
+        };
+        let stage_run_ids = source_runs
+            .iter()
+            .chain(processed_runs.iter())
+            .filter_map(|run| run.get("run_id").cloned())
+            .collect::<Vec<_>>();
+
+        let output_files = database::list_entity_files(&database_path, None)?
+            .into_iter()
+            .filter(|file| file.producer_run_id.is_some())
+            .collect::<Vec<_>>();
+        let output_keys = output_files
+            .iter()
+            .filter_map(|file| file.key.clone())
+            .collect::<Vec<_>>();
+        let final_files = output_files
+            .iter()
+            .filter(|file| file.stage_id == "smoke_final")
+            .cloned()
+            .collect::<Vec<_>>();
+        let final_output_keys = final_files
+            .iter()
+            .filter_map(|file| file.key.clone())
+            .collect::<Vec<_>>();
+        let mut final_states = Vec::new();
+        let mut final_outputs_exist = Vec::new();
+        for file in &final_files {
+            let status = stage_state_status(&database_path, &file.entity_id, &file.stage_id)?;
+            final_states.push((file.entity_id.clone(), file.stage_id.clone(), status));
+            let output_key = file
+                .key
+                .clone()
+                .ok_or_else(|| format!("final file {} has no S3 key", file.id))?;
+            let output_head = client
+                .head_object(&bucket, &output_key)
+                .map_err(|error| format!("head final output object '{output_key}': {error}"))?;
+            final_outputs_exist.push((
+                output_key,
+                output_head.is_some(),
+                output_head.as_ref().and_then(|object| object.size),
+            ));
+        }
+
+        let report_path = workdir.join("mvp_pipeline_pilot_report.json");
+        let report_json = serde_json::json!({
+            "schema": "beehive.s3_mvp_pipeline_pilot_report.v1",
+            "workdir": workdir,
+            "bucket": bucket,
+            "prefix": prefix,
+            "stage_b_webhook_reused_stage_a": stage_b_webhook == stage_a_webhook,
+            "requested_limit": limit,
+            "reconciliation": {
+                "listed": reconciliation.listed_object_count,
+                "tagged": reconciliation.metadata_tagged_count,
+                "registered": reconciliation.registered_file_count,
+                "updated": reconciliation.updated_file_count,
+                "unchanged": reconciliation.unchanged_file_count,
+                "unmapped": reconciliation.unmapped_object_count,
+                "missing": reconciliation.missing_file_count,
+                "restored": reconciliation.restored_file_count
+            },
+            "wave_summary": &wave_summary,
+            "source_keys": source_keys,
+            "stage_run_ids": stage_run_ids,
+            "output_keys": output_keys,
+            "final_output_keys": final_output_keys,
+            "final_states": final_states,
+            "final_outputs_exist": final_outputs_exist,
+        });
+        fs::write(
+            &report_path,
+            serde_json::to_string_pretty(&report_json)
+                .map_err(|error| format!("serialize pilot report: {error}"))?,
+        )
+        .map_err(|error| format!("write pilot report '{}': {error}", report_path.display()))?;
+
+        Ok(RealPilotReport {
+            report_path,
+            waves_executed: wave_summary.waves_executed,
+            stopped_reason: wave_summary.stopped_reason,
+            total_claimed: wave_summary.total_claimed,
+            total_succeeded: wave_summary.total_succeeded,
+            source_keys,
+            stage_run_ids,
+            output_keys,
+            final_output_keys,
+            final_states,
+            final_outputs_exist,
+        })
     }
 
     fn run_real_s3_n8n_smoke(
@@ -1206,6 +1482,140 @@ mod tests {
         }
     }
 
+    fn real_mvp_pilot_config(
+        bucket: &str,
+        prefix: &str,
+        region: &str,
+        endpoint: &str,
+        stage_a_webhook: &str,
+        stage_b_webhook: &str,
+    ) -> PipelineConfig {
+        let prefix = prefix.trim_matches('/');
+        PipelineConfig {
+            project: ProjectConfig {
+                name: "beehive-s3-mvp-pilot".to_string(),
+                workdir: ".".to_string(),
+            },
+            storage: Some(StorageConfig {
+                provider: StorageProvider::S3,
+                bucket: Some(bucket.to_string()),
+                workspace_prefix: Some(prefix.to_string()),
+                region: Some(region.to_string()),
+                endpoint: Some(endpoint.to_string()),
+            }),
+            runtime: RuntimeConfig {
+                scan_interval_sec: 5,
+                max_parallel_tasks: 3,
+                stuck_task_timeout_sec: 300,
+                request_timeout_sec: 300,
+                file_stability_delay_ms: 0,
+            },
+            stages: vec![
+                StageDefinition {
+                    id: "smoke_source".to_string(),
+                    input_folder: String::new(),
+                    input_uri: Some(format!("s3://{bucket}/{prefix}/raw")),
+                    output_folder: String::new(),
+                    workflow_url: stage_a_webhook.to_string(),
+                    max_attempts: 2,
+                    retry_delay_sec: 10,
+                    next_stage: Some("smoke_processed".to_string()),
+                    save_path_aliases: vec![format!("{prefix}/raw"), format!("/{prefix}/raw")],
+                    allow_empty_outputs: false,
+                },
+                StageDefinition {
+                    id: "smoke_processed".to_string(),
+                    input_folder: String::new(),
+                    input_uri: Some(format!("s3://{bucket}/{prefix}/processed")),
+                    output_folder: String::new(),
+                    workflow_url: stage_b_webhook.to_string(),
+                    max_attempts: 2,
+                    retry_delay_sec: 10,
+                    next_stage: Some("smoke_final".to_string()),
+                    save_path_aliases: vec![
+                        format!("{prefix}/processed"),
+                        format!("/{prefix}/processed"),
+                        format!("s3://{bucket}/{prefix}/processed"),
+                    ],
+                    allow_empty_outputs: false,
+                },
+                StageDefinition {
+                    id: "smoke_final".to_string(),
+                    input_folder: String::new(),
+                    input_uri: Some(format!("s3://{bucket}/{prefix}/final")),
+                    output_folder: String::new(),
+                    workflow_url: "http://localhost:5678/webhook/not-used-terminal-smoke-final"
+                        .to_string(),
+                    max_attempts: 1,
+                    retry_delay_sec: 0,
+                    next_stage: None,
+                    save_path_aliases: vec![
+                        format!("{prefix}/final"),
+                        format!("/{prefix}/final"),
+                        format!("s3://{bucket}/{prefix}/final"),
+                    ],
+                    allow_empty_outputs: true,
+                },
+            ],
+        }
+    }
+
+    fn approve_first_pending_sources_for_pilot(
+        database_path: &Path,
+        stage_id: &str,
+        limit: u64,
+    ) -> Result<Vec<String>, String> {
+        let connection = database::open_connection(database_path)?;
+        let now = Utc::now().to_rfc3339();
+        let mut statement = connection
+            .prepare(
+                r#"
+                SELECT s.entity_id, COALESCE(f.object_key, '')
+                FROM entity_stage_states s
+                JOIN entity_files f
+                  ON f.entity_id = s.entity_id
+                 AND f.stage_id = s.stage_id
+                WHERE s.stage_id = ?1
+                  AND s.status = 'pending'
+                ORDER BY f.id
+                LIMIT ?2
+                "#,
+            )
+            .map_err(|error| format!("prepare pilot source selection: {error}"))?;
+        let selected = statement
+            .query_map(rusqlite::params![stage_id, limit], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| format!("query pilot source selection: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("read pilot source selection: {error}"))?;
+        drop(statement);
+
+        if selected.len() < limit as usize {
+            return Err(format!(
+                "expected at least {limit} pending sources to approve for pilot, got {}",
+                selected.len()
+            ));
+        }
+
+        connection
+            .execute(
+                "UPDATE entity_stage_states SET status = 'skipped', updated_at = ?1 WHERE stage_id = ?2 AND status = 'pending'",
+                rusqlite::params![now, stage_id],
+            )
+            .map_err(|error| format!("skip unapproved pilot sources: {error}"))?;
+        for (entity_id, _) in &selected {
+            connection
+                .execute(
+                    "UPDATE entity_stage_states SET status = 'pending', updated_at = ?1 WHERE stage_id = ?2 AND entity_id = ?3",
+                    rusqlite::params![now, stage_id, entity_id],
+                )
+                .map_err(|error| format!("restore approved pilot source '{entity_id}': {error}"))?;
+        }
+
+        Ok(selected.into_iter().map(|(_, key)| key).collect())
+    }
+
     fn load_smoke_env(path: &Path) -> HashMap<String, String> {
         let mut values = HashMap::new();
         if let Ok(content) = fs::read_to_string(path) {
@@ -1285,6 +1695,14 @@ mod tests {
         database_path: &Path,
         limit: u64,
     ) -> Result<Vec<HashMap<String, String>>, String> {
+        successful_stage_runs_for_stage(database_path, "smoke_source", limit)
+    }
+
+    fn successful_stage_runs_for_stage(
+        database_path: &Path,
+        stage_id: &str,
+        limit: u64,
+    ) -> Result<Vec<HashMap<String, String>>, String> {
         let connection = database::open_connection(database_path)?;
         let mut statement = connection
             .prepare(
@@ -1294,15 +1712,15 @@ mod tests {
                     entity_id,
                     COALESCE(request_json, '')
                 FROM stage_runs
-                WHERE stage_id = 'smoke_source'
+                WHERE stage_id = ?1
                   AND COALESCE(success, 0) = 1
                 ORDER BY id DESC
-                LIMIT ?1
+                LIMIT ?2
                 "#,
             )
             .map_err(|error| format!("failed to prepare successful stage run query: {error}"))?;
         let rows = statement
-            .query_map([limit], |row| {
+            .query_map(rusqlite::params![stage_id, limit], |row| {
                 let run_id: String = row.get(0)?;
                 let entity_id: String = row.get(1)?;
                 let request_json: String = row.get(2)?;
