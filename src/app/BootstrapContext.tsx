@@ -14,6 +14,7 @@ import {
   reloadWorkdir as reloadWorkdirCommand,
 } from "../lib/bootstrapApi";
 import type { AppInitializationState } from "../types/domain";
+import type { WorkspaceDescriptor } from "../types/domain";
 import { notConfiguredState } from "../types/domain";
 
 interface BootstrapContextValue {
@@ -23,6 +24,7 @@ interface BootstrapContextValue {
   initializeWorkdir: (path: string) => Promise<void>;
   openWorkdir: (path: string) => Promise<void>;
   openRegisteredWorkspace: (workspaceId: string) => Promise<void>;
+  selectRegisteredWorkspace: (workspace: WorkspaceDescriptor) => void;
   reloadCurrentWorkdir: () => Promise<void>;
 }
 
@@ -71,6 +73,20 @@ export function BootstrapProvider({ children }: { children: ReactNode }) {
     [runBootstrapAction],
   );
 
+  const selectRegisteredWorkspace = useCallback((workspace: WorkspaceDescriptor) => {
+    setLastActionError(null);
+    setState({
+      ...notConfiguredState,
+      phase: "fully_initialized",
+      message: "Workspace selected for HTTP mode.",
+      selected_workspace_id: workspace.id,
+      selected_workdir_path: null,
+      project_name: workspace.name,
+      config_status: "server_managed",
+      database_status: "server_managed",
+    });
+  }, []);
+
   const reloadCurrentWorkdir = useCallback(async () => {
     if (!state.selected_workdir_path) {
       setLastActionError("No workdir is selected.");
@@ -88,6 +104,7 @@ export function BootstrapProvider({ children }: { children: ReactNode }) {
       initializeWorkdir,
       openWorkdir,
       openRegisteredWorkspace,
+      selectRegisteredWorkspace,
       reloadCurrentWorkdir,
     }),
     [
@@ -97,6 +114,7 @@ export function BootstrapProvider({ children }: { children: ReactNode }) {
       openRegisteredWorkspace,
       openWorkdir,
       reloadCurrentWorkdir,
+      selectRegisteredWorkspace,
       state,
     ],
   );

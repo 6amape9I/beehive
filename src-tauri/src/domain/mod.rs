@@ -877,6 +877,23 @@ pub struct CreateS3StageResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateStageNextStageRequest {
+    pub next_stage: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateStageNextStagePayload {
+    pub stage: StageDefinition,
+    pub backup_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateStageNextStageResult {
+    pub payload: Option<UpdateStageNextStagePayload>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityDetailPayload {
     pub entity: EntityRecord,
     pub files: Vec<EntityFileRecord>,

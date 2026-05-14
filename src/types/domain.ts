@@ -685,6 +685,20 @@ export interface CreateS3StageResult {
   errors: CommandErrorInfo[];
 }
 
+export interface UpdateStageNextStageRequest {
+  next_stage: string | null;
+}
+
+export interface UpdateStageNextStagePayload {
+  stage: StageDefinition;
+  backup_path: string | null;
+}
+
+export interface UpdateStageNextStageResult {
+  payload: UpdateStageNextStagePayload | null;
+  errors: CommandErrorInfo[];
+}
+
 export interface EntityDetailPayload {
   entity: EntityRecord;
   files: EntityFileRecord[];

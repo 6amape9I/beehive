@@ -30,6 +30,8 @@ import type {
   StageListResult,
   StageRunOutputsResult,
   StageRunsResult,
+  UpdateStageNextStageRequest,
+  UpdateStageNextStageResult,
   ValidatePipelineConfigDraftResult,
   WorkspaceExplorerResult,
   WorkspaceRegistryEntryResult,
@@ -120,6 +122,17 @@ export const tauriClient: BeehiveApiClient = {
     input: CreateS3StageRequest,
   ): Promise<CreateS3StageResult> {
     return invoke<CreateS3StageResult>("create_s3_stage", { workspaceId, input });
+  },
+  updateStageNextStage(
+    workspaceId: string,
+    stageId: string,
+    input: UpdateStageNextStageRequest,
+  ): Promise<UpdateStageNextStageResult> {
+    return invoke<UpdateStageNextStageResult>("update_stage_next_stage", {
+      workspaceId,
+      stageId,
+      input,
+    });
   },
   listEntities(path: string, query?: EntityListQuery): Promise<EntityListResult> {
     return invoke<EntityListResult>("list_entities", { path, query });

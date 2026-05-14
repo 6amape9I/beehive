@@ -6,14 +6,15 @@ use serde_json::{json, Value};
 use crate::domain::{
     CreateS3StageRequest, RegisterS3SourceArtifactRequest, RunDueTasksResult,
     RunPipelineWavesResult, S3ReconciliationResult, StageRunOutputsResult,
-    WorkspaceRegistryEntryResult, WorkspaceRegistryListResult,
+    UpdateStageNextStageRequest, UpdateStageNextStageResult, WorkspaceRegistryEntryResult,
+    WorkspaceRegistryListResult,
 };
 use crate::services::{artifacts, pipeline, runtime, workspaces};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub(crate) struct HttpApiResponse {
-    pub(crate) status_code: u16,
-    pub(crate) body: Value,
+pub struct HttpApiResponse {
+    pub status_code: u16,
+    pub body: Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -28,7 +29,7 @@ struct RunPipelineWavesBody {
     stop_on_first_failure: Option<bool>,
 }
 
-pub(crate) fn handle_json_request(method: &str, path: &str, body: Option<&str>) -> HttpApiResponse {
+pub fn handle_json_request(method: &str, path: &str, body: Option<&str>) -> HttpApiResponse {
     match route_json_request(method, path, body) {
         Ok(response) => response,
         Err((status_code, code, message)) => error_response(status_code, code, message),
@@ -149,6 +150,24 @@ fn route_json_request(
                 };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
             }
+            ("POST", ["api", "workspaces", _, "stages", stage_id, "next-stage"]) => {
+                let input = parse_body::<UpdateStageNextStageRequest>(body)?;
+                let result = match pipeline::update_stage_next_stage_for_workspace(
+                    workspace_id,
+                    stage_id,
+                    &input,
+                ) {
+                    Ok(payload) => UpdateStageNextStageResult {
+                        payload: Some(payload),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => UpdateStageNextStageResult {
+                        payload: None,
+                        errors: vec![command_error("update_stage_next_stage_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
             ("GET", ["api", "workspaces", _, "stage-runs", run_id, "outputs"]) => {
                 let result =
                     match artifacts::list_stage_run_outputs_for_workspace(workspace_id, run_id) {
@@ -258,6 +277,13 @@ mod tests {
         let response = handle_json_request("GET", "/api/health", None);
         assert_eq!(response.status_code, 200);
         assert_eq!(response.body["status"].as_str(), Some("ok"));
+    }
+
+    #[test]
+    fn workspace_list_route_returns_registry_result() {
+        let response = handle_json_request("GET", "/api/workspaces", None);
+        assert_eq!(response.status_code, 200);
+        assert!(response.body["workspaces"].is_array());
     }
 
     #[test]

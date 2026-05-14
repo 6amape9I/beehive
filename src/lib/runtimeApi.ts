@@ -28,6 +28,8 @@ import type {
   StageListResult,
   StageRunOutputsResult,
   StageRunsResult,
+  UpdateStageNextStageRequest,
+  UpdateStageNextStageResult,
   ValidatePipelineConfigDraftResult,
   WorkspaceExplorerResult,
 } from "../types/domain";
@@ -98,6 +100,14 @@ export function createS3Stage(
   input: CreateS3StageRequest,
 ): Promise<CreateS3StageResult> {
   return apiClient.createS3Stage(workspaceId, input);
+}
+
+export function updateStageNextStage(
+  workspaceId: string,
+  stageId: string,
+  input: UpdateStageNextStageRequest,
+): Promise<UpdateStageNextStageResult> {
+  return apiClient.updateStageNextStage(workspaceId, stageId, input);
 }
 
 export function listEntities(path: string, query?: EntityListQuery): Promise<EntityListResult> {

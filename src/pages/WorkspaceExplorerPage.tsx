@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 
 import { useBootstrap } from "../app/BootstrapContext";
 import { CommandErrorsPanel } from "../components/CommandErrorsPanel";
@@ -8,6 +8,7 @@ import { formatDateTime, shortChecksum } from "../lib/formatters";
 import {
   getWorkspaceExplorer,
   getWorkspaceExplorerById,
+  listStageRunOutputs,
   openEntityFile,
   openEntityFolder,
   reconcileS3Workspace,
@@ -26,6 +27,7 @@ import type {
   RunPipelineWavesSummary,
   RegisterS3SourceArtifactRequest,
   S3ReconciliationSummary,
+  StageRunOutputsPayload,
   WorkspaceEntityTrail,
   WorkspaceExplorerResult,
   WorkspaceFileNode,
@@ -92,6 +94,7 @@ const defaultPipelineWaveControls: PipelineWaveControls = {
 
 export function WorkspaceExplorerPage() {
   const { state } = useBootstrap();
+  const { workspaceId: routeWorkspaceId } = useParams();
   const navigate = useNavigate();
   const [explorer, setExplorer] = useState<WorkspaceExplorerResult | null>(null);
   const [errors, setErrors] = useState<CommandErrorInfo[]>([]);
@@ -112,8 +115,10 @@ export function WorkspaceExplorerPage() {
     useState<RunPipelineWavesSummary | null>(null);
 
   const workdirPath = state.selected_workdir_path;
-  const workspaceId = state.selected_workspace_id;
-  const canQueryRuntime = state.phase === "fully_initialized" && (!!workdirPath || !!workspaceId);
+  const workspaceId = routeWorkspaceId ?? state.selected_workspace_id;
+  const canQueryRuntime =
+    (!!workspaceId && !workdirPath) ||
+    (state.phase === "fully_initialized" && (!!workdirPath || !!workspaceId));
 
   const loadExplorer = useCallback(async () => {
     if (!canQueryRuntime || (!workdirPath && !workspaceId)) {
@@ -364,7 +369,10 @@ export function WorkspaceExplorerPage() {
   }
 
   function goToEntity(file: WorkspaceFileNode) {
-    navigate(`/entities/${encodeURIComponent(file.entity_id)}?file_id=${file.entity_file_id}`);
+    const entityPath = workspaceId
+      ? `/workspaces/${encodeURIComponent(workspaceId)}/entities/${encodeURIComponent(file.entity_id)}`
+      : `/entities/${encodeURIComponent(file.entity_id)}`;
+    navigate(`${entityPath}?file_id=${file.entity_file_id}`);
   }
 
   return (
@@ -390,7 +398,7 @@ export function WorkspaceExplorerPage() {
           <button
             type="button"
             className="button primary"
-            disabled={!canQueryRuntime || activeAction === "scan"}
+            disabled={!workdirPath || !canQueryRuntime || activeAction === "scan"}
             onClick={() => void handleScanWorkspace()}
           >
             {activeAction === "scan" ? "Scanning..." : "Scan workspace"}
@@ -460,6 +468,7 @@ export function WorkspaceExplorerPage() {
                 trail={selectedTrail}
                 selectedFile={selectedFile}
                 activeAction={activeAction}
+                workspaceId={workspaceId}
                 onOpenFile={(fileId) => void handleOpen("file", fileId)}
                 onOpenFolder={(fileId) => void handleOpen("folder", fileId)}
                 onGoToEntity={goToEntity}
@@ -1196,6 +1205,7 @@ interface TrailPanelProps {
   trail: WorkspaceEntityTrail | null;
   selectedFile: WorkspaceFileNode | null;
   activeAction: string | null;
+  workspaceId?: string | null;
   onOpenFile: (fileId: number) => void;
   onOpenFolder: (fileId: number) => void;
   onGoToEntity: (file: WorkspaceFileNode) => void;
@@ -1205,10 +1215,33 @@ function TrailPanel({
   trail,
   selectedFile,
   activeAction,
+  workspaceId,
   onOpenFile,
   onOpenFolder,
   onGoToEntity,
 }: TrailPanelProps) {
+  const [outputs, setOutputs] = useState<StageRunOutputsPayload | null>(null);
+  const [outputErrors, setOutputErrors] = useState<CommandErrorInfo[]>([]);
+  const [isLoadingOutputs, setIsLoadingOutputs] = useState(false);
+
+  useEffect(() => {
+    setOutputs(null);
+    setOutputErrors([]);
+  }, [selectedFile?.entity_file_id]);
+
+  async function loadProducerOutputs() {
+    if (!workspaceId || !selectedFile?.producer_run_id) return;
+    setIsLoadingOutputs(true);
+    setOutputErrors([]);
+    try {
+      const result = await listStageRunOutputs(workspaceId, selectedFile.producer_run_id);
+      setOutputs(result.payload);
+      setOutputErrors(result.errors);
+    } finally {
+      setIsLoadingOutputs(false);
+    }
+  }
+
   if (!selectedFile || !trail) {
     return (
       <section className="panel workspace-trail-panel">
@@ -1229,6 +1262,51 @@ function TrailPanel({
           Go to Entity Detail
         </button>
       </div>
+      {workspaceId && selectedFile.producer_run_id ? (
+        <div className="lineage-output-panel">
+          <div className="panel-heading">
+            <div>
+              <h3>Run Outputs</h3>
+              <span className="muted">{selectedFile.producer_run_id}</span>
+            </div>
+            <button
+              type="button"
+              className="button secondary"
+              disabled={isLoadingOutputs}
+              onClick={() => void loadProducerOutputs()}
+            >
+              {isLoadingOutputs ? "Loading..." : "Load outputs"}
+            </button>
+          </div>
+          {outputErrors.length > 0 ? (
+            <p className="error-text">{outputErrors.map((error) => error.message).join(" ")}</p>
+          ) : outputs ? (
+            <div className="stage-run-output-list">
+              <div className="inline-meta">
+                <span>{outputs.output_count} output artifact(s)</span>
+                <span>{outputs.run_id}</span>
+              </div>
+              {outputs.outputs.map((output) => (
+                <article className="issue-row" key={output.entity_file_id}>
+                  <StatusBadge status={output.runtime_status ?? "pending"} />
+                  <div>
+                    <strong>
+                      {output.entity_id} / {output.target_stage_id}
+                    </strong>
+                    <p>{output.relation_to_source ?? "relation not available"}</p>
+                    <code>{output.s3_uri ?? output.key ?? "S3 URI not available"}</code>
+                    <p className="muted">
+                      artifact {output.artifact_id ?? "not available"} / size {output.size ?? "?"}
+                    </p>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="empty-text">Load outputs to inspect all artifacts from this producer run.</p>
+          )}
+        </div>
+      ) : null}
       <div className="timeline-list">
         {trail.stages.map((node) => {
           const busy =

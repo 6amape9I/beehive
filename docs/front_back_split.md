@@ -23,7 +23,7 @@ Tauri commands call these services for registry workspace selection, workspace-I
 
 ## API Boundary
 
-`src-tauri/src/http_api/mod.rs` defines HTTP-shaped JSON routing for:
+`src-tauri/src/http_api/mod.rs` defines JSON routing for:
 
 - `GET /api/health`
 - `GET /api/workspaces`
@@ -34,9 +34,10 @@ Tauri commands call these services for registry workspace selection, workspace-I
 - `POST /api/workspaces/{workspace_id}/run-small-batch`
 - `POST /api/workspaces/{workspace_id}/run-pipeline-waves`
 - `POST /api/workspaces/{workspace_id}/stages`
+- `POST /api/workspaces/{workspace_id}/stages/{stage_id}/next-stage`
 - `GET /api/workspaces/{workspace_id}/stage-runs/{run_id}/outputs`
 
-B5 intentionally stops at the service/router layer to avoid adding a new HTTP framework during the locked build. B6 should attach this router to a localhost-bound server binary.
+B6 attaches this router to `src-tauri/src/bin/beehive-server.rs`. The MVP server binds to `127.0.0.1:8787` by default, supports token checks for non-local exposure, and can serve built frontend assets from `dist/`.
 
 ## Frontend Boundary
 

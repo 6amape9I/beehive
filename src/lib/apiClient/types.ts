@@ -28,6 +28,8 @@ import type {
   StageListResult,
   StageRunOutputsResult,
   StageRunsResult,
+  UpdateStageNextStageRequest,
+  UpdateStageNextStageResult,
   ValidatePipelineConfigDraftResult,
   WorkspaceExplorerResult,
   WorkspaceRegistryEntryResult,
@@ -67,6 +69,11 @@ export interface BeehiveApiClient {
     operatorComment?: string | null,
   ): Promise<SavePipelineConfigResult>;
   createS3Stage(workspaceId: string, input: CreateS3StageRequest): Promise<CreateS3StageResult>;
+  updateStageNextStage(
+    workspaceId: string,
+    stageId: string,
+    input: UpdateStageNextStageRequest,
+  ): Promise<UpdateStageNextStageResult>;
   listEntities(path: string, query?: EntityListQuery): Promise<EntityListResult>;
   listEntityFiles(path: string, entityId?: string | null): Promise<EntityFilesResult>;
   getEntity(

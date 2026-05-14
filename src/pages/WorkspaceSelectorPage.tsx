@@ -3,11 +3,12 @@ import { useNavigate } from "react-router-dom";
 
 import { useBootstrap } from "../app/BootstrapContext";
 import { CommandErrorsPanel } from "../components/CommandErrorsPanel";
+import { isHttpApiMode } from "../lib/apiClient";
 import { listRegisteredWorkspaces } from "../lib/bootstrapApi";
 import type { CommandErrorInfo, WorkspaceDescriptor } from "../types/domain";
 
 export function WorkspaceSelectorPage() {
-  const { state, isBusy, openRegisteredWorkspace } = useBootstrap();
+  const { state, isBusy, openRegisteredWorkspace, selectRegisteredWorkspace } = useBootstrap();
   const navigate = useNavigate();
   const [workspaces, setWorkspaces] = useState<WorkspaceDescriptor[]>([]);
   const [errors, setErrors] = useState<CommandErrorInfo[]>([]);
@@ -36,10 +37,17 @@ export function WorkspaceSelectorPage() {
   );
 
   async function selectWorkspace(workspaceId: string) {
+    const workspace = workspaces.find((item) => item.id === workspaceId);
+    if (!workspace) return;
     setOpeningWorkspaceId(workspaceId);
     try {
-      await openRegisteredWorkspace(workspaceId);
-      navigate("/workspace");
+      if (isHttpApiMode) {
+        selectRegisteredWorkspace(workspace);
+        navigate(`/workspaces/${encodeURIComponent(workspaceId)}/workspace`);
+      } else {
+        await openRegisteredWorkspace(workspaceId);
+        navigate("/workspace");
+      }
     } finally {
       setOpeningWorkspaceId(null);
     }

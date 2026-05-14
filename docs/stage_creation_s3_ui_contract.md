@@ -55,3 +55,29 @@ n8n must return manifest outputs with one of the target stage save path aliases.
 ## Persistence
 
 Stage creation writes `pipeline.yaml` atomically, keeps a backup when replacing an existing file, and syncs SQLite stages with the updated config. It does not create local directories for S3 stage routes.
+
+## Connecting Existing Stages
+
+B6 adds a separate link action so stages can be created in any order:
+
+```text
+POST /api/workspaces/{workspace_id}/stages/{stage_id}/next-stage
+```
+
+Request:
+
+```json
+{
+  "next_stage": "target_stage_id"
+}
+```
+
+Clear terminal state:
+
+```json
+{
+  "next_stage": null
+}
+```
+
+Backend validates that the source stage exists, the target exists when provided, and source/target are not the same stage. The operation updates `pipeline.yaml` atomically and syncs SQLite.

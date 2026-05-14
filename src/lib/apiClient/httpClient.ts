@@ -28,6 +28,8 @@ import type {
   StageListResult,
   StageRunOutputsResult,
   StageRunsResult,
+  UpdateStageNextStageRequest,
+  UpdateStageNextStageResult,
   ValidatePipelineConfigDraftResult,
   WorkspaceExplorerResult,
   WorkspaceRegistryEntryResult,
@@ -117,6 +119,15 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
       input: CreateS3StageRequest,
     ): Promise<CreateS3StageResult> =>
       postJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/stages`, input),
+    updateStageNextStage: (
+      workspaceId: string,
+      stageId: string,
+      input: UpdateStageNextStageRequest,
+    ): Promise<UpdateStageNextStageResult> =>
+      postJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/stages/${encodeURIComponent(stageId)}/next-stage`,
+        input,
+      ),
     listEntities: (path: string, _query?: EntityListQuery): Promise<EntityListResult> =>
       unsupported(`listEntities(${path})`),
     listEntityFiles: (path: string, _entityId?: string | null): Promise<EntityFilesResult> =>

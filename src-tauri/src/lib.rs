@@ -9,7 +9,8 @@ mod executor;
 mod file_open;
 mod file_ops;
 mod file_safety;
-mod http_api;
+pub mod http_api;
+pub mod http_server;
 mod pipeline_editor;
 mod s3_client;
 mod s3_control_envelope;
@@ -59,6 +60,7 @@ pub fn run() {
             commands::run_due_tasks_limited_by_id,
             commands::run_pipeline_waves_by_id,
             commands::create_s3_stage,
+            commands::update_stage_next_stage,
             commands::list_stage_run_outputs,
             commands::retry_entity_stage_now,
             commands::reset_entity_stage_to_pending,

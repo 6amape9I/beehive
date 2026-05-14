@@ -179,6 +179,9 @@ fn validate_and_build(raw: RawPipelineConfig) -> (Option<PipelineConfig>, Config
     let s3_bucket = storage
         .as_ref()
         .and_then(|storage| storage.bucket.as_deref());
+    let s3_workspace_prefix = storage
+        .as_ref()
+        .and_then(|storage| storage.workspace_prefix.as_deref());
 
     let runtime = match raw.runtime {
         Some(runtime) => {
@@ -211,7 +214,13 @@ fn validate_and_build(raw: RawPipelineConfig) -> (Option<PipelineConfig>, Config
     };
 
     let stages = match raw.stages {
-        Some(stages) => build_stages(stages, is_s3_mode, s3_bucket, &mut issues),
+        Some(stages) => build_stages(
+            stages,
+            is_s3_mode,
+            s3_bucket,
+            s3_workspace_prefix,
+            &mut issues,
+        ),
         None => {
             issues.push(issue(
                 ValidationSeverity::Error,
@@ -313,6 +322,7 @@ fn build_stages(
     raw_stages: Vec<RawStageDefinition>,
     is_s3_mode: bool,
     s3_bucket: Option<&str>,
+    s3_workspace_prefix: Option<&str>,
     issues: &mut Vec<ConfigValidationIssue>,
 ) -> Vec<StageDefinition> {
     let mut stage_ids = HashSet::new();
@@ -421,12 +431,17 @@ fn build_stages(
             let Some(alias) = normalize_optional_string(Some(alias)) else {
                 continue;
             };
-            if normalize_logical_route(&alias, "save_path_aliases").is_err() {
+            let alias_valid = if is_s3_mode {
+                validate_s3_save_path_alias(&alias, s3_bucket, s3_workspace_prefix).is_ok()
+            } else {
+                normalize_logical_route(&alias, "save_path_aliases").is_ok()
+            };
+            if !alias_valid {
                 issues.push(issue(
                     ValidationSeverity::Error,
                     "invalid_stage_save_path_alias",
                     format!("{prefix}.save_path_aliases"),
-                    "save_path_aliases must contain only safe logical routes.",
+                    "save_path_aliases must contain only safe route-compatible values.",
                 ));
             }
             save_path_aliases.push(alias);
@@ -489,6 +504,53 @@ fn validate_s3_uri(value: &str, expected_bucket: Option<&str>) -> Result<(), Str
         }
     }
     normalize_logical_route(key, "input_uri key").map(|_| ())
+}
+
+fn validate_s3_save_path_alias(
+    value: &str,
+    expected_bucket: Option<&str>,
+    workspace_prefix: Option<&str>,
+) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.starts_with("s3://") {
+        let Some(rest) = trimmed.strip_prefix("s3://") else {
+            return Err("save_path_alias must start with s3://.".to_string());
+        };
+        let Some((bucket, key)) = rest.split_once('/') else {
+            return Err("save_path_alias must include bucket and key prefix.".to_string());
+        };
+        if bucket.trim().is_empty() || key.trim().is_empty() {
+            return Err(
+                "save_path_alias must include non-empty bucket and key prefix.".to_string(),
+            );
+        }
+        if let Some(expected_bucket) = expected_bucket {
+            if bucket != expected_bucket {
+                return Err(format!(
+                    "save_path_alias bucket '{bucket}' must match configured storage.bucket '{expected_bucket}'."
+                ));
+            }
+        }
+        return normalize_logical_route(key, "save_path_alias key").map(|_| ());
+    }
+
+    if let Some(stripped) = trimmed.strip_prefix('/') {
+        normalize_logical_route(stripped, "save_path_alias")?;
+        let workspace_prefix = workspace_prefix.unwrap_or("").trim_matches('/');
+        if workspace_prefix.is_empty()
+            || stripped == workspace_prefix
+            || stripped.starts_with(&format!("{workspace_prefix}/"))
+            || stripped == "main_dir"
+            || stripped.starts_with("main_dir/")
+        {
+            return Ok(());
+        }
+        return Err(
+            "absolute S3 save_path_alias must stay inside storage.workspace_prefix.".to_string(),
+        );
+    }
+
+    normalize_logical_route(trimmed, "save_path_alias").map(|_| ())
 }
 
 fn normalize_logical_route(value: &str, label: &str) -> Result<String, String> {
@@ -717,6 +779,33 @@ stages:
             Some("s3://steos-s3-data/main_dir/processed/raw_entities")
         );
         assert_eq!(config.stages[1].save_path_aliases.len(), 1);
+    }
+
+    #[test]
+    fn s3_pipeline_accepts_workspace_absolute_and_s3_save_path_aliases() {
+        let yaml = r#"
+project:
+  name: beehive-s3-dev
+  workdir: .
+storage:
+  provider: s3
+  bucket: steos-s3-data
+  workspace_prefix: beehive-smoke/test_workflow
+stages:
+  - id: processed
+    input_uri: s3://steos-s3-data/beehive-smoke/test_workflow/processed
+    workflow_url: http://localhost:5678/webhook/processed
+    save_path_aliases:
+      - beehive-smoke/test_workflow/processed
+      - /beehive-smoke/test_workflow/processed
+      - s3://steos-s3-data/beehive-smoke/test_workflow/processed
+"#;
+
+        let loaded = parse_pipeline_config(yaml, "now".to_string());
+        let config = loaded.config.expect("s3 config");
+
+        assert!(loaded.validation.is_valid, "{:?}", loaded.validation.issues);
+        assert_eq!(config.stages[0].save_path_aliases.len(), 3);
     }
 
     #[test]

@@ -41,7 +41,7 @@ list_stage_run_outputs(workspace_id, run_id)
 
 Entity Detail stage-run rows can expand and load all output artifacts for that run. The table shows child entity, artifact, target stage, runtime status, relation, and S3 URI.
 
-Workspace Explorer already shows `producer_run_id` and child S3 pointer rows. B5 adds the run-level expansion so one-to-many branching is visible without relying on a single `created_child_path`.
+Workspace Explorer shows `producer_run_id` and child S3 pointer rows. In B6, selecting an output artifact with `producer_run_id` can load all sibling outputs from the same run through the HTTP endpoint, so one-to-many branching is visible in browser mode without relying on a single `created_child_path`.
 
 ## Runtime Invariants
 

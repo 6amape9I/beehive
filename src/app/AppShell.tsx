@@ -4,19 +4,21 @@ import { NavLink } from "react-router-dom";
 import { useBootstrap } from "./BootstrapContext";
 import { StatusBadge } from "../components/StatusBadge";
 
-const navItems = [
-  { to: "/workspaces", label: "Workspaces" },
-  { to: "/dashboard", label: "Dashboard" },
-  { to: "/entities", label: "Entities" },
-  { to: "/entities/entity-0001", label: "Entity Detail" },
-  { to: "/stages", label: "Stage Editor" },
-  { to: "/workspace", label: "Workspace Explorer" },
-  { to: "/settings", label: "Settings / Diagnostics" },
-];
-
 export function AppShell({ children }: { children: ReactNode }) {
   const { state, isBusy, reloadCurrentWorkdir } = useBootstrap();
   const projectName = state.project_name ?? state.selected_workspace_id ?? "beehive";
+  const workspaceBase = state.selected_workspace_id
+    ? `/workspaces/${encodeURIComponent(state.selected_workspace_id)}`
+    : null;
+  const navItems = [
+    { to: "/workspaces", label: "Workspaces" },
+    { to: workspaceBase ? `${workspaceBase}/workspace` : "/workspace", label: "Workspace Explorer" },
+    { to: workspaceBase ? `${workspaceBase}/stages` : "/stages", label: "Stage Editor" },
+    { to: "/dashboard", label: "Dashboard" },
+    { to: "/entities", label: "Entities" },
+    { to: "/entities/entity-0001", label: "Entity Detail" },
+    { to: "/settings", label: "Settings / Diagnostics" },
+  ];
 
   return (
     <div className="app-shell">

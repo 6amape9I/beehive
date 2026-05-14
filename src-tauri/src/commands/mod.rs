@@ -15,7 +15,8 @@ use crate::domain::{
     RegisterS3SourceArtifactResult, RunDueTasksResult, RunEntityStageResult,
     RunPipelineWavesResult, RuntimeSummaryResult, S3ReconciliationResult, SaveEntityFileJsonResult,
     SavePipelineConfigResult, ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult,
-    StageRunOutputsResult, StageRunsResult, ValidatePipelineConfigDraftResult, ValidationSeverity,
+    StageRunOutputsResult, StageRunsResult, UpdateStageNextStageRequest,
+    UpdateStageNextStageResult, ValidatePipelineConfigDraftResult, ValidationSeverity,
     WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceRegistryEntryResult,
     WorkspaceRegistryListResult,
 };
@@ -906,6 +907,32 @@ pub fn create_s3_stage(workspace_id: String, input: CreateS3StageRequest) -> Cre
         Err(message) => CreateS3StageResult {
             payload: None,
             errors: vec![command_error("create_s3_stage_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn update_stage_next_stage(
+    workspace_id: String,
+    stage_id: String,
+    input: UpdateStageNextStageRequest,
+) -> UpdateStageNextStageResult {
+    match services::pipeline::update_stage_next_stage_for_workspace(
+        &workspace_id,
+        &stage_id,
+        &input,
+    ) {
+        Ok(payload) => UpdateStageNextStageResult {
+            payload: Some(payload),
+            errors: Vec::new(),
+        },
+        Err(message) => UpdateStageNextStageResult {
+            payload: None,
+            errors: vec![command_error(
+                "update_stage_next_stage_failed",
+                message,
+                None,
+            )],
         },
     }
 }

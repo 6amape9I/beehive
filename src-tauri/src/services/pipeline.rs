@@ -10,6 +10,7 @@ use crate::database;
 use crate::domain::{
     CreateS3StagePayload, CreateS3StageRequest, PipelineConfig, ProjectConfig, RuntimeConfig,
     S3StageRouteHints, StageDefinition, StorageConfig, StorageProvider,
+    UpdateStageNextStagePayload, UpdateStageNextStageRequest,
 };
 use crate::services::workspaces::{get_workspace, RegisteredWorkspace};
 use crate::workdir::path_string;
@@ -65,6 +66,58 @@ pub(crate) fn create_s3_stage_for_workspace(
         stage,
         backup_path: backup_path.map(|path| path_string(&path)),
     })
+}
+
+pub(crate) fn update_stage_next_stage_for_workspace(
+    workspace_id: &str,
+    stage_id: &str,
+    input: &UpdateStageNextStageRequest,
+) -> Result<UpdateStageNextStagePayload, String> {
+    let workspace = get_workspace(workspace_id)?;
+    let mut config = load_or_create_config(&workspace)?;
+    let updated_stage = apply_next_stage_link(&mut config, stage_id, input)?;
+    let yaml_text = serde_yaml::to_string(&config)
+        .map_err(|error| format!("Failed to serialize updated pipeline.yaml: {error}"))?;
+    let reparsed = config::parse_pipeline_config(&yaml_text, Utc::now().to_rfc3339());
+    if !reparsed.validation.is_valid {
+        return Err(format!(
+            "Generated pipeline link config failed validation: {:?}",
+            reparsed.validation.issues
+        ));
+    }
+    let backup_path = write_pipeline_yaml_atomic(&workspace.pipeline_path, &yaml_text)?;
+    database::bootstrap_database(&workspace.database_path, &config)?;
+
+    Ok(UpdateStageNextStagePayload {
+        stage: updated_stage,
+        backup_path: backup_path.map(|path| path_string(&path)),
+    })
+}
+
+fn apply_next_stage_link(
+    config: &mut PipelineConfig,
+    stage_id: &str,
+    input: &UpdateStageNextStageRequest,
+) -> Result<StageDefinition, String> {
+    let source_stage_id = normalize_required(stage_id, "stage_id")?;
+    let next_stage = normalize_optional(input.next_stage.clone());
+    let source_index = config
+        .stages
+        .iter()
+        .position(|stage| stage.id == source_stage_id)
+        .ok_or_else(|| format!("Stage '{source_stage_id}' does not exist."))?;
+
+    if let Some(next_stage) = next_stage.as_deref() {
+        if next_stage == source_stage_id {
+            return Err("next_stage cannot reference the same stage.".to_string());
+        }
+        if !config.stages.iter().any(|stage| stage.id == next_stage) {
+            return Err(format!("Target stage '{next_stage}' does not exist."));
+        }
+    }
+
+    config.stages[source_index].next_stage = next_stage;
+    Ok(config.stages[source_index].clone())
 }
 
 fn load_or_create_config(workspace: &RegisteredWorkspace) -> Result<PipelineConfig, String> {
@@ -485,5 +538,54 @@ mod tests {
         .expect_err("duplicate should be rejected");
 
         assert!(error.contains("already exists"));
+    }
+
+    #[test]
+    fn stage_linking_updates_next_stage_and_can_clear_it() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workspace = workspace(&tempdir);
+        let mut config = PipelineConfig {
+            project: ProjectConfig {
+                name: "Smoke".to_string(),
+                workdir: ".".to_string(),
+            },
+            storage: Some(workspace_storage_config(&workspace).expect("storage")),
+            runtime: RuntimeConfig::default(),
+            stages: Vec::new(),
+        };
+        for stage_id in ["stage_a", "stage_b"] {
+            let stage = build_s3_stage(
+                &workspace,
+                &config,
+                &CreateS3StageRequest {
+                    stage_id: stage_id.to_string(),
+                    workflow_url: format!("https://n8n.example/webhook/{stage_id}"),
+                    next_stage: None,
+                    max_attempts: None,
+                    retry_delay_sec: None,
+                    allow_empty_outputs: None,
+                },
+            )
+            .expect("stage");
+            config.stages.push(stage);
+        }
+
+        let linked = apply_next_stage_link(
+            &mut config,
+            "stage_a",
+            &UpdateStageNextStageRequest {
+                next_stage: Some("stage_b".to_string()),
+            },
+        )
+        .expect("link");
+        assert_eq!(linked.next_stage.as_deref(), Some("stage_b"));
+
+        let cleared = apply_next_stage_link(
+            &mut config,
+            "stage_a",
+            &UpdateStageNextStageRequest { next_stage: None },
+        )
+        .expect("clear link");
+        assert_eq!(cleared.next_stage, None);
     }
 }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useParams } from "react-router-dom";
 
 import { useBootstrap } from "../app/BootstrapContext";
 import { CommandErrorsPanel } from "../components/CommandErrorsPanel";
@@ -9,8 +10,10 @@ import { StageDraftList } from "../components/stage-editor/StageDraftList";
 import { StageValidationPanel } from "../components/stage-editor/StageValidationPanel";
 import {
   createS3Stage,
+  getWorkspaceExplorerById,
   getPipelineEditorState,
   savePipelineConfig,
+  updateStageNextStage,
   validatePipelineConfigDraft,
 } from "../lib/runtimeApi";
 import type {
@@ -22,6 +25,8 @@ import type {
   PipelineEditorState,
   StageDefinitionDraft,
   StageUsageSummary,
+  UpdateStageNextStagePayload,
+  WorkspaceStageTree,
 } from "../types/domain";
 
 const emptyValidation: ConfigValidationResult = { is_valid: true, issues: [] };
@@ -35,6 +40,16 @@ interface S3StageCreationForm {
   allow_empty_outputs: boolean;
 }
 
+interface StageLinkForm {
+  source_stage_id: string;
+  next_stage: string;
+}
+
+interface StageOption {
+  id: string;
+  next_stage: string | null;
+}
+
 const defaultS3StageCreationForm: S3StageCreationForm = {
   stage_id: "",
   workflow_url: "",
@@ -42,6 +57,11 @@ const defaultS3StageCreationForm: S3StageCreationForm = {
   max_attempts: 3,
   retry_delay_sec: 30,
   allow_empty_outputs: false,
+};
+
+const defaultStageLinkForm: StageLinkForm = {
+  source_stage_id: "",
+  next_stage: "",
 };
 
 function makeNewStage(existingIds: string[]): StageDefinitionDraft {
@@ -84,8 +104,10 @@ function removeBlockedReason(draft: PipelineConfigDraft | null, stage: StageDefi
 
 export function StageEditorPage() {
   const { state, reloadCurrentWorkdir } = useBootstrap();
+  const { workspaceId: routeWorkspaceId } = useParams();
   const [editorState, setEditorState] = useState<PipelineEditorState | null>(null);
   const [draft, setDraft] = useState<PipelineConfigDraft | null>(null);
+  const [workspaceStages, setWorkspaceStages] = useState<WorkspaceStageTree[]>([]);
   const [validation, setValidation] = useState<ConfigValidationResult>(emptyValidation);
   const [yamlPreview, setYamlPreview] = useState("");
   const [stageUsages, setStageUsages] = useState<StageUsageSummary[]>([]);
@@ -101,8 +123,14 @@ export function StageEditorPage() {
     defaultS3StageCreationForm,
   );
   const [createdS3Stage, setCreatedS3Stage] = useState<CreateS3StagePayload | null>(null);
+  const [stageLinkForm, setStageLinkForm] = useState<StageLinkForm>(defaultStageLinkForm);
+  const [updatedStageLink, setUpdatedStageLink] = useState<UpdateStageNextStagePayload | null>(
+    null,
+  );
 
   const workdirPath = state.selected_workdir_path;
+  const workspaceId = routeWorkspaceId ?? state.selected_workspace_id;
+  const isWorkspaceHttpFlow = !!workspaceId && !workdirPath;
   const canEdit = state.phase === "fully_initialized" && !!workdirPath;
   const selectedStage =
     draft && selectedIndex !== null ? draft.stages[selectedIndex] ?? null : null;
@@ -115,11 +143,37 @@ export function StageEditorPage() {
     () => JSON.stringify(draft) !== JSON.stringify(editorState?.draft ?? null),
     [draft, editorState],
   );
+  const stageOptions = useMemo<StageOption[]>(
+    () =>
+      draft
+        ? draft.stages.map((stage) => ({ id: stage.id, next_stage: stage.next_stage }))
+        : workspaceStages.map((stage) => ({ id: stage.stage_id, next_stage: stage.next_stage })),
+    [draft, workspaceStages],
+  );
 
   const loadEditor = useCallback(async () => {
+    if (workspaceId && !workdirPath) {
+      setIsLoading(true);
+      setActionMessage(null);
+      try {
+        const result = await getWorkspaceExplorerById(workspaceId);
+        setWorkspaceStages(result.stages);
+        setErrors(result.errors);
+        setEditorState(null);
+        setDraft(null);
+        setValidation(emptyValidation);
+        setYamlPreview("");
+        setStageUsages([]);
+        setSelectedIndex(null);
+      } finally {
+        setIsLoading(false);
+      }
+      return;
+    }
     if (!canEdit || !workdirPath) {
       setEditorState(null);
       setDraft(null);
+      setWorkspaceStages([]);
       setValidation(emptyValidation);
       setYamlPreview("");
       setStageUsages([]);
@@ -140,7 +194,7 @@ export function StageEditorPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [canEdit, workdirPath]);
+  }, [canEdit, workdirPath, workspaceId]);
 
   useEffect(() => {
     void loadEditor();
@@ -237,7 +291,7 @@ export function StageEditorPage() {
   }
 
   async function handleCreateS3Stage() {
-    if (!state.selected_workspace_id) {
+    if (!workspaceId) {
       setActionMessage("Select a registered workspace before creating an S3 stage.");
       return;
     }
@@ -253,16 +307,47 @@ export function StageEditorPage() {
     setActionMessage(null);
     setCreatedS3Stage(null);
     try {
-      const result = await createS3Stage(state.selected_workspace_id, input);
+      const result = await createS3Stage(workspaceId, input);
       setErrors(result.errors);
       if (result.payload) {
         setCreatedS3Stage(result.payload);
         setS3StageForm(defaultS3StageCreationForm);
-        await reloadCurrentWorkdir();
+        if (workdirPath) {
+          await reloadCurrentWorkdir();
+        }
         await loadEditor();
         setActionMessage(`S3 stage ${result.payload.stage.id} created.`);
       } else {
         setActionMessage("S3 stage creation was rejected.");
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleUpdateStageLink() {
+    if (!workspaceId || !stageLinkForm.source_stage_id) {
+      setActionMessage("Select a workspace and source stage before connecting stages.");
+      return;
+    }
+    setIsSaving(true);
+    setActionMessage(null);
+    setUpdatedStageLink(null);
+    try {
+      const result = await updateStageNextStage(workspaceId, stageLinkForm.source_stage_id, {
+        next_stage: stageLinkForm.next_stage || null,
+      });
+      setErrors(result.errors);
+      if (result.payload) {
+        setUpdatedStageLink(result.payload);
+        setActionMessage(
+          result.payload.stage.next_stage
+            ? `${result.payload.stage.id} now points to ${result.payload.stage.next_stage}.`
+            : `${result.payload.stage.id} is now terminal.`,
+        );
+        await loadEditor();
+      } else {
+        setActionMessage("Stage link update was rejected.");
       }
     } finally {
       setIsSaving(false);
@@ -277,6 +362,7 @@ export function StageEditorPage() {
         <div>
           <span className="eyebrow">Configuration</span>
           <h1>Stage Editor</h1>
+          {workspaceId ? <span className="muted">Workspace {workspaceId}</span> : null}
         </div>
         <div className="button-row">
           <button type="button" className="button secondary" disabled={disabled} onClick={() => void loadEditor()}>
@@ -302,7 +388,27 @@ export function StageEditorPage() {
       <CommandErrorsPanel title="Stage Editor Errors" errors={errors} />
       {actionMessage ? <section className="compact-panel panel">{actionMessage}</section> : null}
 
-      {!canEdit ? (
+      {isWorkspaceHttpFlow ? (
+        <>
+          <S3StageCreationPanel
+            disabled={disabled}
+            form={s3StageForm}
+            payload={createdS3Stage}
+            selectedWorkspaceId={workspaceId}
+            stages={stageOptions}
+            onChange={setS3StageForm}
+            onCreate={() => void handleCreateS3Stage()}
+          />
+          <StageLinkPanel
+            disabled={disabled}
+            form={stageLinkForm}
+            payload={updatedStageLink}
+            stages={stageOptions}
+            onChange={setStageLinkForm}
+            onSave={() => void handleUpdateStageLink()}
+          />
+        </>
+      ) : !canEdit ? (
         <section className="panel">
           <h2>Open a workdir</h2>
           <p className="empty-text">Open a fully initialized workdir to edit pipeline.yaml.</p>
@@ -329,10 +435,19 @@ export function StageEditorPage() {
             disabled={disabled}
             form={s3StageForm}
             payload={createdS3Stage}
-            selectedWorkspaceId={state.selected_workspace_id}
-            stages={draft.stages}
+            selectedWorkspaceId={workspaceId}
+            stages={stageOptions}
             onChange={setS3StageForm}
             onCreate={() => void handleCreateS3Stage()}
+          />
+
+          <StageLinkPanel
+            disabled={disabled}
+            form={stageLinkForm}
+            payload={updatedStageLink}
+            stages={stageOptions}
+            onChange={setStageLinkForm}
+            onSave={() => void handleUpdateStageLink()}
           />
 
           <section className="panel">
@@ -385,7 +500,7 @@ interface S3StageCreationPanelProps {
   form: S3StageCreationForm;
   payload: CreateS3StagePayload | null;
   selectedWorkspaceId: string | null;
-  stages: StageDefinitionDraft[];
+  stages: StageOption[];
   onChange: (form: S3StageCreationForm) => void;
   onCreate: () => void;
 }
@@ -522,6 +637,99 @@ function S3StageCreationPanel({
             n8n manifest outputs must use one of these save_path aliases.
           </p>
         </div>
+      ) : null}
+    </section>
+  );
+}
+
+interface StageLinkPanelProps {
+  disabled: boolean;
+  form: StageLinkForm;
+  payload: UpdateStageNextStagePayload | null;
+  stages: StageOption[];
+  onChange: (form: StageLinkForm) => void;
+  onSave: () => void;
+}
+
+function StageLinkPanel({
+  disabled,
+  form,
+  payload,
+  stages,
+  onChange,
+  onSave,
+}: StageLinkPanelProps) {
+  const targetOptions = stages.filter((stage) => stage.id !== form.source_stage_id);
+  const source = stages.find((stage) => stage.id === form.source_stage_id);
+
+  useEffect(() => {
+    if (!source) return;
+    onChange({ ...form, next_stage: source.next_stage ?? "" });
+  }, [source?.id]);
+
+  return (
+    <section className="panel">
+      <div className="panel-heading">
+        <div>
+          <h2>Connect Stages</h2>
+          <span className="muted">Set or clear next_stage between existing stages.</span>
+        </div>
+      </div>
+      <div className="stage-editor-form-grid">
+        <div className="form-row">
+          <label htmlFor="stage-link-source">Source stage</label>
+          <select
+            id="stage-link-source"
+            value={form.source_stage_id}
+            disabled={disabled}
+            onChange={(event) =>
+              onChange({
+                ...form,
+                source_stage_id: event.target.value,
+                next_stage:
+                  stages.find((stage) => stage.id === event.target.value)?.next_stage ?? "",
+              })
+            }
+          >
+            <option value="">Select source</option>
+            {stages.map((stage) => (
+              <option key={stage.id} value={stage.id}>
+                {stage.id}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="form-row">
+          <label htmlFor="stage-link-target">Target stage</label>
+          <select
+            id="stage-link-target"
+            value={form.next_stage}
+            disabled={disabled || !form.source_stage_id}
+            onChange={(event) => onChange({ ...form, next_stage: event.target.value })}
+          >
+            <option value="">Terminal</option>
+            {targetOptions.map((stage) => (
+              <option key={stage.id} value={stage.id}>
+                {stage.id}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <div className="button-row">
+        <button
+          type="button"
+          className="button primary"
+          disabled={disabled || !form.source_stage_id}
+          onClick={onSave}
+        >
+          Save stage link
+        </button>
+      </div>
+      {payload ? (
+        <p className="field-hint">
+          {payload.stage.id} next_stage is {payload.stage.next_stage ?? "terminal"}.
+        </p>
       ) : null}
     </section>
   );
