@@ -21,6 +21,7 @@ import type {
   RunDueTasksResult,
   RunEntityStageResult,
   RunPipelineWavesResult,
+  RunSelectedPipelineWavesResult,
   RuntimeSummaryResult,
   S3ReconciliationResult,
   SaveEntityFileJsonResult,
@@ -184,6 +185,21 @@ export const tauriClient: BeehiveApiClient = {
   ): Promise<RunPipelineWavesResult> {
     return invoke<RunPipelineWavesResult>("run_pipeline_waves_by_id", {
       workspaceId,
+      maxWaves,
+      maxTasksPerWave,
+      stopOnFirstFailure,
+    });
+  },
+  runSelectedPipelineWavesById(
+    workspaceId: string,
+    rootEntityFileIds: number[],
+    maxWaves: number,
+    maxTasksPerWave: number,
+    stopOnFirstFailure: boolean,
+  ): Promise<RunSelectedPipelineWavesResult> {
+    return invoke<RunSelectedPipelineWavesResult>("run_selected_pipeline_waves_by_id", {
+      workspaceId,
+      rootEntityFileIds,
       maxWaves,
       maxTasksPerWave,
       stopOnFirstFailure,

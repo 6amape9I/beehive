@@ -5,11 +5,11 @@ use serde_json::{json, Value};
 
 use crate::domain::{
     CreateS3StageRequest, RegisterS3SourceArtifactRequest, RunDueTasksResult,
-    RunPipelineWavesResult, S3ReconciliationResult, StageRunOutputsResult,
-    UpdateStageNextStageRequest, UpdateStageNextStageResult, WorkspaceRegistryEntryResult,
-    WorkspaceRegistryListResult,
+    RunPipelineWavesResult, RunSelectedPipelineWavesRequest, RunSelectedPipelineWavesResult,
+    S3ReconciliationResult, StageRunOutputsResult, UpdateStageNextStageRequest,
+    UpdateStageNextStageResult, WorkspaceRegistryEntryResult, WorkspaceRegistryListResult,
 };
-use crate::services::{artifacts, pipeline, runtime, workspaces};
+use crate::services::{artifacts, pipeline, runtime, selected_runner, workspaces};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HttpApiResponse {
@@ -134,6 +134,24 @@ fn route_json_request(
                         errors: vec![command_error("run_pipeline_waves_failed", message)],
                     },
                 };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("POST", ["api", "workspaces", _, "run-selected-pipeline-waves"]) => {
+                let input = parse_body::<RunSelectedPipelineWavesRequest>(body)?;
+                let result =
+                    match selected_runner::run_selected_pipeline_waves(workspace_id, &input) {
+                        Ok(summary) => RunSelectedPipelineWavesResult {
+                            summary: Some(summary),
+                            errors: Vec::new(),
+                        },
+                        Err(message) => RunSelectedPipelineWavesResult {
+                            summary: None,
+                            errors: vec![command_error(
+                                "run_selected_pipeline_waves_failed",
+                                message,
+                            )],
+                        },
+                    };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
             }
             ("POST", ["api", "workspaces", _, "stages"]) => {
@@ -294,5 +312,25 @@ mod tests {
             response.body["errors"][0]["code"].as_str(),
             Some("route_not_found")
         );
+    }
+
+    #[test]
+    fn selected_pipeline_waves_route_parses_request_body() {
+        let response = handle_json_request(
+            "POST",
+            "/api/workspaces/missing/run-selected-pipeline-waves",
+            Some(
+                r#"{"root_entity_file_ids":[1],"max_waves":2,"max_tasks_per_wave":1,"stop_on_first_failure":true}"#,
+            ),
+        );
+        assert_eq!(response.status_code, 200);
+        assert_eq!(
+            response.body["errors"][0]["code"].as_str(),
+            Some("run_selected_pipeline_waves_failed")
+        );
+        assert!(response.body["errors"][0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing"));
     }
 }

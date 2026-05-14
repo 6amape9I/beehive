@@ -19,6 +19,7 @@ import type {
   RunDueTasksResult,
   RunEntityStageResult,
   RunPipelineWavesResult,
+  RunSelectedPipelineWavesResult,
   RuntimeSummaryResult,
   S3ReconciliationResult,
   SaveEntityFileJsonResult,
@@ -39,13 +40,26 @@ import type { BeehiveApiClient } from "./types";
 
 export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
   const apiBase = apiBaseUrl.replace(/\/+$/, "");
+  const viteEnv = (import.meta as ImportMeta & {
+    env?: Record<string, string | undefined>;
+  }).env;
+  function configuredToken(): string | undefined {
+    return (
+      viteEnv?.VITE_BEEHIVE_OPERATOR_TOKEN ??
+      (typeof window !== "undefined"
+        ? window.localStorage.getItem("BEEHIVE_OPERATOR_TOKEN") ?? undefined
+        : undefined)
+    );
+  }
 
   async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+    const token = configuredToken();
     const response = await fetch(`${apiBase}${path}`, {
       ...init,
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(init?.headers ?? {}),
       },
     });
@@ -169,6 +183,19 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
       stopOnFirstFailure: boolean,
     ): Promise<RunPipelineWavesResult> =>
       postJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/run-pipeline-waves`, {
+        max_waves: maxWaves,
+        max_tasks_per_wave: maxTasksPerWave,
+        stop_on_first_failure: stopOnFirstFailure,
+      }),
+    runSelectedPipelineWavesById: (
+      workspaceId: string,
+      rootEntityFileIds: number[],
+      maxWaves: number,
+      maxTasksPerWave: number,
+      stopOnFirstFailure: boolean,
+    ): Promise<RunSelectedPipelineWavesResult> =>
+      postJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/run-selected-pipeline-waves`, {
+        root_entity_file_ids: rootEntityFileIds,
         max_waves: maxWaves,
         max_tasks_per_wave: maxTasksPerWave,
         stop_on_first_failure: stopOnFirstFailure,

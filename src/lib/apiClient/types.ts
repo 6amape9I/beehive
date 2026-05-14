@@ -19,6 +19,7 @@ import type {
   RunDueTasksResult,
   RunEntityStageResult,
   RunPipelineWavesResult,
+  RunSelectedPipelineWavesResult,
   RuntimeSummaryResult,
   S3ReconciliationResult,
   SaveEntityFileJsonResult,
@@ -101,6 +102,13 @@ export interface BeehiveApiClient {
     maxTasksPerWave: number,
     stopOnFirstFailure: boolean,
   ): Promise<RunPipelineWavesResult>;
+  runSelectedPipelineWavesById(
+    workspaceId: string,
+    rootEntityFileIds: number[],
+    maxWaves: number,
+    maxTasksPerWave: number,
+    stopOnFirstFailure: boolean,
+  ): Promise<RunSelectedPipelineWavesResult>;
   runEntityStage(path: string, entityId: string, stageId: string): Promise<RunEntityStageResult>;
   retryEntityStageNow(
     path: string,

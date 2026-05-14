@@ -1159,6 +1159,86 @@ pub struct RunPipelineWavesResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunSelectedPipelineWavesRequest {
+    pub root_entity_file_ids: Vec<i64>,
+    pub max_waves: Option<u64>,
+    pub max_tasks_per_wave: Option<u64>,
+    pub stop_on_first_failure: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelectedPipelineRootResult {
+    pub root_entity_file_id: i64,
+    pub entity_id: String,
+    pub stage_id: String,
+    pub artifact_id: Option<String>,
+    pub bucket: Option<String>,
+    pub key: Option<String>,
+    pub s3_uri: Option<String>,
+    pub status_before: String,
+    pub status_after: Option<String>,
+    pub run_ids: Vec<String>,
+    pub output_count: u64,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelectedPipelineOutputNode {
+    pub root_entity_file_id: i64,
+    pub source_entity_file_id: i64,
+    pub producer_run_id: String,
+    pub entity_file_id: i64,
+    pub entity_id: String,
+    pub artifact_id: Option<String>,
+    pub target_stage_id: String,
+    pub relation_to_source: Option<String>,
+    pub storage_provider: StorageProvider,
+    pub bucket: Option<String>,
+    pub key: Option<String>,
+    pub s3_uri: Option<String>,
+    pub size: Option<u64>,
+    pub runtime_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelectedPipelineWaveSummary {
+    pub wave_index: u64,
+    pub input_entity_file_ids: Vec<i64>,
+    pub run_ids: Vec<String>,
+    pub summary: RunDueTasksSummary,
+    pub output_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunSelectedPipelineWavesSummary {
+    pub root_entity_file_ids: Vec<i64>,
+    pub requested_max_waves: u64,
+    pub requested_max_tasks_per_wave: u64,
+    pub max_waves: u64,
+    pub max_tasks_per_wave: u64,
+    pub stop_on_first_failure: bool,
+    pub waves_executed: u64,
+    pub stopped_reason: String,
+    pub total_claimed: u64,
+    pub total_succeeded: u64,
+    pub total_failed: u64,
+    pub total_blocked: u64,
+    pub total_retry_scheduled: u64,
+    pub total_skipped: u64,
+    pub total_errors: u64,
+    pub root_results: Vec<SelectedPipelineRootResult>,
+    pub wave_summaries: Vec<SelectedPipelineWaveSummary>,
+    pub output_tree: Vec<SelectedPipelineOutputNode>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunSelectedPipelineWavesResult {
+    pub summary: Option<RunSelectedPipelineWavesSummary>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunEntityStageResult {
     pub summary: Option<RunDueTasksSummary>,
     pub errors: Vec<CommandErrorInfo>,

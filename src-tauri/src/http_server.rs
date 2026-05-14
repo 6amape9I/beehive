@@ -4,9 +4,12 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::thread;
+use std::time::Instant;
 
 use crate::http_api;
 use crate::services::workspaces;
+
+const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
@@ -16,6 +19,8 @@ pub struct ServerConfig {
     pub operator_token: Option<String>,
     pub static_root: PathBuf,
     pub registry_path: PathBuf,
+    pub max_body_bytes: usize,
+    pub allowed_origins: Vec<String>,
 }
 
 impl ServerConfig {
@@ -38,6 +43,19 @@ impl ServerConfig {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
         validate_bind_security(&host, allow_non_local, operator_token.as_deref())?;
+        let max_body_bytes = std::env::var("BEEHIVE_SERVER_MAX_BODY_BYTES")
+            .ok()
+            .map(|value| {
+                value.parse::<usize>().map_err(|error| {
+                    format!("BEEHIVE_SERVER_MAX_BODY_BYTES must be a valid usize: {error}")
+                })
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_MAX_BODY_BYTES);
+        let allowed_origins = parse_allowed_origins(
+            std::env::var("BEEHIVE_ALLOWED_ORIGIN").ok(),
+            !is_local_host(&host) || allow_non_local,
+        )?;
 
         Ok(Self {
             host,
@@ -46,6 +64,8 @@ impl ServerConfig {
             operator_token,
             static_root: default_static_root(),
             registry_path: workspaces::registry_path(),
+            max_body_bytes,
+            allowed_origins,
         })
     }
 
@@ -57,8 +77,18 @@ impl ServerConfig {
 pub fn run_server(config: ServerConfig) -> Result<(), String> {
     let listener = TcpListener::bind(config.bind_addr())
         .map_err(|error| format!("Failed to bind Beehive server: {error}"))?;
-    println!("Beehive server listening on http://{}", config.bind_addr());
-    println!("Workspace registry: {}", config.registry_path.display());
+    log_json(
+        "server_start",
+        serde_json::json!({
+            "url": format!("http://{}", config.bind_addr()),
+            "registry_path": config.registry_path.display().to_string(),
+            "static_root": config.static_root.display().to_string(),
+            "max_body_bytes": config.max_body_bytes,
+            "allowed_origins": &config.allowed_origins,
+            "token_configured": config.operator_token.is_some(),
+            "allow_non_local": config.allow_non_local,
+        }),
+    );
     if config.static_root.exists() {
         println!("Serving frontend from {}", config.static_root.display());
     } else {
@@ -74,11 +104,21 @@ pub fn run_server(config: ServerConfig) -> Result<(), String> {
                 let request_config = config.clone();
                 thread::spawn(move || {
                     if let Err(error) = handle_connection(stream, &request_config) {
-                        eprintln!("Beehive server request failed: {error}");
+                        log_json(
+                            "request_failed",
+                            serde_json::json!({
+                                "message": error,
+                            }),
+                        );
                     }
                 });
             }
-            Err(error) => eprintln!("Beehive server connection failed: {error}"),
+            Err(error) => log_json(
+                "request_failed",
+                serde_json::json!({
+                    "message": format!("connection failed: {error}"),
+                }),
+            ),
         }
     }
 
@@ -106,6 +146,7 @@ pub fn validate_bind_security(
 }
 
 fn handle_connection(mut stream: TcpStream, config: &ServerConfig) -> Result<(), String> {
+    let started = Instant::now();
     let mut reader = BufReader::new(
         stream
             .try_clone()
@@ -133,6 +174,20 @@ fn handle_connection(mut stream: TcpStream, config: &ServerConfig) -> Result<(),
         .get("content-length")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
+    if request_body_too_large(content_length, config.max_body_bytes) {
+        log_request_completed(method, path, 413, started.elapsed().as_millis());
+        return write_json_response(
+            &mut stream,
+            413,
+            r#"{"errors":[{"code":"payload_too_large","message":"Request body exceeds BEEHIVE_SERVER_MAX_BODY_BYTES.","path":null}]}"#,
+            config,
+            &headers,
+        );
+    }
+    if method == "OPTIONS" {
+        log_request_completed(method, path, 204, started.elapsed().as_millis());
+        return write_empty_response(&mut stream, 204, config, &headers);
+    }
     let mut body_bytes = vec![0_u8; content_length];
     if content_length > 0 {
         reader
@@ -148,27 +203,35 @@ fn handle_connection(mut stream: TcpStream, config: &ServerConfig) -> Result<(),
         )
     };
 
-    if method == "OPTIONS" {
-        return write_empty_response(&mut stream, 204);
-    }
-
     if path.starts_with("/api/") {
         if let Some(token) = config.operator_token.as_deref() {
             if !authorization_matches(&headers, token) {
+                log_request_completed(method, path, 401, started.elapsed().as_millis());
                 return write_json_response(
                     &mut stream,
                     401,
                     r#"{"errors":[{"code":"unauthorized","message":"Authorization bearer token is required.","path":null}]}"#,
+                    config,
+                    &headers,
                 );
             }
         }
         let response = http_api::handle_json_request(method, path, body);
         let body = serde_json::to_string(&response.body)
             .map_err(|error| format!("Failed to serialize API response: {error}"))?;
-        return write_json_response(&mut stream, response.status_code, &body);
+        log_workspace_action(method, path, response.status_code);
+        log_request_completed(
+            method,
+            path,
+            response.status_code,
+            started.elapsed().as_millis(),
+        );
+        return write_json_response(&mut stream, response.status_code, &body, config, &headers);
     }
 
-    serve_static(&mut stream, path, &config.static_root)
+    let status_code = serve_static(&mut stream, path, config, &headers)?;
+    log_request_completed(method, path, status_code, started.elapsed().as_millis());
+    Ok(())
 }
 
 fn read_headers(reader: &mut BufReader<TcpStream>) -> Result<HashMap<String, String>, String> {
@@ -189,9 +252,22 @@ fn read_headers(reader: &mut BufReader<TcpStream>) -> Result<HashMap<String, Str
     Ok(headers)
 }
 
-fn serve_static(stream: &mut TcpStream, path: &str, static_root: &Path) -> Result<(), String> {
+fn serve_static(
+    stream: &mut TcpStream,
+    path: &str,
+    config: &ServerConfig,
+    request_headers: &HashMap<String, String>,
+) -> Result<u16, String> {
+    let static_root = &config.static_root;
     if !static_root.exists() {
-        return write_plain_response(stream, 404, "Frontend dist directory was not found.");
+        write_plain_response(
+            stream,
+            404,
+            "Frontend dist directory was not found.",
+            config,
+            request_headers,
+        )?;
+        return Ok(404);
     }
     let relative = match path {
         "/" | "" => "index.html",
@@ -202,7 +278,8 @@ fn serve_static(stream: &mut TcpStream, path: &str, static_root: &Path) -> Resul
         .any(|component| component == ".." || component == "." || component.is_empty())
         && relative != "index.html"
     {
-        return write_plain_response(stream, 400, "Invalid static path.");
+        write_plain_response(stream, 400, "Invalid static path.", config, request_headers)?;
+        return Ok(400);
     }
     let candidate = static_root.join(relative);
     let file_path = if candidate.exists() && candidate.is_file() {
@@ -211,7 +288,14 @@ fn serve_static(stream: &mut TcpStream, path: &str, static_root: &Path) -> Resul
         static_root.join("index.html")
     };
     if !file_path.exists() {
-        return write_plain_response(stream, 404, "Frontend entrypoint was not found.");
+        write_plain_response(
+            stream,
+            404,
+            "Frontend entrypoint was not found.",
+            config,
+            request_headers,
+        )?;
+        return Ok(404);
     }
     let bytes = fs::read(&file_path).map_err(|error| {
         format!(
@@ -224,17 +308,24 @@ fn serve_static(stream: &mut TcpStream, path: &str, static_root: &Path) -> Resul
         200,
         content_type(&file_path),
         &bytes,
-        extra_headers(),
-    )
+        extra_headers(config, request_headers),
+    )?;
+    Ok(200)
 }
 
-fn write_json_response(stream: &mut TcpStream, status_code: u16, body: &str) -> Result<(), String> {
+fn write_json_response(
+    stream: &mut TcpStream,
+    status_code: u16,
+    body: &str,
+    config: &ServerConfig,
+    request_headers: &HashMap<String, String>,
+) -> Result<(), String> {
     write_response(
         stream,
         status_code,
         "application/json; charset=utf-8",
         body.as_bytes(),
-        extra_headers(),
+        extra_headers(config, request_headers),
     )
 }
 
@@ -242,23 +333,30 @@ fn write_plain_response(
     stream: &mut TcpStream,
     status_code: u16,
     body: &str,
+    config: &ServerConfig,
+    request_headers: &HashMap<String, String>,
 ) -> Result<(), String> {
     write_response(
         stream,
         status_code,
         "text/plain; charset=utf-8",
         body.as_bytes(),
-        extra_headers(),
+        extra_headers(config, request_headers),
     )
 }
 
-fn write_empty_response(stream: &mut TcpStream, status_code: u16) -> Result<(), String> {
+fn write_empty_response(
+    stream: &mut TcpStream,
+    status_code: u16,
+    config: &ServerConfig,
+    request_headers: &HashMap<String, String>,
+) -> Result<(), String> {
     write_response(
         stream,
         status_code,
         "text/plain; charset=utf-8",
         &[],
-        extra_headers(),
+        extra_headers(config, request_headers),
     )
 }
 
@@ -267,7 +365,7 @@ fn write_response(
     status_code: u16,
     content_type: &str,
     body: &[u8],
-    headers: Vec<(&'static str, &'static str)>,
+    headers: Vec<(String, String)>,
 ) -> Result<(), String> {
     let mut response = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -277,9 +375,9 @@ fn write_response(
         body.len()
     );
     for (name, value) in headers {
-        response.push_str(name);
+        response.push_str(&name);
         response.push_str(": ");
-        response.push_str(value);
+        response.push_str(&value);
         response.push_str("\r\n");
     }
     response.push_str("\r\n");
@@ -297,16 +395,28 @@ fn authorization_matches(headers: &HashMap<String, String>, token: &str) -> bool
         .unwrap_or(false)
 }
 
-fn extra_headers() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("Access-Control-Allow-Origin", "*"),
+fn extra_headers(
+    config: &ServerConfig,
+    request_headers: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut headers = vec![
         (
-            "Access-Control-Allow-Headers",
-            "Authorization, Content-Type, Accept",
+            "Access-Control-Allow-Headers".to_string(),
+            "Authorization, Content-Type, Accept".to_string(),
         ),
-        ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
-        ("X-Content-Type-Options", "nosniff"),
-    ]
+        (
+            "Access-Control-Allow-Methods".to_string(),
+            "GET, POST, OPTIONS".to_string(),
+        ),
+        ("X-Content-Type-Options".to_string(), "nosniff".to_string()),
+    ];
+    if let Some(origin) = request_headers.get("origin") {
+        if origin_allowed(origin, &config.allowed_origins) {
+            headers.push(("Access-Control-Allow-Origin".to_string(), origin.clone()));
+            headers.push(("Vary".to_string(), "Origin".to_string()));
+        }
+    }
+    headers
 }
 
 fn content_type(path: &Path) -> &'static str {
@@ -329,9 +439,52 @@ fn reason_phrase(status_code: u16) -> &'static str {
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
+        413 => "Payload Too Large",
         500 => "Internal Server Error",
         _ => "OK",
     }
+}
+
+fn parse_allowed_origins(
+    raw: Option<String>,
+    non_local_enabled: bool,
+) -> Result<Vec<String>, String> {
+    let origins = raw
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(default_allowed_origins);
+    if non_local_enabled && origins.iter().any(|origin| origin == "*") {
+        return Err(
+            "BEEHIVE_ALLOWED_ORIGIN='*' is not allowed when non-local bind is enabled.".to_string(),
+        );
+    }
+    Ok(origins)
+}
+
+fn default_allowed_origins() -> Vec<String> {
+    vec![
+        "http://127.0.0.1:8787".to_string(),
+        "http://localhost:8787".to_string(),
+        "http://127.0.0.1:5173".to_string(),
+        "http://localhost:5173".to_string(),
+    ]
+}
+
+fn origin_allowed(origin: &str, allowed_origins: &[String]) -> bool {
+    allowed_origins
+        .iter()
+        .any(|allowed| allowed == "*" || allowed == origin)
+}
+
+fn request_body_too_large(content_length: usize, max_body_bytes: usize) -> bool {
+    content_length > max_body_bytes
 }
 
 fn is_local_host(host: &str) -> bool {
@@ -343,6 +496,48 @@ fn default_static_root() -> PathBuf {
         .parent()
         .map(|path| path.join("dist"))
         .unwrap_or_else(|| PathBuf::from("dist"))
+}
+
+fn log_json(event: &str, payload: serde_json::Value) {
+    println!(
+        "{}",
+        serde_json::json!({
+            "event": event,
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "payload": payload,
+        })
+    );
+}
+
+fn log_request_completed(method: &str, path: &str, status_code: u16, duration_ms: u128) {
+    log_json(
+        "request_completed",
+        serde_json::json!({
+            "method": method,
+            "path": path,
+            "status_code": status_code,
+            "duration_ms": duration_ms,
+        }),
+    );
+}
+
+fn log_workspace_action(method: &str, path: &str, status_code: u16) {
+    let parts = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() >= 3 && parts[0] == "api" && parts[1] == "workspaces" {
+        log_json(
+            "workspace_action",
+            serde_json::json!({
+                "method": method,
+                "workspace_id": parts[2],
+                "route": parts.get(3).copied().unwrap_or("workspace"),
+                "status_code": status_code,
+            }),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -360,5 +555,27 @@ mod tests {
         assert!(validate_bind_security("0.0.0.0", false, None).is_err());
         assert!(validate_bind_security("0.0.0.0", true, None).is_err());
         assert!(validate_bind_security("0.0.0.0", true, Some("token")).is_ok());
+    }
+
+    #[test]
+    fn request_body_limit_rejects_oversized_content_length() {
+        assert!(!request_body_too_large(1024, 1024));
+        assert!(request_body_too_large(1025, 1024));
+    }
+
+    #[test]
+    fn cors_defaults_allow_local_dev_origins_without_wildcard() {
+        let origins = parse_allowed_origins(None, false).expect("origins");
+
+        assert!(origin_allowed("http://127.0.0.1:5173", &origins));
+        assert!(origin_allowed("http://localhost:8787", &origins));
+        assert!(!origins.iter().any(|origin| origin == "*"));
+    }
+
+    #[test]
+    fn non_local_cors_rejects_wildcard_origin() {
+        let result = parse_allowed_origins(Some("*".to_string()), true);
+
+        assert!(result.is_err());
     }
 }

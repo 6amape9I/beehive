@@ -19,6 +19,7 @@ import type {
   RunDueTasksResult,
   RunEntityStageResult,
   RunPipelineWavesResult,
+  RunSelectedPipelineWavesResult,
   RuntimeSummaryResult,
   S3ReconciliationResult,
   SaveEntityFileJsonResult,
@@ -169,6 +170,22 @@ export function runPipelineWavesById(
 ): Promise<RunPipelineWavesResult> {
   return apiClient.runPipelineWavesById(
     workspaceId,
+    maxWaves,
+    maxTasksPerWave,
+    stopOnFirstFailure,
+  );
+}
+
+export function runSelectedPipelineWavesById(
+  workspaceId: string,
+  rootEntityFileIds: number[],
+  maxWaves: number,
+  maxTasksPerWave: number,
+  stopOnFirstFailure: boolean,
+): Promise<RunSelectedPipelineWavesResult> {
+  return apiClient.runSelectedPipelineWavesById(
+    workspaceId,
+    rootEntityFileIds,
     maxWaves,
     maxTasksPerWave,
     stopOnFirstFailure,

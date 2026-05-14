@@ -43,6 +43,8 @@ Entity Detail stage-run rows can expand and load all output artifacts for that r
 
 Workspace Explorer shows `producer_run_id` and child S3 pointer rows. In B6, selecting an output artifact with `producer_run_id` can load all sibling outputs from the same run through the HTTP endpoint, so one-to-many branching is visible in browser mode without relying on a single `created_child_path`.
 
+B7 also shows lineage immediately after `Run selected pipeline waves`. The selected-run summary lists every root result, run id, output count, produced child artifact, target stage, child runtime status, relation, and S3 URI. If one source produces multiple child objects, each child remains a separate row in the output tree.
+
 ## Runtime Invariants
 
 The existing runtime invariants remain unchanged:

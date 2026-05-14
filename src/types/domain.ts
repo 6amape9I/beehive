@@ -925,6 +925,73 @@ export interface RunPipelineWavesResult {
   errors: CommandErrorInfo[];
 }
 
+export interface SelectedPipelineRootResult {
+  root_entity_file_id: number;
+  entity_id: string;
+  stage_id: string;
+  artifact_id: string | null;
+  bucket: string | null;
+  key: string | null;
+  s3_uri: string | null;
+  status_before: string;
+  status_after: string | null;
+  run_ids: string[];
+  output_count: number;
+  errors: CommandErrorInfo[];
+}
+
+export interface SelectedPipelineOutputNode {
+  root_entity_file_id: number;
+  source_entity_file_id: number;
+  producer_run_id: string;
+  entity_file_id: number;
+  entity_id: string;
+  artifact_id: string | null;
+  target_stage_id: string;
+  relation_to_source: string | null;
+  storage_provider: StorageProvider;
+  bucket: string | null;
+  key: string | null;
+  s3_uri: string | null;
+  size: number | null;
+  runtime_status: string | null;
+}
+
+export interface SelectedPipelineWaveSummary {
+  wave_index: number;
+  input_entity_file_ids: number[];
+  run_ids: string[];
+  summary: RunDueTasksSummary;
+  output_count: number;
+}
+
+export interface RunSelectedPipelineWavesSummary {
+  root_entity_file_ids: number[];
+  requested_max_waves: number;
+  requested_max_tasks_per_wave: number;
+  max_waves: number;
+  max_tasks_per_wave: number;
+  stop_on_first_failure: boolean;
+  waves_executed: number;
+  stopped_reason: "idle" | "max_waves_reached" | "failure_or_blocked" | "runtime_error" | string;
+  total_claimed: number;
+  total_succeeded: number;
+  total_failed: number;
+  total_blocked: number;
+  total_retry_scheduled: number;
+  total_skipped: number;
+  total_errors: number;
+  root_results: SelectedPipelineRootResult[];
+  wave_summaries: SelectedPipelineWaveSummary[];
+  output_tree: SelectedPipelineOutputNode[];
+  errors: CommandErrorInfo[];
+}
+
+export interface RunSelectedPipelineWavesResult {
+  summary: RunSelectedPipelineWavesSummary | null;
+  errors: CommandErrorInfo[];
+}
+
 export interface RunEntityStageResult {
   summary: RunDueTasksSummary | null;
   errors: CommandErrorInfo[];

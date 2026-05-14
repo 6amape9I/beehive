@@ -59,6 +59,7 @@ pub fn run() {
             commands::register_s3_source_artifact_by_id,
             commands::run_due_tasks_limited_by_id,
             commands::run_pipeline_waves_by_id,
+            commands::run_selected_pipeline_waves_by_id,
             commands::create_s3_stage,
             commands::update_stage_next_stage,
             commands::list_stage_run_outputs,

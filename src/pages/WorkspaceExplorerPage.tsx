@@ -19,12 +19,14 @@ import {
   runDueTasksLimitedById,
   runPipelineWaves,
   runPipelineWavesById,
+  runSelectedPipelineWavesById,
   scanWorkspace,
 } from "../lib/runtimeApi";
 import type {
   CommandErrorInfo,
   EntityValidationStatus,
   RunPipelineWavesSummary,
+  RunSelectedPipelineWavesSummary,
   RegisterS3SourceArtifactRequest,
   S3ReconciliationSummary,
   StageRunOutputsPayload,
@@ -113,6 +115,9 @@ export function WorkspaceExplorerPage() {
   );
   const [pipelineWaveSummary, setPipelineWaveSummary] =
     useState<RunPipelineWavesSummary | null>(null);
+  const [selectedRootFileIds, setSelectedRootFileIds] = useState<number[]>([]);
+  const [selectedPipelineSummary, setSelectedPipelineSummary] =
+    useState<RunSelectedPipelineWavesSummary | null>(null);
 
   const workdirPath = state.selected_workdir_path;
   const workspaceId = routeWorkspaceId ?? state.selected_workspace_id;
@@ -138,6 +143,13 @@ export function WorkspaceExplorerPage() {
         current && !result.stages.some((stage) => stage.files.some((file) => file.entity_file_id === current))
           ? null
           : current,
+      );
+      setSelectedRootFileIds((current) =>
+        current.filter((fileId) =>
+          result.stages.some((stage) =>
+            stage.files.some((file) => file.entity_file_id === fileId && isSelectableS3Root(file)),
+          ),
+        ),
       );
     } finally {
       setIsLoading(false);
@@ -336,6 +348,49 @@ export function WorkspaceExplorerPage() {
     }
   }
 
+  async function handleRunSelectedPipelineWaves() {
+    if (!workspaceId) {
+      setActionMessage("Selected pipeline waves require a registered workspace route.");
+      return;
+    }
+    if (selectedRootFileIds.length === 0) {
+      setActionMessage("Select at least one pending S3 source artifact.");
+      return;
+    }
+    setActiveAction("selected-pipeline-waves");
+    setActionMessage(null);
+    try {
+      const result = await runSelectedPipelineWavesById(
+        workspaceId,
+        selectedRootFileIds,
+        pipelineWaveControls.max_waves,
+        pipelineWaveControls.max_tasks_per_wave,
+        pipelineWaveControls.stop_on_first_failure,
+      );
+      setErrors([...(result.errors ?? []), ...(result.summary?.errors ?? [])]);
+      setSelectedPipelineSummary(result.summary);
+      setActionMessage(
+        result.summary
+          ? `Selected pipeline waves complete: ${result.summary.waves_executed} wave(s), ${result.summary.total_claimed} claimed, ${result.summary.output_tree.length} output(s), stopped ${result.summary.stopped_reason}.`
+          : "Selected pipeline waves finished with no summary.",
+      );
+      await loadExplorer();
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
+  function handleToggleSelectedRoot(file: WorkspaceFileNode, checked: boolean) {
+    if (!isSelectableS3Root(file)) return;
+    setSelectedRootFileIds((current) => {
+      if (checked) {
+        if (current.includes(file.entity_file_id) || current.length >= 10) return current;
+        return [...current, file.entity_file_id];
+      }
+      return current.filter((fileId) => fileId !== file.entity_file_id);
+    });
+  }
+
   async function handleCopyS3Uri(file: WorkspaceFileNode) {
     const uri = s3UriForFile(file);
     if (!uri) return;
@@ -427,15 +482,22 @@ export function WorkspaceExplorerPage() {
             form={manualS3Registration}
             pipelineWaveControls={pipelineWaveControls}
             pipelineWaveSummary={pipelineWaveSummary}
+            selectedCount={selectedRootFileIds.length}
+            selectedPipelineSummary={selectedPipelineSummary}
             stages={explorer.stages}
             summary={s3Summary}
             onBatchLimitChange={setBatchLimit}
+            onClearSelection={() => {
+              setSelectedRootFileIds([]);
+              setSelectedPipelineSummary(null);
+            }}
             onFormChange={setManualS3Registration}
             onPipelineWaveControlsChange={setPipelineWaveControls}
             onReconcile={() => void handleReconcileS3()}
             onRegister={() => void handleManualS3Registration()}
             onRunBatch={() => void handleRunSmallBatch()}
             onRunPipelineWaves={() => void handleRunPipelineWaves()}
+            onRunSelectedPipelineWaves={() => void handleRunSelectedPipelineWaves()}
           />
           <ExplorerFiltersPanel
             filters={filters}
@@ -455,8 +517,10 @@ export function WorkspaceExplorerPage() {
                     key={stage.stage_id}
                     stage={stage}
                     selectedFileId={selectedFileId}
+                    selectedRootFileIds={selectedRootFileIds}
                     activeAction={activeAction}
                     onSelectFile={setSelectedFileId}
+                    onToggleSelectedRoot={handleToggleSelectedRoot}
                     onOpenFile={(fileId) => void handleOpen("file", fileId)}
                     onOpenFolder={(fileId) => void handleOpen("folder", fileId)}
                     onCopyS3Uri={(file) => void handleCopyS3Uri(file)}
@@ -492,15 +556,19 @@ interface S3OperatorPanelProps {
   form: ManualS3RegistrationForm;
   pipelineWaveControls: PipelineWaveControls;
   pipelineWaveSummary: RunPipelineWavesSummary | null;
+  selectedCount: number;
+  selectedPipelineSummary: RunSelectedPipelineWavesSummary | null;
   stages: WorkspaceStageTree[];
   summary: S3ReconciliationSummary | null;
   onBatchLimitChange: (value: number) => void;
+  onClearSelection: () => void;
   onFormChange: (form: ManualS3RegistrationForm) => void;
   onPipelineWaveControlsChange: (controls: PipelineWaveControls) => void;
   onReconcile: () => void;
   onRegister: () => void;
   onRunBatch: () => void;
   onRunPipelineWaves: () => void;
+  onRunSelectedPipelineWaves: () => void;
 }
 
 function S3OperatorPanel({
@@ -510,15 +578,19 @@ function S3OperatorPanel({
   form,
   pipelineWaveControls,
   pipelineWaveSummary,
+  selectedCount,
+  selectedPipelineSummary,
   stages,
   summary,
   onBatchLimitChange,
+  onClearSelection,
   onFormChange,
   onPipelineWaveControlsChange,
   onReconcile,
   onRegister,
   onRunBatch,
   onRunPipelineWaves,
+  onRunSelectedPipelineWaves,
 }: S3OperatorPanelProps) {
   const s3Stages = stages.filter(isS3CapableStage);
   const canRegister =
@@ -681,6 +753,9 @@ function S3OperatorPanel({
       </div>
 
       <h3>Pipeline Waves</h3>
+      <p className="muted">
+        Selected pipeline waves run only selected roots and descendants. Small batch and pipeline waves can claim the broader due queue.
+      </p>
       <div className="stage-editor-form-grid">
         <div className="form-row">
           <label htmlFor="pipeline-wave-max-waves">Max waves</label>
@@ -735,12 +810,31 @@ function S3OperatorPanel({
         <button
           type="button"
           className="button primary"
+          disabled={disabled || selectedCount === 0 || activeAction === "selected-pipeline-waves"}
+          onClick={onRunSelectedPipelineWaves}
+        >
+          {activeAction === "selected-pipeline-waves"
+            ? "Running selected..."
+            : `Run selected pipeline waves (${selectedCount})`}
+        </button>
+        <button
+          type="button"
+          className="button secondary"
+          disabled={disabled || selectedCount === 0 || activeAction === "selected-pipeline-waves"}
+          onClick={onClearSelection}
+        >
+          Clear selection
+        </button>
+        <button
+          type="button"
+          className="button secondary"
           disabled={disabled || activeAction === "pipeline-waves"}
           onClick={onRunPipelineWaves}
         >
           {activeAction === "pipeline-waves" ? "Running waves..." : "Run pipeline waves"}
         </button>
       </div>
+      {selectedPipelineSummary ? <SelectedPipelineSummaryPanel summary={selectedPipelineSummary} /> : null}
       {pipelineWaveSummary ? (
         <div className="workspace-wave-summary">
           <div className="summary-card-grid">
@@ -787,6 +881,106 @@ function S3OperatorPanel({
         </div>
       ) : null}
     </section>
+  );
+}
+
+function SelectedPipelineSummaryPanel({ summary }: { summary: RunSelectedPipelineWavesSummary }) {
+  return (
+    <div className="workspace-wave-summary">
+      <div className="summary-card-grid">
+        <SummaryCard label="Selected roots" value={summary.root_entity_file_ids.length} />
+        <SummaryCard label="Waves" value={summary.waves_executed} />
+        <SummaryCard label="Claimed" value={summary.total_claimed} />
+        <SummaryCard label="Succeeded" value={summary.total_succeeded} />
+        <SummaryCard label="Retry" value={summary.total_retry_scheduled} />
+        <SummaryCard label="Failed" value={summary.total_failed} />
+        <SummaryCard label="Blocked" value={summary.total_blocked} />
+        <SummaryCard label="Outputs" value={summary.output_tree.length} />
+        <SummaryCard label="Stopped" value={formatStoppedReason(summary.stopped_reason)} />
+      </div>
+      <div className="table-wrap">
+        <table className="workspace-file-table">
+          <thead>
+            <tr>
+              <th>Root</th>
+              <th>Stage</th>
+              <th>Status</th>
+              <th>Runs</th>
+              <th>Outputs</th>
+              <th>S3</th>
+            </tr>
+          </thead>
+          <tbody>
+            {summary.root_results.map((root) => (
+              <tr key={root.root_entity_file_id}>
+                <td>
+                  <div className="stacked-cell">
+                    <strong>{root.entity_id}</strong>
+                    <span className="muted">file #{root.root_entity_file_id}</span>
+                    {root.artifact_id ? <span className="muted">artifact {root.artifact_id}</span> : null}
+                  </div>
+                </td>
+                <td>{root.stage_id}</td>
+                <td>
+                  <div className="stacked-cell">
+                    <StatusBadge status={root.status_before} />
+                    {root.status_after ? <StatusBadge status={root.status_after} /> : null}
+                  </div>
+                </td>
+                <td>{root.run_ids.length ? root.run_ids.join(", ") : "none"}</td>
+                <td>{root.output_count}</td>
+                <td>
+                  <code>{root.s3_uri ?? root.key ?? "not available"}</code>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {summary.output_tree.length > 0 ? (
+        <div className="table-wrap">
+          <table className="workspace-file-table">
+            <thead>
+              <tr>
+                <th>Output</th>
+                <th>Target</th>
+                <th>Status</th>
+                <th>Relation</th>
+                <th>S3</th>
+                <th>Producer</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summary.output_tree.map((output) => (
+                <tr key={`${output.producer_run_id}-${output.entity_file_id}`}>
+                  <td>
+                    <div className="stacked-cell">
+                      <strong>{output.entity_id}</strong>
+                      <span className="muted">file #{output.entity_file_id}</span>
+                      {output.artifact_id ? <span className="muted">artifact {output.artifact_id}</span> : null}
+                    </div>
+                  </td>
+                  <td>{output.target_stage_id}</td>
+                  <td>
+                    <StatusBadge status={output.runtime_status ?? "pending"} />
+                  </td>
+                  <td>{output.relation_to_source ?? "not available"}</td>
+                  <td>
+                    <code>{output.s3_uri ?? output.key ?? "not available"}</code>
+                  </td>
+                  <td>
+                    <div className="stacked-cell">
+                      <span className="muted">root #{output.root_entity_file_id}</span>
+                      <span className="muted">run {output.producer_run_id}</span>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -969,8 +1163,10 @@ function ExplorerFiltersPanel({
 interface StageTreePanelProps {
   stage: WorkspaceStageTree;
   selectedFileId: number | null;
+  selectedRootFileIds: number[];
   activeAction: string | null;
   onSelectFile: (fileId: number) => void;
+  onToggleSelectedRoot: (file: WorkspaceFileNode, checked: boolean) => void;
   onOpenFile: (fileId: number) => void;
   onOpenFolder: (fileId: number) => void;
   onCopyS3Uri: (file: WorkspaceFileNode) => void;
@@ -980,8 +1176,10 @@ interface StageTreePanelProps {
 function StageTreePanel({
   stage,
   selectedFileId,
+  selectedRootFileIds,
   activeAction,
   onSelectFile,
+  onToggleSelectedRoot,
   onOpenFile,
   onOpenFolder,
   onCopyS3Uri,
@@ -1039,6 +1237,7 @@ function StageTreePanel({
               <table className="workspace-file-table">
                 <thead>
                   <tr>
+                    <th>Select</th>
                     <th>Entity / file</th>
                     <th>Path</th>
                     <th>Runtime</th>
@@ -1058,11 +1257,22 @@ function StageTreePanel({
                       activeAction === `folder:${file.entity_file_id}`;
                     const isS3 = file.storage_provider === "s3";
                     const s3Uri = s3UriForFile(file);
+                    const selectable = isSelectableS3Root(file);
+                    const selectedForRun = selectedRootFileIds.includes(file.entity_file_id);
                     return (
                       <tr
                         key={file.entity_file_id}
                         className={selectedFileId === file.entity_file_id ? "selected-row" : ""}
                       >
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={selectedForRun}
+                            disabled={!selectable || (selectedRootFileIds.length >= 10 && !selectedForRun)}
+                            onChange={(event) => onToggleSelectedRoot(file, event.target.checked)}
+                            aria-label={`Select file ${file.entity_file_id} for selected pipeline run`}
+                          />
+                        </td>
                         <td>
                           <div className="stacked-cell">
                             <strong>{file.entity_id}</strong>
@@ -1241,6 +1451,12 @@ function TrailPanel({
       setIsLoadingOutputs(false);
     }
   }
+
+  useEffect(() => {
+    if (!workspaceId || !selectedFile?.producer_run_id) return;
+    void loadProducerOutputs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId, selectedFile?.producer_run_id]);
 
   if (!selectedFile || !trail) {
     return (
@@ -1426,6 +1642,14 @@ function formatStoppedReason(reason: string): string {
 
 function isS3CapableStage(stage: WorkspaceStageTree): boolean {
   return stage.storage_provider === "s3" || stage.input_uri?.startsWith("s3://") === true;
+}
+
+function isSelectableS3Root(file: WorkspaceFileNode): boolean {
+  return (
+    file.storage_provider === "s3" &&
+    file.file_exists &&
+    (file.runtime_status === "pending" || file.runtime_status === "retry_wait")
+  );
 }
 
 function bucketFromS3Uri(inputUri?: string | null): string | null {

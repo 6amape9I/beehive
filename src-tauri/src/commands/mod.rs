@@ -13,7 +13,8 @@ use crate::domain::{
     PipelineConfigDraft, PipelineEditorStateResult, ReconcileStuckTasksResult,
     RegisterS3SourceArtifactPayload, RegisterS3SourceArtifactRequest,
     RegisterS3SourceArtifactResult, RunDueTasksResult, RunEntityStageResult,
-    RunPipelineWavesResult, RuntimeSummaryResult, S3ReconciliationResult, SaveEntityFileJsonResult,
+    RunPipelineWavesResult, RunSelectedPipelineWavesRequest, RunSelectedPipelineWavesResult,
+    RuntimeSummaryResult, S3ReconciliationResult, SaveEntityFileJsonResult,
     SavePipelineConfigResult, ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult,
     StageRunOutputsResult, StageRunsResult, UpdateStageNextStageRequest,
     UpdateStageNextStageResult, ValidatePipelineConfigDraftResult, ValidationSeverity,
@@ -893,6 +894,36 @@ pub fn run_pipeline_waves_by_id(
         Err(message) => RunPipelineWavesResult {
             summary: None,
             errors: vec![command_error("run_pipeline_waves_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn run_selected_pipeline_waves_by_id(
+    workspace_id: String,
+    root_entity_file_ids: Vec<i64>,
+    max_waves: u64,
+    max_tasks_per_wave: u64,
+    stop_on_first_failure: bool,
+) -> RunSelectedPipelineWavesResult {
+    let input = RunSelectedPipelineWavesRequest {
+        root_entity_file_ids,
+        max_waves: Some(max_waves),
+        max_tasks_per_wave: Some(max_tasks_per_wave),
+        stop_on_first_failure: Some(stop_on_first_failure),
+    };
+    match services::selected_runner::run_selected_pipeline_waves(&workspace_id, &input) {
+        Ok(summary) => RunSelectedPipelineWavesResult {
+            summary: Some(summary),
+            errors: Vec::new(),
+        },
+        Err(message) => RunSelectedPipelineWavesResult {
+            summary: None,
+            errors: vec![command_error(
+                "run_selected_pipeline_waves_failed",
+                message,
+                None,
+            )],
         },
     }
 }
