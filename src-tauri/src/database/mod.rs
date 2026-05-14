@@ -865,7 +865,11 @@ pub fn get_workspace_explorer(
                 },
                 output_folder: non_empty_string(stage.output_folder),
                 workflow_url: non_empty_string(stage.workflow_url),
+                max_attempts: stage.max_attempts,
+                retry_delay_sec: stage.retry_delay_sec,
                 next_stage: stage.next_stage,
+                save_path_aliases: stage.save_path_aliases,
+                allow_empty_outputs: stage.allow_empty_outputs,
                 is_active: stage.is_active,
                 archived_at: stage.archived_at,
                 folder_path: stage

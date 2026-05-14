@@ -1,0 +1,11 @@
+workspaces:
+  - id: smoke
+    name: Smoke Test Workspace
+    provider: s3
+    bucket: steos-s3-data
+    workspace_prefix: beehive-smoke/test_workflow
+    region: ru-1
+    endpoint: https://s3.ru-1.storage.selcloud.ru
+    workdir_path: /tmp/beehive-web-workspaces/smoke
+    pipeline_path: /tmp/beehive-web-workspaces/smoke/pipeline.yaml
+    database_path: /tmp/beehive-web-workspaces/smoke/app.db

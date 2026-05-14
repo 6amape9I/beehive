@@ -4,13 +4,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::config;
 use crate::database;
 use crate::domain::{
     CreateS3StagePayload, CreateS3StageRequest, PipelineConfig, ProjectConfig, RuntimeConfig,
-    S3StageRouteHints, StageDefinition, StorageConfig, StorageProvider,
-    UpdateStageNextStagePayload, UpdateStageNextStageRequest,
+    S3StageMutationPayload, S3StageRouteHints, StageDefinition, StorageConfig, StorageProvider,
+    UpdateS3StageRequest, UpdateStageNextStagePayload, UpdateStageNextStageRequest,
 };
 use crate::services::workspaces::{get_workspace, RegisteredWorkspace};
 use crate::workdir::path_string;
@@ -94,6 +95,171 @@ pub(crate) fn update_stage_next_stage_for_workspace(
     })
 }
 
+pub(crate) fn update_s3_stage_for_workspace(
+    workspace_id: &str,
+    stage_id: &str,
+    input: &UpdateS3StageRequest,
+) -> Result<S3StageMutationPayload, String> {
+    let workspace = get_workspace(workspace_id)?;
+    update_s3_stage(&workspace, stage_id, input)
+}
+
+fn update_s3_stage(
+    workspace: &RegisteredWorkspace,
+    stage_id: &str,
+    input: &UpdateS3StageRequest,
+) -> Result<S3StageMutationPayload, String> {
+    let mut config = load_or_create_config(workspace)?;
+    let stage = apply_stage_update(&mut config, stage_id, input)?;
+    let backup_path = persist_pipeline_config(workspace, &config, "stage update")?;
+
+    Ok(S3StageMutationPayload {
+        route_hints: Some(route_hints_for_stage(&stage)),
+        stage: Some(stage),
+        hard_deleted: false,
+        archived: false,
+        restored: false,
+        backup_path: backup_path.map(|path| path_string(&path)),
+    })
+}
+
+pub(crate) fn archive_or_delete_stage_for_workspace(
+    workspace_id: &str,
+    stage_id: &str,
+) -> Result<S3StageMutationPayload, String> {
+    let workspace = get_workspace(workspace_id)?;
+    archive_or_delete_stage(&workspace, stage_id)
+}
+
+fn archive_or_delete_stage(
+    workspace: &RegisteredWorkspace,
+    stage_id: &str,
+) -> Result<S3StageMutationPayload, String> {
+    let mut config = load_or_create_config(workspace)?;
+    let normalized_stage_id = normalize_required(stage_id, "stage_id")?;
+    reject_inbound_stage_links(&config, &normalized_stage_id)?;
+    let stage_index = config
+        .stages
+        .iter()
+        .position(|stage| stage.id == normalized_stage_id)
+        .ok_or_else(|| format!("Stage '{normalized_stage_id}' does not exist."))?;
+    let removed_stage = config.stages.remove(stage_index);
+    let has_history = stage_has_history(&workspace.database_path, &normalized_stage_id)?;
+    let backup_path = persist_pipeline_config(workspace, &config, "stage delete")?;
+
+    Ok(S3StageMutationPayload {
+        route_hints: Some(route_hints_for_stage(&removed_stage)),
+        stage: Some(removed_stage),
+        hard_deleted: !has_history,
+        archived: has_history,
+        restored: false,
+        backup_path: backup_path.map(|path| path_string(&path)),
+    })
+}
+
+pub(crate) fn restore_stage_for_workspace(
+    workspace_id: &str,
+    stage_id: &str,
+) -> Result<S3StageMutationPayload, String> {
+    let workspace = get_workspace(workspace_id)?;
+    restore_stage(&workspace, stage_id)
+}
+
+fn restore_stage(
+    workspace: &RegisteredWorkspace,
+    stage_id: &str,
+) -> Result<S3StageMutationPayload, String> {
+    let mut config = load_or_create_config(workspace)?;
+    let normalized_stage_id = normalize_required(stage_id, "stage_id")?;
+    if config
+        .stages
+        .iter()
+        .any(|stage| stage.id == normalized_stage_id)
+    {
+        return Err(format!(
+            "Stage '{normalized_stage_id}' already exists as an active stage."
+        ));
+    }
+    if !workspace.database_path.exists() {
+        return Err(format!(
+            "Stage '{normalized_stage_id}' is not present in archived SQLite history."
+        ));
+    }
+    let stages = database::list_stages(&workspace.database_path)?;
+    let record = stages
+        .into_iter()
+        .find(|stage| stage.id == normalized_stage_id)
+        .ok_or_else(|| {
+            format!("Stage '{normalized_stage_id}' is not present in archived SQLite history.")
+        })?;
+    if record.is_active {
+        return Err(format!(
+            "Stage '{normalized_stage_id}' already exists as an active SQLite stage."
+        ));
+    }
+    let stage = StageDefinition {
+        id: record.id,
+        input_folder: record.input_folder,
+        input_uri: record.input_uri,
+        output_folder: record.output_folder,
+        workflow_url: record.workflow_url,
+        max_attempts: record.max_attempts,
+        retry_delay_sec: record.retry_delay_sec,
+        next_stage: record.next_stage,
+        save_path_aliases: record.save_path_aliases,
+        allow_empty_outputs: record.allow_empty_outputs,
+    };
+    validate_stage_links_for_stage(&config, &stage)?;
+    config.stages.push(stage.clone());
+    let backup_path = persist_pipeline_config(workspace, &config, "stage restore")?;
+
+    Ok(S3StageMutationPayload {
+        route_hints: Some(route_hints_for_stage(&stage)),
+        stage: Some(stage),
+        hard_deleted: false,
+        archived: false,
+        restored: true,
+        backup_path: backup_path.map(|path| path_string(&path)),
+    })
+}
+
+fn apply_stage_update(
+    config: &mut PipelineConfig,
+    stage_id: &str,
+    input: &UpdateS3StageRequest,
+) -> Result<StageDefinition, String> {
+    let stage_id = normalize_required(stage_id, "stage_id")?;
+    let stage_index = config
+        .stages
+        .iter()
+        .position(|stage| stage.id == stage_id)
+        .ok_or_else(|| format!("Stage '{stage_id}' does not exist."))?;
+
+    if let Some(workflow_url) = input.workflow_url.as_ref() {
+        let workflow_url = normalize_required(workflow_url, "workflow_url")?;
+        if !workflow_url.starts_with("http://") && !workflow_url.starts_with("https://") {
+            return Err("workflow_url must start with http:// or https://.".to_string());
+        }
+        config.stages[stage_index].workflow_url = workflow_url;
+    }
+    if let Some(max_attempts) = input.max_attempts {
+        config.stages[stage_index].max_attempts = max_attempts.max(1);
+    }
+    if let Some(retry_delay_sec) = input.retry_delay_sec {
+        config.stages[stage_index].retry_delay_sec = retry_delay_sec;
+    }
+    if let Some(allow_empty_outputs) = input.allow_empty_outputs {
+        config.stages[stage_index].allow_empty_outputs = allow_empty_outputs;
+    }
+    if let Some(next_stage) = input.next_stage.as_ref() {
+        let next_stage = normalize_optional(next_stage.clone());
+        validate_next_stage(config, &stage_id, next_stage.as_deref())?;
+        config.stages[stage_index].next_stage = next_stage;
+    }
+
+    Ok(config.stages[stage_index].clone())
+}
+
 fn apply_next_stage_link(
     config: &mut PipelineConfig,
     stage_id: &str,
@@ -107,7 +273,18 @@ fn apply_next_stage_link(
         .position(|stage| stage.id == source_stage_id)
         .ok_or_else(|| format!("Stage '{source_stage_id}' does not exist."))?;
 
-    if let Some(next_stage) = next_stage.as_deref() {
+    validate_next_stage(config, &source_stage_id, next_stage.as_deref())?;
+
+    config.stages[source_index].next_stage = next_stage;
+    Ok(config.stages[source_index].clone())
+}
+
+fn validate_next_stage(
+    config: &PipelineConfig,
+    source_stage_id: &str,
+    next_stage: Option<&str>,
+) -> Result<(), String> {
+    if let Some(next_stage) = next_stage {
         if next_stage == source_stage_id {
             return Err("next_stage cannot reference the same stage.".to_string());
         }
@@ -115,9 +292,102 @@ fn apply_next_stage_link(
             return Err(format!("Target stage '{next_stage}' does not exist."));
         }
     }
+    Ok(())
+}
 
-    config.stages[source_index].next_stage = next_stage;
-    Ok(config.stages[source_index].clone())
+fn validate_stage_links_for_stage(
+    config: &PipelineConfig,
+    stage: &StageDefinition,
+) -> Result<(), String> {
+    validate_next_stage(config, &stage.id, stage.next_stage.as_deref())
+}
+
+fn reject_inbound_stage_links(
+    config: &PipelineConfig,
+    target_stage_id: &str,
+) -> Result<(), String> {
+    if let Some(source) = config
+        .stages
+        .iter()
+        .find(|stage| stage.next_stage.as_deref() == Some(target_stage_id))
+    {
+        return Err(format!(
+            "Нельзя удалить stage {target_stage_id}: stage {} ссылается на него как next_stage.",
+            source.id
+        ));
+    }
+    Ok(())
+}
+
+fn persist_pipeline_config(
+    workspace: &RegisteredWorkspace,
+    config: &PipelineConfig,
+    action: &str,
+) -> Result<Option<PathBuf>, String> {
+    let yaml_text = serde_yaml::to_string(config)
+        .map_err(|error| format!("Failed to serialize updated pipeline.yaml: {error}"))?;
+    let reparsed = config::parse_pipeline_config(&yaml_text, Utc::now().to_rfc3339());
+    if !reparsed.validation.is_valid {
+        return Err(format!(
+            "Generated pipeline {action} config failed validation: {:?}",
+            reparsed.validation.issues
+        ));
+    }
+    let backup_path = write_pipeline_yaml_atomic(&workspace.pipeline_path, &yaml_text)?;
+    database::bootstrap_database(&workspace.database_path, config)?;
+    Ok(backup_path)
+}
+
+fn route_hints_for_stage(stage: &StageDefinition) -> S3StageRouteHints {
+    S3StageRouteHints {
+        input_uri: stage.input_uri.clone().unwrap_or_default(),
+        save_path_aliases: stage.save_path_aliases.clone(),
+    }
+}
+
+fn stage_has_history(database_path: &Path, stage_id: &str) -> Result<bool, String> {
+    if !database_path.exists() {
+        return Ok(false);
+    }
+    Ok(
+        database_table_stage_count(database_path, "entity_files", stage_id)? > 0
+            || database_table_stage_count(database_path, "entity_stage_states", stage_id)? > 0
+            || database_table_stage_count(database_path, "stage_runs", stage_id)? > 0,
+    )
+}
+
+fn database_table_stage_count(
+    database_path: &Path,
+    table_name: &str,
+    stage_id: &str,
+) -> Result<u64, String> {
+    let connection = Connection::open(database_path).map_err(|error| {
+        format!(
+            "Failed to open SQLite database '{}': {error}",
+            database_path.display()
+        )
+    })?;
+    let exists = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![table_name],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("Failed to inspect SQLite table '{table_name}': {error}"))?;
+    if exists.is_none() {
+        return Ok(0);
+    }
+    connection
+        .query_row(
+            &format!("SELECT COUNT(*) FROM {table_name} WHERE stage_id = ?1"),
+            params![stage_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|value| value as u64)
+        .map_err(|error| {
+            format!("Failed to count stage '{stage_id}' in SQLite table '{table_name}': {error}")
+        })
 }
 
 fn load_or_create_config(workspace: &RegisteredWorkspace) -> Result<PipelineConfig, String> {
@@ -424,6 +694,10 @@ mod tests {
             pipeline_path: workdir.join("pipeline.yaml"),
             database_path: workdir.join("app.db"),
             workdir_path: workdir,
+            is_archived: false,
+            created_at: None,
+            updated_at: None,
+            archived_at: None,
         }
     }
 
@@ -587,5 +861,186 @@ mod tests {
         )
         .expect("clear link");
         assert_eq!(cleared.next_stage, None);
+    }
+
+    #[test]
+    fn stage_update_changes_workflow_and_retry_settings() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workspace = workspace(&tempdir);
+        let mut config = PipelineConfig {
+            project: ProjectConfig {
+                name: "Smoke".to_string(),
+                workdir: ".".to_string(),
+            },
+            storage: Some(workspace_storage_config(&workspace).expect("storage")),
+            runtime: RuntimeConfig::default(),
+            stages: Vec::new(),
+        };
+        let stage = build_s3_stage(
+            &workspace,
+            &config,
+            &CreateS3StageRequest {
+                stage_id: "stage_a".to_string(),
+                workflow_url: "https://n8n.example/webhook/a".to_string(),
+                next_stage: None,
+                max_attempts: None,
+                retry_delay_sec: None,
+                allow_empty_outputs: None,
+            },
+        )
+        .expect("stage");
+        config.stages.push(stage.clone());
+        persist_pipeline_config(&workspace, &config, "test setup").expect("persist");
+
+        let payload = update_s3_stage(
+            &workspace,
+            "stage_a",
+            &UpdateS3StageRequest {
+                workflow_url: Some("https://n8n.example/webhook/a2".to_string()),
+                next_stage: Some(None),
+                max_attempts: Some(5),
+                retry_delay_sec: Some(90),
+                allow_empty_outputs: Some(true),
+            },
+        )
+        .expect("update");
+        let updated = payload.stage.expect("stage");
+        assert_eq!(updated.workflow_url, "https://n8n.example/webhook/a2");
+        assert_eq!(updated.max_attempts, 5);
+        assert_eq!(updated.retry_delay_sec, 90);
+        assert!(updated.allow_empty_outputs);
+        assert_eq!(updated.input_uri, stage.input_uri);
+        assert_eq!(updated.save_path_aliases, stage.save_path_aliases);
+    }
+
+    #[test]
+    fn stage_delete_blocks_when_another_stage_links_to_it() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workspace = workspace(&tempdir);
+        let mut config = PipelineConfig {
+            project: ProjectConfig {
+                name: "Smoke".to_string(),
+                workdir: ".".to_string(),
+            },
+            storage: Some(workspace_storage_config(&workspace).expect("storage")),
+            runtime: RuntimeConfig::default(),
+            stages: Vec::new(),
+        };
+        for stage_id in ["stage_b", "stage_a"] {
+            let mut stage = build_s3_stage(
+                &workspace,
+                &config,
+                &CreateS3StageRequest {
+                    stage_id: stage_id.to_string(),
+                    workflow_url: format!("https://n8n.example/webhook/{stage_id}"),
+                    next_stage: None,
+                    max_attempts: None,
+                    retry_delay_sec: None,
+                    allow_empty_outputs: None,
+                },
+            )
+            .expect("stage");
+            if stage_id == "stage_a" {
+                stage.next_stage = Some("stage_b".to_string());
+            }
+            config.stages.push(stage);
+        }
+        persist_pipeline_config(&workspace, &config, "test setup").expect("persist");
+
+        let error = archive_or_delete_stage(&workspace, "stage_b").expect_err("linked delete");
+        assert!(error.contains("ссылается на него как next_stage"));
+    }
+
+    #[test]
+    fn stage_hard_delete_works_for_empty_unlinked_stage() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workspace = workspace(&tempdir);
+        let mut config = PipelineConfig {
+            project: ProjectConfig {
+                name: "Smoke".to_string(),
+                workdir: ".".to_string(),
+            },
+            storage: Some(workspace_storage_config(&workspace).expect("storage")),
+            runtime: RuntimeConfig::default(),
+            stages: Vec::new(),
+        };
+        let stage = build_s3_stage(
+            &workspace,
+            &config,
+            &CreateS3StageRequest {
+                stage_id: "stage_a".to_string(),
+                workflow_url: "https://n8n.example/webhook/a".to_string(),
+                next_stage: None,
+                max_attempts: None,
+                retry_delay_sec: None,
+                allow_empty_outputs: None,
+            },
+        )
+        .expect("stage");
+        config.stages.push(stage);
+        persist_pipeline_config(&workspace, &config, "test setup").expect("persist");
+
+        let payload = archive_or_delete_stage(&workspace, "stage_a").expect("delete");
+        assert!(payload.hard_deleted);
+        let loaded = config::load_pipeline_config(&workspace.pipeline_path)
+            .config
+            .expect("config");
+        assert!(loaded.stages.is_empty());
+    }
+
+    #[test]
+    fn stage_delete_archives_with_history_and_restore_works() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workspace = workspace(&tempdir);
+        let mut config = PipelineConfig {
+            project: ProjectConfig {
+                name: "Smoke".to_string(),
+                workdir: ".".to_string(),
+            },
+            storage: Some(workspace_storage_config(&workspace).expect("storage")),
+            runtime: RuntimeConfig::default(),
+            stages: Vec::new(),
+        };
+        let stage = build_s3_stage(
+            &workspace,
+            &config,
+            &CreateS3StageRequest {
+                stage_id: "stage_a".to_string(),
+                workflow_url: "https://n8n.example/webhook/a".to_string(),
+                next_stage: None,
+                max_attempts: None,
+                retry_delay_sec: None,
+                allow_empty_outputs: None,
+            },
+        )
+        .expect("stage");
+        config.stages.push(stage);
+        persist_pipeline_config(&workspace, &config, "test setup").expect("persist");
+        let connection = database::open_connection(&workspace.database_path).expect("db");
+        connection
+            .execute(
+                "INSERT INTO entities (entity_id, current_stage_id, current_status, latest_file_path, file_count, validation_status, validation_errors_json, first_seen_at, last_seen_at, updated_at)
+                 VALUES ('entity-1', 'stage_a', 'pending', 'stages/stage_a/entity-1.json', 1, 'valid', '[]', 'now', 'now', 'now')",
+                [],
+            )
+            .expect("insert entity");
+        connection
+            .execute(
+                "INSERT INTO entity_files (entity_id, stage_id, file_path, file_name, checksum, file_mtime, file_size, payload_json, meta_json, status, validation_status, validation_errors_json, first_seen_at, last_seen_at, updated_at)
+                 VALUES ('entity-1', 'stage_a', 'stages/stage_a/entity-1.json', 'entity-1.json', 'abc', 'now', 2, '{}', '{}', 'pending', 'valid', '[]', 'now', 'now', 'now')",
+                [],
+            )
+            .expect("insert file");
+
+        let archived = archive_or_delete_stage(&workspace, "stage_a").expect("archive");
+        assert!(archived.archived);
+        assert!(!archived.hard_deleted);
+
+        let restored = restore_stage(&workspace, "stage_a").expect("restore");
+        assert!(restored.restored);
+        let loaded = config::load_pipeline_config(&workspace.pipeline_path)
+            .config
+            .expect("config");
+        assert!(loaded.stages.iter().any(|stage| stage.id == "stage_a"));
     }
 }

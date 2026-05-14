@@ -31,6 +31,14 @@ BEEHIVE_WORKSPACES_CONFIG=/absolute/path/workspaces.yaml \
 cargo run --manifest-path src-tauri/Cargo.toml --bin beehive-server
 ```
 
+Workspace CRUD root:
+
+```bash
+BEEHIVE_WORKSPACES_ROOT=/tmp/beehive-web-workspaces
+```
+
+When the browser creates a workspace, the server generates `workdir_path`, `pipeline_path`, and `database_path` under this root. Operators do not enter server paths.
+
 Optional B7 pilot hardening:
 
 ```bash
@@ -113,19 +121,17 @@ Then open the Vite URL and use:
 ## Operator Flow
 
 1. Open `/workspaces`.
-2. Select a registered workspace.
-3. Inspect Workspace Explorer.
-4. Run `Reconcile S3`.
-5. Register a source manually if metadata is absent.
-6. Select 1-10 eligible S3 source rows.
-7. Run `Run selected pipeline waves`.
-8. Inspect the selected-run summary, root statuses, child outputs, and output tree.
-9. Use broad `Run small batch` or `Run pipeline waves` only for admin-style due-queue operation.
-10. Open Stage Editor for the workspace.
-11. Create an S3 stage from `stage_id` and n8n webhook URL.
-12. Copy generated save_path aliases to the n8n operator.
-13. Connect stages with source/target dropdowns.
-14. Select an output artifact with `producer_run_id` and load all run outputs.
+2. Create or select a workspace.
+3. Edit, archive/delete, or restore workspaces from the same page when needed.
+4. Open Stage Editor for the workspace.
+5. Create stages from `stage_id` and production n8n webhook URL.
+6. Edit stage workflow/retry settings, connect stages, archive/delete, restore, or copy save_path aliases.
+7. Inspect Workspace Explorer.
+8. Run `Reconcile S3`.
+9. Select 1-10 eligible S3 source rows.
+10. Run `Run selected pipeline waves`.
+11. Inspect the selected-run summary, root statuses, child outputs, and output tree.
+12. Use broad `Run small batch` or `Run pipeline waves` only from Advanced queue actions.
 
 For B7 pilot work, the recommended action is `Run selected pipeline waves`. It runs only the approved roots and descendants created by those selected runs. Broad queue actions can claim unrelated pending artifacts.
 

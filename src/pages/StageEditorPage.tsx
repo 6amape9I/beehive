@@ -10,9 +10,12 @@ import { StageDraftList } from "../components/stage-editor/StageDraftList";
 import { StageValidationPanel } from "../components/stage-editor/StageValidationPanel";
 import {
   createS3Stage,
+  deleteS3Stage,
   getWorkspaceExplorerById,
   getPipelineEditorState,
+  restoreS3Stage,
   savePipelineConfig,
+  updateS3Stage,
   updateStageNextStage,
   validatePipelineConfigDraft,
 } from "../lib/runtimeApi";
@@ -23,8 +26,10 @@ import type {
   CreateS3StageRequest,
   PipelineConfigDraft,
   PipelineEditorState,
+  S3StageMutationPayload,
   StageDefinitionDraft,
   StageUsageSummary,
+  UpdateS3StageRequest,
   UpdateStageNextStagePayload,
   WorkspaceStageTree,
 } from "../types/domain";
@@ -127,6 +132,7 @@ export function StageEditorPage() {
   const [updatedStageLink, setUpdatedStageLink] = useState<UpdateStageNextStagePayload | null>(
     null,
   );
+  const [stageMutation, setStageMutation] = useState<S3StageMutationPayload | null>(null);
 
   const workdirPath = state.selected_workdir_path;
   const workspaceId = routeWorkspaceId ?? state.selected_workspace_id;
@@ -354,6 +360,70 @@ export function StageEditorPage() {
     }
   }
 
+  async function handleUpdateS3Stage(stageId: string, input: UpdateS3StageRequest) {
+    if (!workspaceId) return;
+    setIsSaving(true);
+    setActionMessage(null);
+    setStageMutation(null);
+    try {
+      const result = await updateS3Stage(workspaceId, stageId, input);
+      setErrors(result.errors);
+      if (result.payload?.stage) {
+        setStageMutation(result.payload);
+        setActionMessage(`Stage ${result.payload.stage.id} updated.`);
+        await loadEditor();
+      } else {
+        setActionMessage("Stage update was rejected.");
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleDeleteS3Stage(stageId: string) {
+    if (!workspaceId) return;
+    setIsSaving(true);
+    setActionMessage(null);
+    setStageMutation(null);
+    try {
+      const result = await deleteS3Stage(workspaceId, stageId);
+      setErrors(result.errors);
+      if (result.payload) {
+        setStageMutation(result.payload);
+        setActionMessage(
+          result.payload.hard_deleted
+            ? `Stage ${stageId} removed from active pipeline.`
+            : `Stage ${stageId} archived from active pipeline.`,
+        );
+        await loadEditor();
+      } else {
+        setActionMessage("Stage archive/delete was rejected.");
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleRestoreS3Stage(stageId: string) {
+    if (!workspaceId) return;
+    setIsSaving(true);
+    setActionMessage(null);
+    setStageMutation(null);
+    try {
+      const result = await restoreS3Stage(workspaceId, stageId);
+      setErrors(result.errors);
+      if (result.payload?.stage) {
+        setStageMutation(result.payload);
+        setActionMessage(`Stage ${result.payload.stage.id} restored.`);
+        await loadEditor();
+      } else {
+        setActionMessage("Stage restore was rejected.");
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   const disabled = isLoading || isSaving || isValidating;
 
   return (
@@ -406,6 +476,14 @@ export function StageEditorPage() {
             stages={stageOptions}
             onChange={setStageLinkForm}
             onSave={() => void handleUpdateStageLink()}
+          />
+          <StageCrudPanel
+            disabled={disabled}
+            mutation={stageMutation}
+            stages={workspaceStages}
+            onDelete={(stageId) => void handleDeleteS3Stage(stageId)}
+            onRestore={(stageId) => void handleRestoreS3Stage(stageId)}
+            onUpdate={(stageId, input) => void handleUpdateS3Stage(stageId, input)}
           />
         </>
       ) : !canEdit ? (
@@ -487,8 +565,14 @@ export function StageEditorPage() {
             onChange={(stage) => selectedIndex !== null && updateStage(selectedIndex, stage)}
             onRemove={handleRemoveStage}
           />
-          <StageValidationPanel issues={validation.issues} />
-          <PipelineYamlPreview yaml={yamlPreview} />
+          <details className="panel">
+            <summary>
+              <strong>Advanced</strong>
+              <span className="muted">Validation and YAML preview</span>
+            </summary>
+            <StageValidationPanel issues={validation.issues} />
+            <PipelineYamlPreview yaml={yamlPreview} />
+          </details>
         </>
       )}
     </div>
@@ -729,6 +813,221 @@ function StageLinkPanel({
       {payload ? (
         <p className="field-hint">
           {payload.stage.id} next_stage is {payload.stage.next_stage ?? "terminal"}.
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+interface StageCrudForm {
+  stage_id: string;
+  workflow_url: string;
+  next_stage: string;
+  max_attempts: number;
+  retry_delay_sec: number;
+  allow_empty_outputs: boolean;
+}
+
+interface StageCrudPanelProps {
+  disabled: boolean;
+  mutation: S3StageMutationPayload | null;
+  stages: WorkspaceStageTree[];
+  onDelete: (stageId: string) => void;
+  onRestore: (stageId: string) => void;
+  onUpdate: (stageId: string, input: UpdateS3StageRequest) => void;
+}
+
+function StageCrudPanel({
+  disabled,
+  mutation,
+  stages,
+  onDelete,
+  onRestore,
+  onUpdate,
+}: StageCrudPanelProps) {
+  const [selectedStageId, setSelectedStageId] = useState("");
+  const selectedStage = stages.find((stage) => stage.stage_id === selectedStageId) ?? null;
+  const [form, setForm] = useState<StageCrudForm>({
+    stage_id: "",
+    workflow_url: "",
+    next_stage: "",
+    max_attempts: 3,
+    retry_delay_sec: 30,
+    allow_empty_outputs: false,
+  });
+
+  useEffect(() => {
+    if (!selectedStage) return;
+    setForm({
+      stage_id: selectedStage.stage_id,
+      workflow_url: selectedStage.workflow_url ?? "",
+      next_stage: selectedStage.next_stage ?? "",
+      max_attempts: selectedStage.max_attempts,
+      retry_delay_sec: selectedStage.retry_delay_sec,
+      allow_empty_outputs: selectedStage.allow_empty_outputs,
+    });
+  }, [selectedStage?.stage_id]);
+
+  function update(key: keyof StageCrudForm, value: string | number | boolean) {
+    setForm({ ...form, [key]: value });
+  }
+
+  async function copyAlias(alias: string) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(alias);
+    }
+  }
+
+  const activeStages = stages.filter((stage) => stage.is_active);
+  const canSave = !!selectedStage && selectedStage.is_active && !!form.workflow_url.trim() && !disabled;
+
+  return (
+    <section className="panel">
+      <div className="panel-heading">
+        <div>
+          <h2>Manage stages</h2>
+          <span className="muted">Edit runtime fields, connect stages, archive/delete, or restore.</span>
+        </div>
+      </div>
+      <div className="stage-editor-form-grid">
+        <div className="form-row">
+          <label htmlFor="crud-stage-select">Stage</label>
+          <select
+            id="crud-stage-select"
+            value={selectedStageId}
+            disabled={disabled}
+            onChange={(event) => setSelectedStageId(event.target.value)}
+          >
+            <option value="">Select stage</option>
+            {stages.map((stage) => (
+              <option key={stage.stage_id} value={stage.stage_id}>
+                {stage.stage_id} {stage.is_active ? "" : "(archived)"}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="form-row">
+          <label htmlFor="crud-stage-id">Stage ID</label>
+          <input id="crud-stage-id" value={form.stage_id} disabled />
+        </div>
+        <div className="form-row">
+          <label htmlFor="crud-workflow-url">Production n8n webhook URL</label>
+          <input
+            id="crud-workflow-url"
+            value={form.workflow_url}
+            disabled={disabled || !selectedStage?.is_active}
+            onChange={(event) => update("workflow_url", event.target.value)}
+          />
+        </div>
+        <div className="form-row">
+          <label htmlFor="crud-next-stage">Next stage</label>
+          <select
+            id="crud-next-stage"
+            value={form.next_stage}
+            disabled={disabled || !selectedStage?.is_active}
+            onChange={(event) => update("next_stage", event.target.value)}
+          >
+            <option value="">Terminal</option>
+            {activeStages
+              .filter((stage) => stage.stage_id !== selectedStage?.stage_id)
+              .map((stage) => (
+                <option key={stage.stage_id} value={stage.stage_id}>
+                  {stage.stage_id}
+                </option>
+              ))}
+          </select>
+        </div>
+        <div className="form-row">
+          <label htmlFor="crud-max-attempts">Max attempts</label>
+          <input
+            id="crud-max-attempts"
+            type="number"
+            min={1}
+            value={form.max_attempts}
+            disabled={disabled || !selectedStage?.is_active}
+            onChange={(event) => update("max_attempts", boundedNumber(event.target.value, 1, 20, 3))}
+          />
+        </div>
+        <div className="form-row">
+          <label htmlFor="crud-retry-delay">Retry delay sec</label>
+          <input
+            id="crud-retry-delay"
+            type="number"
+            min={0}
+            value={form.retry_delay_sec}
+            disabled={disabled || !selectedStage?.is_active}
+            onChange={(event) =>
+              update("retry_delay_sec", boundedNumber(event.target.value, 0, 3600, 30))
+            }
+          />
+        </div>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={form.allow_empty_outputs}
+            disabled={disabled || !selectedStage?.is_active}
+            onChange={(event) => update("allow_empty_outputs", event.target.checked)}
+          />
+          Allow empty outputs
+        </label>
+      </div>
+      <div className="button-row">
+        <button
+          type="button"
+          className="button primary"
+          disabled={!canSave}
+          onClick={() =>
+            onUpdate(form.stage_id, {
+              workflow_url: form.workflow_url.trim(),
+              next_stage: form.next_stage.trim() || null,
+              max_attempts: form.max_attempts,
+              retry_delay_sec: form.retry_delay_sec,
+              allow_empty_outputs: form.allow_empty_outputs,
+            })
+          }
+        >
+          Save stage
+        </button>
+        <button
+          type="button"
+          className="button secondary"
+          disabled={disabled || !selectedStage?.is_active}
+          onClick={() => selectedStage && onDelete(selectedStage.stage_id)}
+        >
+          Archive/Delete stage
+        </button>
+        <button
+          type="button"
+          className="button secondary"
+          disabled={disabled || !selectedStage || selectedStage.is_active}
+          onClick={() => selectedStage && onRestore(selectedStage.stage_id)}
+        >
+          Restore stage
+        </button>
+      </div>
+      {selectedStage ? (
+        <details className="route-hints">
+          <summary>
+            <strong>Copy save_path aliases</strong>
+          </summary>
+          <div className="route-alias-list">
+            {selectedStage.save_path_aliases.map((alias) => (
+              <button
+                key={alias}
+                type="button"
+                className="button secondary route-alias"
+                onClick={() => void copyAlias(alias)}
+              >
+                {alias}
+              </button>
+            ))}
+          </div>
+        </details>
+      ) : null}
+      {mutation?.stage ? (
+        <p className="field-hint">
+          Last changed stage: {mutation.stage.id}.{" "}
+          {mutation.archived ? "Archived." : mutation.restored ? "Restored." : "Saved."}
         </p>
       ) : null}
     </section>

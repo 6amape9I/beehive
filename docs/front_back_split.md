@@ -28,6 +28,10 @@ Tauri commands call these services for registry workspace selection, workspace-I
 
 - `GET /api/health`
 - `GET /api/workspaces`
+- `POST /api/workspaces`
+- `PATCH /api/workspaces/{workspace_id}`
+- `DELETE /api/workspaces/{workspace_id}`
+- `POST /api/workspaces/{workspace_id}/restore`
 - `GET /api/workspaces/{workspace_id}`
 - `GET /api/workspaces/{workspace_id}/workspace-explorer`
 - `POST /api/workspaces/{workspace_id}/reconcile-s3`
@@ -36,6 +40,9 @@ Tauri commands call these services for registry workspace selection, workspace-I
 - `POST /api/workspaces/{workspace_id}/run-pipeline-waves`
 - `POST /api/workspaces/{workspace_id}/run-selected-pipeline-waves`
 - `POST /api/workspaces/{workspace_id}/stages`
+- `PATCH /api/workspaces/{workspace_id}/stages/{stage_id}`
+- `DELETE /api/workspaces/{workspace_id}/stages/{stage_id}`
+- `POST /api/workspaces/{workspace_id}/stages/{stage_id}/restore`
 - `POST /api/workspaces/{workspace_id}/stages/{stage_id}/next-stage`
 - `GET /api/workspaces/{workspace_id}/stage-runs/{run_id}/outputs`
 

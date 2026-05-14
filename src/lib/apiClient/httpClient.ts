@@ -3,6 +3,7 @@ import type {
   BootstrapResult,
   CreateS3StageRequest,
   CreateS3StageResult,
+  CreateWorkspaceRequest,
   DashboardOverviewResult,
   EntityDetailResult,
   EntityFilesResult,
@@ -22,6 +23,7 @@ import type {
   RunSelectedPipelineWavesResult,
   RuntimeSummaryResult,
   S3ReconciliationResult,
+  S3StageMutationResult,
   SaveEntityFileJsonResult,
   SavePipelineConfigResult,
   ScanWorkspaceResult,
@@ -29,10 +31,13 @@ import type {
   StageListResult,
   StageRunOutputsResult,
   StageRunsResult,
+  UpdateS3StageRequest,
   UpdateStageNextStageRequest,
   UpdateStageNextStageResult,
+  UpdateWorkspaceRequest,
   ValidatePipelineConfigDraftResult,
   WorkspaceExplorerResult,
+  WorkspaceMutationResult,
   WorkspaceRegistryEntryResult,
   WorkspaceRegistryListResult,
 } from "../../types/domain";
@@ -77,6 +82,17 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
     });
   }
 
+  function patchJson<T>(path: string, body?: unknown): Promise<T> {
+    return fetchJson<T>(path, {
+      method: "PATCH",
+      body: JSON.stringify(body ?? {}),
+    });
+  }
+
+  function deleteJson<T>(path: string): Promise<T> {
+    return fetchJson<T>(path, { method: "DELETE" });
+  }
+
   function unsupported<T>(name: string): Promise<T> {
     return Promise.reject(new Error(`${name} is not available in HTTP client yet.`));
   }
@@ -87,10 +103,21 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
     openWorkdir: (path: string): Promise<BootstrapResult> => unsupported(`openWorkdir(${path})`),
     reloadWorkdir: (path: string): Promise<BootstrapResult> =>
       unsupported(`reloadWorkdir(${path})`),
-    listRegisteredWorkspaces: (): Promise<WorkspaceRegistryListResult> =>
-      fetchJson("/api/workspaces"),
+    listRegisteredWorkspaces: (includeArchived = false): Promise<WorkspaceRegistryListResult> =>
+      fetchJson(`/api/workspaces?include_archived=${includeArchived ? "true" : "false"}`),
     getRegisteredWorkspace: (workspaceId: string): Promise<WorkspaceRegistryEntryResult> =>
       fetchJson(`/api/workspaces/${encodeURIComponent(workspaceId)}`),
+    createRegisteredWorkspace: (input: CreateWorkspaceRequest): Promise<WorkspaceMutationResult> =>
+      postJson("/api/workspaces", input),
+    updateRegisteredWorkspace: (
+      workspaceId: string,
+      input: UpdateWorkspaceRequest,
+    ): Promise<WorkspaceMutationResult> =>
+      patchJson(`/api/workspaces/${encodeURIComponent(workspaceId)}`, input),
+    deleteRegisteredWorkspace: (workspaceId: string): Promise<WorkspaceMutationResult> =>
+      deleteJson(`/api/workspaces/${encodeURIComponent(workspaceId)}`),
+    restoreRegisteredWorkspace: (workspaceId: string): Promise<WorkspaceMutationResult> =>
+      postJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/restore`),
     openRegisteredWorkspace: (workspaceId: string): Promise<BootstrapResult> =>
       unsupported(`openRegisteredWorkspace(${workspaceId})`),
     getDashboardOverview: (path: string): Promise<DashboardOverviewResult> =>
@@ -133,6 +160,23 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
       input: CreateS3StageRequest,
     ): Promise<CreateS3StageResult> =>
       postJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/stages`, input),
+    updateS3Stage: (
+      workspaceId: string,
+      stageId: string,
+      input: UpdateS3StageRequest,
+    ): Promise<S3StageMutationResult> =>
+      patchJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/stages/${encodeURIComponent(stageId)}`,
+        input,
+      ),
+    deleteS3Stage: (workspaceId: string, stageId: string): Promise<S3StageMutationResult> =>
+      deleteJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/stages/${encodeURIComponent(stageId)}`,
+      ),
+    restoreS3Stage: (workspaceId: string, stageId: string): Promise<S3StageMutationResult> =>
+      postJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/stages/${encodeURIComponent(stageId)}/restore`,
+      ),
     updateStageNextStage: (
       workspaceId: string,
       stageId: string,

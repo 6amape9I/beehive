@@ -3,6 +3,7 @@ import type {
   BootstrapResult,
   CreateS3StageRequest,
   CreateS3StageResult,
+  CreateWorkspaceRequest,
   DashboardOverviewResult,
   EntityDetailResult,
   EntityFilesResult,
@@ -22,6 +23,7 @@ import type {
   RunSelectedPipelineWavesResult,
   RuntimeSummaryResult,
   S3ReconciliationResult,
+  S3StageMutationResult,
   SaveEntityFileJsonResult,
   SavePipelineConfigResult,
   ScanWorkspaceResult,
@@ -29,10 +31,13 @@ import type {
   StageListResult,
   StageRunOutputsResult,
   StageRunsResult,
+  UpdateS3StageRequest,
   UpdateStageNextStageRequest,
   UpdateStageNextStageResult,
+  UpdateWorkspaceRequest,
   ValidatePipelineConfigDraftResult,
   WorkspaceExplorerResult,
+  WorkspaceMutationResult,
   WorkspaceRegistryEntryResult,
   WorkspaceRegistryListResult,
 } from "../../types/domain";
@@ -41,8 +46,15 @@ export interface BeehiveApiClient {
   initializeWorkdir(path: string): Promise<BootstrapResult>;
   openWorkdir(path: string): Promise<BootstrapResult>;
   reloadWorkdir(path: string): Promise<BootstrapResult>;
-  listRegisteredWorkspaces(): Promise<WorkspaceRegistryListResult>;
+  listRegisteredWorkspaces(includeArchived?: boolean): Promise<WorkspaceRegistryListResult>;
   getRegisteredWorkspace(workspaceId: string): Promise<WorkspaceRegistryEntryResult>;
+  createRegisteredWorkspace(input: CreateWorkspaceRequest): Promise<WorkspaceMutationResult>;
+  updateRegisteredWorkspace(
+    workspaceId: string,
+    input: UpdateWorkspaceRequest,
+  ): Promise<WorkspaceMutationResult>;
+  deleteRegisteredWorkspace(workspaceId: string): Promise<WorkspaceMutationResult>;
+  restoreRegisteredWorkspace(workspaceId: string): Promise<WorkspaceMutationResult>;
   openRegisteredWorkspace(workspaceId: string): Promise<BootstrapResult>;
   getDashboardOverview(path: string): Promise<DashboardOverviewResult>;
   scanWorkspace(path: string): Promise<ScanWorkspaceResult>;
@@ -70,6 +82,13 @@ export interface BeehiveApiClient {
     operatorComment?: string | null,
   ): Promise<SavePipelineConfigResult>;
   createS3Stage(workspaceId: string, input: CreateS3StageRequest): Promise<CreateS3StageResult>;
+  updateS3Stage(
+    workspaceId: string,
+    stageId: string,
+    input: UpdateS3StageRequest,
+  ): Promise<S3StageMutationResult>;
+  deleteS3Stage(workspaceId: string, stageId: string): Promise<S3StageMutationResult>;
+  restoreS3Stage(workspaceId: string, stageId: string): Promise<S3StageMutationResult>;
   updateStageNextStage(
     workspaceId: string,
     stageId: string,

@@ -362,6 +362,11 @@ pub struct WorkspaceDescriptor {
     pub workspace_prefix: Option<String>,
     pub region: Option<String>,
     pub endpoint: Option<String>,
+    pub stage_count: u64,
+    pub is_archived: bool,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub archived_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -373,6 +378,39 @@ pub struct WorkspaceRegistryListResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceRegistryEntryResult {
     pub workspace: Option<WorkspaceDescriptor>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateWorkspaceRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub bucket: String,
+    pub workspace_prefix: String,
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateWorkspaceRequest {
+    pub name: Option<String>,
+    pub bucket: Option<String>,
+    pub workspace_prefix: Option<String>,
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceMutationPayload {
+    pub workspace: Option<WorkspaceDescriptor>,
+    pub hard_deleted: bool,
+    pub archived: bool,
+    pub backup_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceMutationResult {
+    pub payload: Option<WorkspaceMutationPayload>,
     pub errors: Vec<CommandErrorInfo>,
 }
 
@@ -877,6 +915,32 @@ pub struct CreateS3StageResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateS3StageRequest {
+    pub workflow_url: Option<String>,
+    #[serde(default)]
+    pub next_stage: Option<Option<String>>,
+    pub max_attempts: Option<u64>,
+    pub retry_delay_sec: Option<u64>,
+    pub allow_empty_outputs: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct S3StageMutationPayload {
+    pub stage: Option<StageDefinition>,
+    pub route_hints: Option<S3StageRouteHints>,
+    pub hard_deleted: bool,
+    pub archived: bool,
+    pub restored: bool,
+    pub backup_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct S3StageMutationResult {
+    pub payload: Option<S3StageMutationPayload>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpdateStageNextStageRequest {
     pub next_stage: Option<String>,
 }
@@ -990,7 +1054,11 @@ pub struct WorkspaceStageTree {
     pub storage_provider: StorageProvider,
     pub output_folder: Option<String>,
     pub workflow_url: Option<String>,
+    pub max_attempts: u64,
+    pub retry_delay_sec: u64,
     pub next_stage: Option<String>,
+    pub save_path_aliases: Vec<String>,
+    pub allow_empty_outputs: bool,
     pub is_active: bool,
     pub archived_at: Option<String>,
     pub folder_path: String,

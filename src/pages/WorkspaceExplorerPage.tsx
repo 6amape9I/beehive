@@ -4,7 +4,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useBootstrap } from "../app/BootstrapContext";
 import { CommandErrorsPanel } from "../components/CommandErrorsPanel";
 import { StatusBadge } from "../components/StatusBadge";
-import { formatDateTime, shortChecksum } from "../lib/formatters";
+import { formatDateTime } from "../lib/formatters";
 import {
   getWorkspaceExplorer,
   getWorkspaceExplorerById,
@@ -434,11 +434,10 @@ export function WorkspaceExplorerPage() {
     <div className="page-stack">
       <div className="page-heading">
         <div>
-          <span className="eyebrow">Filesystem</span>
-          <h1>Workspace Explorer</h1>
+          <span className="eyebrow">Operator Workspace</span>
+          <h1>{workspaceId ? `Workspace ${workspaceId}` : "Workspace Explorer"}</h1>
           <span className="muted">
             {explorer?.workdir_path ?? workdirPath ?? "No workdir selected"}
-            {workspaceId ? ` / workspace ${workspaceId}` : ""}
           </span>
         </div>
         <div className="button-row">
@@ -498,6 +497,11 @@ export function WorkspaceExplorerPage() {
             onRunBatch={() => void handleRunSmallBatch()}
             onRunPipelineWaves={() => void handleRunPipelineWaves()}
             onRunSelectedPipelineWaves={() => void handleRunSelectedPipelineWaves()}
+            onAddStage={() =>
+              workspaceId
+                ? navigate(`/workspaces/${encodeURIComponent(workspaceId)}/stages`)
+                : navigate("/stages")
+            }
           />
           <ExplorerFiltersPanel
             filters={filters}
@@ -569,6 +573,7 @@ interface S3OperatorPanelProps {
   onRunBatch: () => void;
   onRunPipelineWaves: () => void;
   onRunSelectedPipelineWaves: () => void;
+  onAddStage: () => void;
 }
 
 function S3OperatorPanel({
@@ -591,6 +596,7 @@ function S3OperatorPanel({
   onRunBatch,
   onRunPipelineWaves,
   onRunSelectedPipelineWaves,
+  onAddStage,
 }: S3OperatorPanelProps) {
   const s3Stages = stages.filter(isS3CapableStage);
   const canRegister =
@@ -609,8 +615,10 @@ function S3OperatorPanel({
     <section className="panel">
       <div className="panel-heading">
         <div>
-          <h2>S3 Operator Console</h2>
-          <span className="muted">{s3Stages.length} S3-capable stage(s)</span>
+          <h2>Operator Actions</h2>
+          <span className="muted">
+            {selectedCount} selected source(s) / {s3Stages.length} S3 stage(s)
+          </span>
         </div>
         <div className="button-row">
           <button
@@ -621,45 +629,50 @@ function S3OperatorPanel({
           >
             {activeAction === "s3-reconcile" ? "Reconciling..." : "Reconcile S3"}
           </button>
-          <label className="inline-field">
-            Batch
-            <input
-              type="number"
-              min={1}
-              max={5}
-              value={batchLimit}
-              disabled={disabled || activeAction === "s3-batch"}
-              onChange={(event) => onBatchLimitChange(Number(event.target.value))}
-            />
-          </label>
           <button
             type="button"
             className="button primary"
-            disabled={disabled || activeAction === "s3-batch"}
-            onClick={onRunBatch}
+            disabled={disabled || selectedCount === 0 || activeAction === "selected-pipeline-waves"}
+            onClick={onRunSelectedPipelineWaves}
           >
-            {activeAction === "s3-batch" ? "Running..." : "Run small batch"}
+            {activeAction === "selected-pipeline-waves"
+              ? "Running selected..."
+              : `Run selected pipeline waves (${selectedCount})`}
+          </button>
+          <button type="button" className="button secondary" onClick={onAddStage}>
+            Add stage
           </button>
         </div>
       </div>
 
       {summary ? (
-        <div className="summary-card-grid">
-          <SummaryCard label="Stages" value={summary.stage_count} />
-          <SummaryCard label="Listed" value={summary.listed_object_count} />
-          <SummaryCard label="Tagged" value={summary.metadata_tagged_count} />
-          <SummaryCard label="Registered" value={summary.registered_file_count} />
-          <SummaryCard label="Updated" value={summary.updated_file_count} />
-          <SummaryCard label="Unchanged" value={summary.unchanged_file_count} />
-          <SummaryCard label="Missing" value={summary.missing_file_count} />
-          <SummaryCard label="Restored" value={summary.restored_file_count} />
-          <SummaryCard label="Unmapped" value={summary.unmapped_object_count} />
-          <SummaryCard label="Elapsed ms" value={summary.elapsed_ms} />
-          <SummaryCard label="Latest" value={formatDateTime(summary.latest_reconciliation_at)} />
-        </div>
+        <details className="diagnostics-block">
+          <summary>
+            <strong>Diagnostics</strong>
+            <span className="muted">Last S3 reconciliation details</span>
+          </summary>
+          <div className="summary-card-grid">
+            <SummaryCard label="Stages" value={summary.stage_count} />
+            <SummaryCard label="Listed" value={summary.listed_object_count} />
+            <SummaryCard label="Tagged" value={summary.metadata_tagged_count} />
+            <SummaryCard label="Registered" value={summary.registered_file_count} />
+            <SummaryCard label="Updated" value={summary.updated_file_count} />
+            <SummaryCard label="Unchanged" value={summary.unchanged_file_count} />
+            <SummaryCard label="Missing" value={summary.missing_file_count} />
+            <SummaryCard label="Restored" value={summary.restored_file_count} />
+            <SummaryCard label="Unmapped" value={summary.unmapped_object_count} />
+            <SummaryCard label="Elapsed ms" value={summary.elapsed_ms} />
+            <SummaryCard label="Latest" value={formatDateTime(summary.latest_reconciliation_at)} />
+          </div>
+        </details>
       ) : null}
 
-      <div className="stage-editor-form-grid">
+      <details className="diagnostics-block">
+        <summary>
+          <strong>Advanced</strong>
+          <span className="muted">Manual S3 source registration</span>
+        </summary>
+        <div className="stage-editor-form-grid">
         <div className="form-row">
           <label htmlFor="s3-register-stage">Stage</label>
           <select
@@ -740,17 +753,18 @@ function S3OperatorPanel({
           value={form.size}
           onChange={(value) => updateField("size", value)}
         />
-      </div>
-      <div className="button-row">
-        <button
-          type="button"
-          className="button secondary"
-          disabled={!canRegister || activeAction === "s3-register"}
-          onClick={onRegister}
-        >
-          {activeAction === "s3-register" ? "Registering..." : "Register S3 source"}
-        </button>
-      </div>
+        </div>
+        <div className="button-row">
+          <button
+            type="button"
+            className="button secondary"
+            disabled={!canRegister || activeAction === "s3-register"}
+            onClick={onRegister}
+          >
+            {activeAction === "s3-register" ? "Registering..." : "Register S3 source"}
+          </button>
+        </div>
+      </details>
 
       <h3>Pipeline Waves</h3>
       <p className="muted">
@@ -836,7 +850,11 @@ function S3OperatorPanel({
       </div>
       {selectedPipelineSummary ? <SelectedPipelineSummaryPanel summary={selectedPipelineSummary} /> : null}
       {pipelineWaveSummary ? (
-        <div className="workspace-wave-summary">
+        <details className="workspace-wave-summary">
+          <summary>
+            <strong>Diagnostics</strong>
+            <span className="muted">Broad pipeline wave result</span>
+          </summary>
           <div className="summary-card-grid">
             <SummaryCard label="Waves" value={pipelineWaveSummary.waves_executed} />
             <SummaryCard label="Claimed" value={pipelineWaveSummary.total_claimed} />
@@ -878,8 +896,34 @@ function S3OperatorPanel({
               </tbody>
             </table>
           </div>
-        </div>
+        </details>
       ) : null}
+      <details className="diagnostics-block">
+        <summary>
+          <strong>Advanced queue actions</strong>
+        </summary>
+        <div className="button-row">
+          <label className="inline-field">
+            Batch
+            <input
+              type="number"
+              min={1}
+              max={5}
+              value={batchLimit}
+              disabled={disabled || activeAction === "s3-batch"}
+              onChange={(event) => onBatchLimitChange(Number(event.target.value))}
+            />
+          </label>
+          <button
+            type="button"
+            className="button secondary"
+            disabled={disabled || activeAction === "s3-batch"}
+            onClick={onRunBatch}
+          >
+            {activeAction === "s3-batch" ? "Running..." : "Run small batch"}
+          </button>
+        </div>
+      </details>
     </section>
   );
 }
@@ -1014,25 +1058,44 @@ function S3RegistrationInput({
 }
 
 function ExplorerSummary({ explorer }: { explorer: WorkspaceExplorerResult }) {
+  const pending = explorer.stages.reduce((total, stage) => total + stage.counters.pending, 0);
+  const failed = explorer.stages.reduce((total, stage) => total + stage.counters.failed, 0);
+  const blocked = explorer.stages.reduce((total, stage) => total + stage.counters.blocked, 0);
+  const done = explorer.stages.reduce((total, stage) => total + stage.counters.done, 0);
+  const firstS3Stage = explorer.stages.find((stage) => stage.input_uri?.startsWith("s3://"));
   return (
     <section className="panel">
       <div className="panel-heading">
         <div>
-          <h2>Workdir Tree</h2>
+          <h2>Workspace Status</h2>
           <span className="muted">
-            Generated {formatDateTime(explorer.generated_at)} / last scan{" "}
-            {formatDateTime(explorer.last_scan_at)}
+            {firstS3Stage?.input_uri ?? explorer.workdir_path}
           </span>
         </div>
       </div>
       <div className="summary-card-grid">
-        <SummaryCard label="Stages" value={`${explorer.totals.active_stages_total} active / ${explorer.totals.inactive_stages_total} inactive`} />
-        <SummaryCard label="Entities" value={explorer.totals.entities_total} />
-        <SummaryCard label="Registered files" value={explorer.totals.registered_files_total} />
-        <SummaryCard label="Present / missing" value={`${explorer.totals.present_files_total} / ${explorer.totals.missing_files_total}`} />
-        <SummaryCard label="Invalid last scan" value={explorer.totals.invalid_files_total} />
-        <SummaryCard label="Managed copies" value={explorer.totals.managed_copies_total} />
+        <SummaryCard label="Stages" value={explorer.totals.active_stages_total} />
+        <SummaryCard label="Pending" value={pending} />
+        <SummaryCard label="Failed" value={failed} />
+        <SummaryCard label="Blocked" value={blocked} />
+        <SummaryCard label="Done" value={done} />
       </div>
+      <details className="diagnostics-block">
+        <summary>
+          <strong>Diagnostics</strong>
+          <span className="muted">Technical counters and scan timestamps</span>
+        </summary>
+        <div className="summary-card-grid">
+          <SummaryCard label="Inactive stages" value={explorer.totals.inactive_stages_total} />
+          <SummaryCard label="Entities" value={explorer.totals.entities_total} />
+          <SummaryCard label="Registered files" value={explorer.totals.registered_files_total} />
+          <SummaryCard label="Present / missing" value={`${explorer.totals.present_files_total} / ${explorer.totals.missing_files_total}`} />
+          <SummaryCard label="Invalid last scan" value={explorer.totals.invalid_files_total} />
+          <SummaryCard label="Managed copies" value={explorer.totals.managed_copies_total} />
+          <SummaryCard label="Generated" value={formatDateTime(explorer.generated_at)} />
+          <SummaryCard label="Last scan" value={formatDateTime(explorer.last_scan_at)} />
+        </div>
+      </details>
     </section>
   );
 }
@@ -1209,24 +1272,30 @@ function StageTreePanel({
         <p className="muted">Inactive stage: historical files remain visible, but new files are not scanned here.</p>
       ) : null}
       <div className="inline-meta">
-        <span>input {stage.input_uri ?? stage.folder_path}</span>
-        <span>output {stage.output_folder ?? "not required"}</span>
         <span>next {stage.next_stage ?? "terminal"}</span>
-        <span>registered {stage.counters.registered_files}</span>
-        <span>missing {stage.counters.missing_files}</span>
-        <span>invalid {stage.counters.invalid_files}</span>
-        <span>managed {stage.counters.managed_copies}</span>
-      </div>
-      <div className="inline-meta">
         <span>pending {stage.counters.pending}</span>
-        <span>queued {stage.counters.queued}</span>
-        <span>in progress {stage.counters.in_progress}</span>
-        <span>retry {stage.counters.retry_wait}</span>
         <span>done {stage.counters.done}</span>
         <span>failed {stage.counters.failed}</span>
         <span>blocked {stage.counters.blocked}</span>
-        <span>skipped {stage.counters.skipped}</span>
       </div>
+      <details className="diagnostics-block">
+        <summary>
+          <strong>Diagnostics</strong>
+          <span className="muted">Stage counters and system paths</span>
+        </summary>
+        <div className="inline-meta">
+          <span>input {stage.input_uri ?? stage.folder_path}</span>
+          <span>output {stage.output_folder ?? "not required"}</span>
+          <span>registered {stage.counters.registered_files}</span>
+          <span>missing {stage.counters.missing_files}</span>
+          <span>invalid {stage.counters.invalid_files}</span>
+          <span>managed {stage.counters.managed_copies}</span>
+          <span>queued {stage.counters.queued}</span>
+          <span>in progress {stage.counters.in_progress}</span>
+          <span>retry {stage.counters.retry_wait}</span>
+          <span>skipped {stage.counters.skipped}</span>
+        </div>
+      </details>
       <div className="workspace-stage-content">
         <div>
           <h3>Registered JSON files</h3>
@@ -1238,15 +1307,10 @@ function StageTreePanel({
                 <thead>
                   <tr>
                     <th>Select</th>
-                    <th>Entity / file</th>
-                    <th>Path</th>
-                    <th>Runtime</th>
-                    <th>File status</th>
+                    <th>Entity / artifact</th>
+                    <th>S3 key / path</th>
+                    <th>Status</th>
                     <th>Validation</th>
-                    <th>Presence</th>
-                    <th>Copy</th>
-                    <th>Checksum</th>
-                    <th>Updated</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
@@ -1279,18 +1343,13 @@ function StageTreePanel({
                             <span className="muted">file #{file.entity_file_id}</span>
                             <span className="muted">{isS3 ? "s3 pointer" : file.storage_provider}</span>
                             {file.artifact_id ? <span className="muted">artifact {file.artifact_id}</span> : null}
-                            {file.relation_to_source ? <span className="muted">{file.relation_to_source}</span> : null}
-                            {file.producer_run_id ? <span className="muted">run {file.producer_run_id}</span> : null}
                           </div>
                         </td>
                         <td>
                           <div className="stacked-cell">
-                            <code>{file.file_path}</code>
-                            {isS3 ? (
-                              <>
-                                <span className="muted">bucket {file.bucket ?? "unknown"}</span>
-                                <span className="muted">key {file.key ?? "unknown"}</span>
-                              </>
+                            <code>{isS3 ? file.key ?? file.file_path : file.file_path}</code>
+                            {file.validation_errors[0] ? (
+                              <span className="error-text">{file.validation_errors[0].message}</span>
                             ) : null}
                           </div>
                         </td>
@@ -1302,44 +1361,8 @@ function StageTreePanel({
                           )}
                         </td>
                         <td>
-                          <StatusBadge status={file.file_status} />
-                        </td>
-                        <td>
                           <StatusBadge status={file.validation_status} />
                         </td>
-                        <td>
-                          {isS3 ? (
-                            <div className="stacked-cell">
-                              <span>S3 pointer</span>
-                              <span className="muted">
-                                {file.file_exists ? "registered" : `missing since ${formatDateTime(file.missing_since)}`}
-                              </span>
-                            </div>
-                          ) : file.file_exists ? (
-                            "Present"
-                          ) : (
-                            `Missing since ${formatDateTime(file.missing_since)}`
-                          )}
-                        </td>
-                        <td>
-                          {file.is_managed_copy ? (
-                            <div className="stacked-cell">
-                              <StatusBadge status="managed_copy" />
-                              <span className="muted">
-                                from {file.copy_source_stage_id ?? "unknown"} #{file.copy_source_file_id ?? "?"}
-                              </span>
-                            </div>
-                          ) : (
-                            "Original/observed"
-                          )}
-                        </td>
-                        <td>
-                          <div className="stacked-cell">
-                            <code>{shortChecksum(file.checksum)}</code>
-                            <span className="muted">{file.file_size} bytes</span>
-                          </div>
-                        </td>
-                        <td>{formatDateTime(file.updated_at)}</td>
                         <td>
                           <div className="button-row">
                             <button type="button" className="button secondary" onClick={() => onSelectFile(file.entity_file_id)}>

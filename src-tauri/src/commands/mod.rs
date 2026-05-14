@@ -7,19 +7,19 @@ use crate::database;
 use crate::discovery;
 use crate::domain::{
     AppEventsResult, BootstrapResult, CommandErrorInfo, ConfigValidationIssue,
-    CreateS3StageRequest, CreateS3StageResult, DashboardOverviewResult, EntityDetailResult,
-    EntityFilesResult, EntityListQuery, EntityListResult, FileCopyResult,
+    CreateS3StageRequest, CreateS3StageResult, CreateWorkspaceRequest, DashboardOverviewResult,
+    EntityDetailResult, EntityFilesResult, EntityListQuery, EntityListResult, FileCopyResult,
     ManualEntityStageActionResult, OpenEntityPathPayload, OpenEntityPathResult,
     PipelineConfigDraft, PipelineEditorStateResult, ReconcileStuckTasksResult,
     RegisterS3SourceArtifactPayload, RegisterS3SourceArtifactRequest,
     RegisterS3SourceArtifactResult, RunDueTasksResult, RunEntityStageResult,
     RunPipelineWavesResult, RunSelectedPipelineWavesRequest, RunSelectedPipelineWavesResult,
-    RuntimeSummaryResult, S3ReconciliationResult, SaveEntityFileJsonResult,
+    RuntimeSummaryResult, S3ReconciliationResult, S3StageMutationResult, SaveEntityFileJsonResult,
     SavePipelineConfigResult, ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult,
-    StageRunOutputsResult, StageRunsResult, UpdateStageNextStageRequest,
-    UpdateStageNextStageResult, ValidatePipelineConfigDraftResult, ValidationSeverity,
-    WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceRegistryEntryResult,
-    WorkspaceRegistryListResult,
+    StageRunOutputsResult, StageRunsResult, UpdateS3StageRequest, UpdateStageNextStageRequest,
+    UpdateStageNextStageResult, UpdateWorkspaceRequest, ValidatePipelineConfigDraftResult,
+    ValidationSeverity, WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceMutationResult,
+    WorkspaceRegistryEntryResult, WorkspaceRegistryListResult,
 };
 use crate::executor;
 use crate::file_open::{self, OpenEntityPathKind};
@@ -35,8 +35,8 @@ pub fn initialize_workdir(path: String) -> BootstrapResult {
 }
 
 #[tauri::command]
-pub fn list_registered_workspaces() -> WorkspaceRegistryListResult {
-    match services::workspaces::list_workspace_descriptors() {
+pub fn list_registered_workspaces(include_archived: Option<bool>) -> WorkspaceRegistryListResult {
+    match services::workspaces::list_workspace_descriptors(include_archived.unwrap_or(false)) {
         Ok(workspaces) => WorkspaceRegistryListResult {
             workspaces,
             errors: Vec::new(),
@@ -44,6 +44,65 @@ pub fn list_registered_workspaces() -> WorkspaceRegistryListResult {
         Err(message) => WorkspaceRegistryListResult {
             workspaces: Vec::new(),
             errors: vec![command_error("workspace_registry_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn create_registered_workspace(input: CreateWorkspaceRequest) -> WorkspaceMutationResult {
+    match services::workspaces::create_workspace(&input) {
+        Ok(payload) => WorkspaceMutationResult {
+            payload: Some(payload),
+            errors: Vec::new(),
+        },
+        Err(message) => WorkspaceMutationResult {
+            payload: None,
+            errors: vec![command_error("create_workspace_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn update_registered_workspace(
+    workspace_id: String,
+    input: UpdateWorkspaceRequest,
+) -> WorkspaceMutationResult {
+    match services::workspaces::update_workspace(&workspace_id, &input) {
+        Ok(payload) => WorkspaceMutationResult {
+            payload: Some(payload),
+            errors: Vec::new(),
+        },
+        Err(message) => WorkspaceMutationResult {
+            payload: None,
+            errors: vec![command_error("update_workspace_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn delete_registered_workspace(workspace_id: String) -> WorkspaceMutationResult {
+    match services::workspaces::archive_or_delete_workspace(&workspace_id) {
+        Ok(payload) => WorkspaceMutationResult {
+            payload: Some(payload),
+            errors: Vec::new(),
+        },
+        Err(message) => WorkspaceMutationResult {
+            payload: None,
+            errors: vec![command_error("delete_workspace_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn restore_registered_workspace(workspace_id: String) -> WorkspaceMutationResult {
+    match services::workspaces::restore_workspace(&workspace_id) {
+        Ok(payload) => WorkspaceMutationResult {
+            payload: Some(payload),
+            errors: Vec::new(),
+        },
+        Err(message) => WorkspaceMutationResult {
+            payload: None,
+            errors: vec![command_error("restore_workspace_failed", message, None)],
         },
     }
 }
@@ -938,6 +997,52 @@ pub fn create_s3_stage(workspace_id: String, input: CreateS3StageRequest) -> Cre
         Err(message) => CreateS3StageResult {
             payload: None,
             errors: vec![command_error("create_s3_stage_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn update_s3_stage(
+    workspace_id: String,
+    stage_id: String,
+    input: UpdateS3StageRequest,
+) -> S3StageMutationResult {
+    match services::pipeline::update_s3_stage_for_workspace(&workspace_id, &stage_id, &input) {
+        Ok(payload) => S3StageMutationResult {
+            payload: Some(payload),
+            errors: Vec::new(),
+        },
+        Err(message) => S3StageMutationResult {
+            payload: None,
+            errors: vec![command_error("update_s3_stage_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn delete_s3_stage(workspace_id: String, stage_id: String) -> S3StageMutationResult {
+    match services::pipeline::archive_or_delete_stage_for_workspace(&workspace_id, &stage_id) {
+        Ok(payload) => S3StageMutationResult {
+            payload: Some(payload),
+            errors: Vec::new(),
+        },
+        Err(message) => S3StageMutationResult {
+            payload: None,
+            errors: vec![command_error("delete_s3_stage_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn restore_s3_stage(workspace_id: String, stage_id: String) -> S3StageMutationResult {
+    match services::pipeline::restore_stage_for_workspace(&workspace_id, &stage_id) {
+        Ok(payload) => S3StageMutationResult {
+            payload: Some(payload),
+            errors: Vec::new(),
+        },
+        Err(message) => S3StageMutationResult {
+            payload: None,
+            errors: vec![command_error("restore_s3_stage_failed", message, None)],
         },
     }
 }

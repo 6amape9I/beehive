@@ -1,11 +1,29 @@
 workspaces:
-  - id: smoke
-    name: Smoke Test Workspace
-    provider: s3
-    bucket: steos-s3-data
-    workspace_prefix: beehive-smoke/test_workflow
-    region: ru-1
-    endpoint: https://s3.ru-1.storage.selcloud.ru
-    workdir_path: /tmp/beehive-web-workspaces/smoke
-    pipeline_path: /tmp/beehive-web-workspaces/smoke/pipeline.yaml
-    database_path: /tmp/beehive-web-workspaces/smoke/app.db
+- id: smoke
+  name: Smoke Test Workspace
+  provider: s3
+  bucket: steos-s3-data
+  workspace_prefix: beehive-smoke/test_workflow
+  region: ru-1
+  endpoint: https://s3.ru-1.storage.selcloud.ru
+  workdir_path: /tmp/beehive-web-workspaces/smoke
+  pipeline_path: /tmp/beehive-web-workspaces/smoke/pipeline.yaml
+  database_path: /tmp/beehive-web-workspaces/smoke/app.db
+  is_archived: false
+  created_at: null
+  updated_at: null
+  archived_at: null
+- id: pilot_test
+  name: pilot_test
+  provider: s3
+  bucket: steos-s3-data
+  workspace_prefix: pilot
+  region: ru-1
+  endpoint: https://s3.ru-1.storage.selcloud.ru
+  workdir_path: /tmp/beehive-web-workspaces/pilot_test
+  pipeline_path: /tmp/beehive-web-workspaces/pilot_test/pipeline.yaml
+  database_path: /tmp/beehive-web-workspaces/pilot_test/app.db
+  is_archived: false
+  created_at: 2026-05-14T09:14:33.666896620+00:00
+  updated_at: 2026-05-14T09:14:33.666896620+00:00
+  archived_at: null

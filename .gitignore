@@ -28,3 +28,8 @@ test-workdirs/
 *.sqlite
 *.sqlite3
 *.tsbuildinfo
+/for_n8n_updated_by_article_status.zip
+/for_n8n_updated_selected_50_mark_down_text.zip
+/for_n8n_updated_selected_50_original_filenames/
+/for_n8n_updated_selected_50_original_filenames.zip
+/prepared_updated_raw/

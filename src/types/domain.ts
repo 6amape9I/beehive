@@ -222,6 +222,11 @@ export interface WorkspaceDescriptor {
   workspace_prefix: string | null;
   region: string | null;
   endpoint: string | null;
+  stage_count: number;
+  is_archived: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+  archived_at: string | null;
 }
 
 export interface WorkspaceRegistryListResult {
@@ -231,6 +236,35 @@ export interface WorkspaceRegistryListResult {
 
 export interface WorkspaceRegistryEntryResult {
   workspace: WorkspaceDescriptor | null;
+  errors: CommandErrorInfo[];
+}
+
+export interface CreateWorkspaceRequest {
+  id?: string | null;
+  name: string;
+  bucket: string;
+  workspace_prefix: string;
+  region?: string | null;
+  endpoint?: string | null;
+}
+
+export interface UpdateWorkspaceRequest {
+  name?: string | null;
+  bucket?: string | null;
+  workspace_prefix?: string | null;
+  region?: string | null;
+  endpoint?: string | null;
+}
+
+export interface WorkspaceMutationPayload {
+  workspace: WorkspaceDescriptor | null;
+  hard_deleted: boolean;
+  archived: boolean;
+  backup_path: string | null;
+}
+
+export interface WorkspaceMutationResult {
+  payload: WorkspaceMutationPayload | null;
   errors: CommandErrorInfo[];
 }
 
@@ -685,6 +719,28 @@ export interface CreateS3StageResult {
   errors: CommandErrorInfo[];
 }
 
+export interface UpdateS3StageRequest {
+  workflow_url?: string | null;
+  next_stage?: string | null;
+  max_attempts?: number | null;
+  retry_delay_sec?: number | null;
+  allow_empty_outputs?: boolean | null;
+}
+
+export interface S3StageMutationPayload {
+  stage: StageDefinition | null;
+  route_hints: S3StageRouteHints | null;
+  hard_deleted: boolean;
+  archived: boolean;
+  restored: boolean;
+  backup_path: string | null;
+}
+
+export interface S3StageMutationResult {
+  payload: S3StageMutationPayload | null;
+  errors: CommandErrorInfo[];
+}
+
 export interface UpdateStageNextStageRequest {
   next_stage: string | null;
 }
@@ -801,7 +857,11 @@ export interface WorkspaceStageTree {
   storage_provider: StorageProvider;
   output_folder: string | null;
   workflow_url: string | null;
+  max_attempts: number;
+  retry_delay_sec: number;
   next_stage: string | null;
+  save_path_aliases: string[];
+  allow_empty_outputs: boolean;
   is_active: boolean;
   archived_at: string | null;
   folder_path: string;

@@ -799,6 +799,19 @@ textarea.compact-textarea {
   margin-top: 14px;
 }
 
+.diagnostics-block {
+  margin-top: 14px;
+}
+
+.diagnostics-block summary,
+.route-hints summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  cursor: pointer;
+}
+
 .route-alias-list {
   display: flex;
   flex-wrap: wrap;

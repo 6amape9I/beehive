@@ -22,6 +22,7 @@ import type {
   RunSelectedPipelineWavesResult,
   RuntimeSummaryResult,
   S3ReconciliationResult,
+  S3StageMutationResult,
   SaveEntityFileJsonResult,
   SavePipelineConfigResult,
   ScanWorkspaceResult,
@@ -31,6 +32,7 @@ import type {
   StageRunsResult,
   UpdateStageNextStageRequest,
   UpdateStageNextStageResult,
+  UpdateS3StageRequest,
   ValidatePipelineConfigDraftResult,
   WorkspaceExplorerResult,
 } from "../types/domain";
@@ -101,6 +103,28 @@ export function createS3Stage(
   input: CreateS3StageRequest,
 ): Promise<CreateS3StageResult> {
   return apiClient.createS3Stage(workspaceId, input);
+}
+
+export function updateS3Stage(
+  workspaceId: string,
+  stageId: string,
+  input: UpdateS3StageRequest,
+): Promise<S3StageMutationResult> {
+  return apiClient.updateS3Stage(workspaceId, stageId, input);
+}
+
+export function deleteS3Stage(
+  workspaceId: string,
+  stageId: string,
+): Promise<S3StageMutationResult> {
+  return apiClient.deleteS3Stage(workspaceId, stageId);
+}
+
+export function restoreS3Stage(
+  workspaceId: string,
+  stageId: string,
+): Promise<S3StageMutationResult> {
+  return apiClient.restoreS3Stage(workspaceId, stageId);
 }
 
 export function updateStageNextStage(

@@ -216,7 +216,7 @@ fn handle_connection(mut stream: TcpStream, config: &ServerConfig) -> Result<(),
                 );
             }
         }
-        let response = http_api::handle_json_request(method, path, body);
+        let response = http_api::handle_json_request(method, target, body);
         let body = serde_json::to_string(&response.body)
             .map_err(|error| format!("Failed to serialize API response: {error}"))?;
         log_workspace_action(method, path, response.status_code);
@@ -406,7 +406,7 @@ fn extra_headers(
         ),
         (
             "Access-Control-Allow-Methods".to_string(),
-            "GET, POST, OPTIONS".to_string(),
+            "GET, POST, PATCH, DELETE, OPTIONS".to_string(),
         ),
         ("X-Content-Type-Options".to_string(), "nosniff".to_string()),
     ];

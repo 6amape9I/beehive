@@ -5,6 +5,7 @@ import type {
   BootstrapResult,
   CreateS3StageRequest,
   CreateS3StageResult,
+  CreateWorkspaceRequest,
   DashboardOverviewResult,
   EntityDetailResult,
   EntityFilesResult,
@@ -24,6 +25,7 @@ import type {
   RunSelectedPipelineWavesResult,
   RuntimeSummaryResult,
   S3ReconciliationResult,
+  S3StageMutationResult,
   SaveEntityFileJsonResult,
   SavePipelineConfigResult,
   ScanWorkspaceResult,
@@ -31,10 +33,13 @@ import type {
   StageListResult,
   StageRunOutputsResult,
   StageRunsResult,
+  UpdateS3StageRequest,
   UpdateStageNextStageRequest,
   UpdateStageNextStageResult,
+  UpdateWorkspaceRequest,
   ValidatePipelineConfigDraftResult,
   WorkspaceExplorerResult,
+  WorkspaceMutationResult,
   WorkspaceRegistryEntryResult,
   WorkspaceRegistryListResult,
 } from "../../types/domain";
@@ -50,11 +55,31 @@ export const tauriClient: BeehiveApiClient = {
   reloadWorkdir(path: string): Promise<BootstrapResult> {
     return invoke<BootstrapResult>("reload_workdir", { path });
   },
-  listRegisteredWorkspaces(): Promise<WorkspaceRegistryListResult> {
-    return invoke<WorkspaceRegistryListResult>("list_registered_workspaces");
+  listRegisteredWorkspaces(includeArchived = false): Promise<WorkspaceRegistryListResult> {
+    return invoke<WorkspaceRegistryListResult>("list_registered_workspaces", {
+      includeArchived,
+    });
   },
   getRegisteredWorkspace(workspaceId: string): Promise<WorkspaceRegistryEntryResult> {
     return invoke<WorkspaceRegistryEntryResult>("get_registered_workspace", { workspaceId });
+  },
+  createRegisteredWorkspace(input: CreateWorkspaceRequest): Promise<WorkspaceMutationResult> {
+    return invoke<WorkspaceMutationResult>("create_registered_workspace", { input });
+  },
+  updateRegisteredWorkspace(
+    workspaceId: string,
+    input: UpdateWorkspaceRequest,
+  ): Promise<WorkspaceMutationResult> {
+    return invoke<WorkspaceMutationResult>("update_registered_workspace", {
+      workspaceId,
+      input,
+    });
+  },
+  deleteRegisteredWorkspace(workspaceId: string): Promise<WorkspaceMutationResult> {
+    return invoke<WorkspaceMutationResult>("delete_registered_workspace", { workspaceId });
+  },
+  restoreRegisteredWorkspace(workspaceId: string): Promise<WorkspaceMutationResult> {
+    return invoke<WorkspaceMutationResult>("restore_registered_workspace", { workspaceId });
   },
   openRegisteredWorkspace(workspaceId: string): Promise<BootstrapResult> {
     return invoke<BootstrapResult>("open_registered_workspace", { workspaceId });
@@ -123,6 +148,19 @@ export const tauriClient: BeehiveApiClient = {
     input: CreateS3StageRequest,
   ): Promise<CreateS3StageResult> {
     return invoke<CreateS3StageResult>("create_s3_stage", { workspaceId, input });
+  },
+  updateS3Stage(
+    workspaceId: string,
+    stageId: string,
+    input: UpdateS3StageRequest,
+  ): Promise<S3StageMutationResult> {
+    return invoke<S3StageMutationResult>("update_s3_stage", { workspaceId, stageId, input });
+  },
+  deleteS3Stage(workspaceId: string, stageId: string): Promise<S3StageMutationResult> {
+    return invoke<S3StageMutationResult>("delete_s3_stage", { workspaceId, stageId });
+  },
+  restoreS3Stage(workspaceId: string, stageId: string): Promise<S3StageMutationResult> {
+    return invoke<S3StageMutationResult>("restore_s3_stage", { workspaceId, stageId });
   },
   updateStageNextStage(
     workspaceId: string,

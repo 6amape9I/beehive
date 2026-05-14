@@ -4,10 +4,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::domain::{
-    CreateS3StageRequest, RegisterS3SourceArtifactRequest, RunDueTasksResult,
-    RunPipelineWavesResult, RunSelectedPipelineWavesRequest, RunSelectedPipelineWavesResult,
-    S3ReconciliationResult, StageRunOutputsResult, UpdateStageNextStageRequest,
-    UpdateStageNextStageResult, WorkspaceRegistryEntryResult, WorkspaceRegistryListResult,
+    CreateS3StageRequest, CreateWorkspaceRequest, RegisterS3SourceArtifactRequest,
+    RunDueTasksResult, RunPipelineWavesResult, RunSelectedPipelineWavesRequest,
+    RunSelectedPipelineWavesResult, S3ReconciliationResult, S3StageMutationResult,
+    StageRunOutputsResult, UpdateS3StageRequest, UpdateStageNextStageRequest,
+    UpdateStageNextStageResult, UpdateWorkspaceRequest, WorkspaceMutationResult,
+    WorkspaceRegistryEntryResult, WorkspaceRegistryListResult,
 };
 use crate::services::{artifacts, pipeline, runtime, selected_runner, workspaces};
 
@@ -41,7 +43,8 @@ fn route_json_request(
     path: &str,
     body: Option<&str>,
 ) -> Result<HttpApiResponse, (u16, &'static str, String)> {
-    let parts = path
+    let (path_only, query) = split_path_query(path);
+    let parts = path_only
         .trim_matches('/')
         .split('/')
         .filter(|part| !part.is_empty())
@@ -51,7 +54,8 @@ fn route_json_request(
         return Ok(json_response(200, json!({ "status": "ok" })));
     }
     if method == "GET" && parts == ["api", "workspaces"] {
-        let result = match workspaces::list_workspace_descriptors() {
+        let include_archived = query_bool(query, "include_archived").unwrap_or(false);
+        let result = match workspaces::list_workspace_descriptors(include_archived) {
             Ok(workspaces) => WorkspaceRegistryListResult {
                 workspaces,
                 errors: Vec::new(),
@@ -59,6 +63,20 @@ fn route_json_request(
             Err(message) => WorkspaceRegistryListResult {
                 workspaces: Vec::new(),
                 errors: vec![command_error("workspace_registry_failed", message)],
+            },
+        };
+        return Ok(json_response(200, serde_json::to_value(result).unwrap()));
+    }
+    if method == "POST" && parts == ["api", "workspaces"] {
+        let input = parse_body::<CreateWorkspaceRequest>(body)?;
+        let result = match workspaces::create_workspace(&input) {
+            Ok(payload) => WorkspaceMutationResult {
+                payload: Some(payload),
+                errors: Vec::new(),
+            },
+            Err(message) => WorkspaceMutationResult {
+                payload: None,
+                errors: vec![command_error("create_workspace_failed", message)],
             },
         };
         return Ok(json_response(200, serde_json::to_value(result).unwrap()));
@@ -75,6 +93,46 @@ fn route_json_request(
                     Err(message) => WorkspaceRegistryEntryResult {
                         workspace: None,
                         errors: vec![command_error("workspace_not_found", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("PATCH", ["api", "workspaces", _]) => {
+                let input = parse_body::<UpdateWorkspaceRequest>(body)?;
+                let result = match workspaces::update_workspace(workspace_id, &input) {
+                    Ok(payload) => WorkspaceMutationResult {
+                        payload: Some(payload),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => WorkspaceMutationResult {
+                        payload: None,
+                        errors: vec![command_error("update_workspace_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("DELETE", ["api", "workspaces", _]) => {
+                let result = match workspaces::archive_or_delete_workspace(workspace_id) {
+                    Ok(payload) => WorkspaceMutationResult {
+                        payload: Some(payload),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => WorkspaceMutationResult {
+                        payload: None,
+                        errors: vec![command_error("delete_workspace_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("POST", ["api", "workspaces", _, "restore"]) => {
+                let result = match workspaces::restore_workspace(workspace_id) {
+                    Ok(payload) => WorkspaceMutationResult {
+                        payload: Some(payload),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => WorkspaceMutationResult {
+                        payload: None,
+                        errors: vec![command_error("restore_workspace_failed", message)],
                     },
                 };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
@@ -168,6 +226,48 @@ fn route_json_request(
                 };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
             }
+            ("PATCH", ["api", "workspaces", _, "stages", stage_id]) => {
+                let input = parse_body::<UpdateS3StageRequest>(body)?;
+                let result =
+                    match pipeline::update_s3_stage_for_workspace(workspace_id, stage_id, &input) {
+                        Ok(payload) => S3StageMutationResult {
+                            payload: Some(payload),
+                            errors: Vec::new(),
+                        },
+                        Err(message) => S3StageMutationResult {
+                            payload: None,
+                            errors: vec![command_error("update_s3_stage_failed", message)],
+                        },
+                    };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("DELETE", ["api", "workspaces", _, "stages", stage_id]) => {
+                let result =
+                    match pipeline::archive_or_delete_stage_for_workspace(workspace_id, stage_id) {
+                        Ok(payload) => S3StageMutationResult {
+                            payload: Some(payload),
+                            errors: Vec::new(),
+                        },
+                        Err(message) => S3StageMutationResult {
+                            payload: None,
+                            errors: vec![command_error("delete_s3_stage_failed", message)],
+                        },
+                    };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("POST", ["api", "workspaces", _, "stages", stage_id, "restore"]) => {
+                let result = match pipeline::restore_stage_for_workspace(workspace_id, stage_id) {
+                    Ok(payload) => S3StageMutationResult {
+                        payload: Some(payload),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => S3StageMutationResult {
+                        payload: None,
+                        errors: vec![command_error("restore_s3_stage_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
             ("POST", ["api", "workspaces", _, "stages", stage_id, "next-stage"]) => {
                 let input = parse_body::<UpdateStageNextStageRequest>(body)?;
                 let result = match pipeline::update_stage_next_stage_for_workspace(
@@ -213,6 +313,24 @@ fn route_json_request(
             format!("No route for {method} {path}"),
         ))
     }
+}
+
+fn split_path_query(path: &str) -> (&str, Option<&str>) {
+    match path.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (path, None),
+    }
+}
+
+fn query_bool(query: Option<&str>, key: &str) -> Option<bool> {
+    let query = query?;
+    for pair in query.split('&') {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if name == key {
+            return Some(matches!(value, "true" | "1" | "yes"));
+        }
+    }
+    None
 }
 
 fn parse_body<T: for<'de> Deserialize<'de>>(
@@ -302,6 +420,81 @@ mod tests {
         let response = handle_json_request("GET", "/api/workspaces", None);
         assert_eq!(response.status_code, 200);
         assert!(response.body["workspaces"].is_array());
+    }
+
+    #[test]
+    fn workspace_crud_routes_parse_request_bodies() {
+        let create = handle_json_request(
+            "POST",
+            "/api/workspaces",
+            Some(
+                r#"{"id":"bad/path","name":"Pilot","bucket":"bucket","workspace_prefix":"prefix","region":"ru-1","endpoint":"https://s3.example"}"#,
+            ),
+        );
+        assert_eq!(create.status_code, 200);
+        assert_eq!(
+            create.body["errors"][0]["code"].as_str(),
+            Some("create_workspace_failed")
+        );
+
+        let update = handle_json_request(
+            "PATCH",
+            "/api/workspaces/missing",
+            Some(r#"{"name":"Updated","endpoint":"https://s3.example"}"#),
+        );
+        assert_eq!(update.status_code, 200);
+        assert_eq!(
+            update.body["errors"][0]["code"].as_str(),
+            Some("update_workspace_failed")
+        );
+
+        let delete = handle_json_request("DELETE", "/api/workspaces/missing", None);
+        assert_eq!(delete.status_code, 200);
+        assert_eq!(
+            delete.body["errors"][0]["code"].as_str(),
+            Some("delete_workspace_failed")
+        );
+
+        let restore = handle_json_request("POST", "/api/workspaces/missing/restore", None);
+        assert_eq!(restore.status_code, 200);
+        assert_eq!(
+            restore.body["errors"][0]["code"].as_str(),
+            Some("restore_workspace_failed")
+        );
+    }
+
+    #[test]
+    fn stage_crud_routes_parse_request_bodies() {
+        let update = handle_json_request(
+            "PATCH",
+            "/api/workspaces/missing/stages/stage_a",
+            Some(
+                r#"{"workflow_url":"https://n8n.example/webhook/a","max_attempts":5,"retry_delay_sec":90,"allow_empty_outputs":true,"next_stage":null}"#,
+            ),
+        );
+        assert_eq!(update.status_code, 200);
+        assert_eq!(
+            update.body["errors"][0]["code"].as_str(),
+            Some("update_s3_stage_failed")
+        );
+
+        let delete = handle_json_request("DELETE", "/api/workspaces/missing/stages/stage_a", None);
+        assert_eq!(delete.status_code, 200);
+        assert_eq!(
+            delete.body["errors"][0]["code"].as_str(),
+            Some("delete_s3_stage_failed")
+        );
+
+        let restore = handle_json_request(
+            "POST",
+            "/api/workspaces/missing/stages/stage_a/restore",
+            None,
+        );
+        assert_eq!(restore.status_code, 200);
+        assert_eq!(
+            restore.body["errors"][0]["code"].as_str(),
+            Some("restore_s3_stage_failed")
+        );
     }
 
     #[test]
