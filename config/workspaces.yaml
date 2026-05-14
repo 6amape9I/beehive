@@ -37,10 +37,10 @@ workspaces:
   workdir_path: /tmp/beehive-web-workspaces/new_dir
   pipeline_path: /tmp/beehive-web-workspaces/new_dir/pipeline.yaml
   database_path: /tmp/beehive-web-workspaces/new_dir/app.db
-  is_archived: false
+  is_archived: true
   created_at: 2026-05-14T10:31:08.379561222+00:00
-  updated_at: 2026-05-14T10:31:08.379561222+00:00
-  archived_at: null
+  updated_at: 2026-05-14T12:34:43.510341695+00:00
+  archived_at: 2026-05-14T12:34:43.510341695+00:00
 - id: mvbm
   name: mvbm
   provider: s3
@@ -54,4 +54,18 @@ workspaces:
   is_archived: false
   created_at: 2026-05-14T11:51:16.339320737+00:00
   updated_at: 2026-05-14T11:51:16.339320737+00:00
+  archived_at: null
+- id: full_test
+  name: full_test
+  provider: s3
+  bucket: steos-s3-data
+  workspace_prefix: full_test
+  region: ru-1
+  endpoint: https://s3.ru-1.storage.selcloud.ru
+  workdir_path: /tmp/beehive-web-workspaces/full_test
+  pipeline_path: /tmp/beehive-web-workspaces/full_test/pipeline.yaml
+  database_path: /tmp/beehive-web-workspaces/full_test/app.db
+  is_archived: false
+  created_at: 2026-05-14T12:34:56.540000543+00:00
+  updated_at: 2026-05-14T12:34:56.540000543+00:00
   archived_at: null
