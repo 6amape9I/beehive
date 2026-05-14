@@ -91,6 +91,15 @@ export function EntityFilters({
             ))}
           </select>
         </div>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={!!query.include_archived}
+            disabled={disabled}
+            onChange={(event) => onChange({ include_archived: event.target.checked, page: 1 })}
+          />
+          Show archived
+        </label>
       </div>
     </section>
   );

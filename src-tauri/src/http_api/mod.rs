@@ -4,14 +4,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::domain::{
-    CreateS3StageRequest, CreateWorkspaceRequest, RegisterS3SourceArtifactRequest,
-    RunDueTasksResult, RunPipelineWavesResult, RunSelectedPipelineWavesRequest,
-    RunSelectedPipelineWavesResult, S3ReconciliationResult, S3StageMutationResult,
-    StageRunOutputsResult, UpdateS3StageRequest, UpdateStageNextStageRequest,
+    CreateS3StageRequest, CreateWorkspaceRequest, EntityDetailResult, EntityListQuery,
+    EntityListResult, EntityMutationResult, ImportJsonBatchRequest, ImportJsonBatchResult,
+    RegisterS3SourceArtifactRequest, RunDueTasksResult, RunPipelineWavesResult,
+    RunSelectedPipelineWavesRequest, RunSelectedPipelineWavesResult, S3ReconciliationResult,
+    S3StageMutationResult, StageRunOutputsResult, UpdateEntityRequest, UpdateS3StageRequest,
     UpdateStageNextStageResult, UpdateWorkspaceRequest, WorkspaceMutationResult,
     WorkspaceRegistryEntryResult, WorkspaceRegistryListResult,
 };
-use crate::services::{artifacts, pipeline, runtime, selected_runner, workspaces};
+use crate::services::{artifacts, entities, pipeline, runtime, selected_runner, workspaces};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HttpApiResponse {
@@ -160,6 +161,90 @@ fn route_json_request(
                 let result = runtime::register_s3_source_artifact(workspace_id, &input);
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
             }
+            ("GET", ["api", "workspaces", _, "entities"]) => {
+                let query = entity_list_query_from_query(query);
+                let result = match entities::list_entities_for_workspace(workspace_id, query) {
+                    Ok(result) => result,
+                    Err(message) => EntityListResult {
+                        entities: Vec::new(),
+                        total: 0,
+                        page: 1,
+                        page_size: 50,
+                        available_stages: Vec::new(),
+                        available_statuses: Vec::new(),
+                        errors: vec![command_error("list_entities_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("POST", ["api", "workspaces", _, "entities", "import-json-batch"]) => {
+                let input = parse_body::<ImportJsonBatchRequest>(body)?;
+                let result = match entities::import_json_batch_for_workspace(workspace_id, &input) {
+                    Ok(payload) => ImportJsonBatchResult {
+                        payload: Some(payload),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => ImportJsonBatchResult {
+                        payload: None,
+                        errors: vec![command_error("import_json_batch_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("GET", ["api", "workspaces", _, "entities", entity_id]) => {
+                let result = match entities::get_entity_for_workspace(workspace_id, entity_id) {
+                    Ok(detail) => entities::entity_detail_result(
+                        detail,
+                        format!("Entity '{entity_id}' was not found."),
+                    ),
+                    Err(message) => EntityDetailResult {
+                        detail: None,
+                        errors: vec![command_error("get_entity_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("PATCH", ["api", "workspaces", _, "entities", entity_id]) => {
+                let input = parse_body::<UpdateEntityRequest>(body)?;
+                let result =
+                    match entities::update_entity_for_workspace(workspace_id, entity_id, &input) {
+                        Ok(payload) => entities::entity_mutation_result(
+                            payload,
+                            format!("Entity '{entity_id}' was not found."),
+                        ),
+                        Err(message) => EntityMutationResult {
+                            payload: None,
+                            errors: vec![command_error("update_entity_failed", message)],
+                        },
+                    };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("DELETE", ["api", "workspaces", _, "entities", entity_id]) => {
+                let result = match entities::archive_entity_for_workspace(workspace_id, entity_id) {
+                    Ok(payload) => entities::entity_mutation_result(
+                        payload,
+                        format!("Entity '{entity_id}' was not found."),
+                    ),
+                    Err(message) => EntityMutationResult {
+                        payload: None,
+                        errors: vec![command_error("archive_entity_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("POST", ["api", "workspaces", _, "entities", entity_id, "restore"]) => {
+                let result = match entities::restore_entity_for_workspace(workspace_id, entity_id) {
+                    Ok(payload) => entities::entity_mutation_result(
+                        payload,
+                        format!("Entity '{entity_id}' was not found."),
+                    ),
+                    Err(message) => EntityMutationResult {
+                        payload: None,
+                        errors: vec![command_error("restore_entity_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
             ("POST", ["api", "workspaces", _, "run-small-batch"]) => {
                 let input = parse_optional_body::<RunSmallBatchBody>(body)?;
                 let result =
@@ -268,21 +353,14 @@ fn route_json_request(
                 };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
             }
-            ("POST", ["api", "workspaces", _, "stages", stage_id, "next-stage"]) => {
-                let input = parse_body::<UpdateStageNextStageRequest>(body)?;
-                let result = match pipeline::update_stage_next_stage_for_workspace(
-                    workspace_id,
-                    stage_id,
-                    &input,
-                ) {
-                    Ok(payload) => UpdateStageNextStageResult {
-                        payload: Some(payload),
-                        errors: Vec::new(),
-                    },
-                    Err(message) => UpdateStageNextStageResult {
-                        payload: None,
-                        errors: vec![command_error("update_stage_next_stage_failed", message)],
-                    },
+            ("POST", ["api", "workspaces", _, "stages", _, "next-stage"]) => {
+                let result = UpdateStageNextStageResult {
+                    payload: None,
+                    errors: vec![command_error(
+                        "next_stage_deprecated",
+                        "next_stage is deprecated. Route outputs through n8n save_path."
+                            .to_string(),
+                    )],
                 };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
             }
@@ -331,6 +409,40 @@ fn query_bool(query: Option<&str>, key: &str) -> Option<bool> {
         }
     }
     None
+}
+
+fn query_param(query: Option<&str>, key: &str) -> Option<String> {
+    let query = query?;
+    for pair in query.split('&') {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if name == key {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn query_u64(query: Option<&str>, key: &str) -> Option<u64> {
+    query_param(query, key).and_then(|value| value.parse::<u64>().ok())
+}
+
+fn entity_list_query_from_query(query: Option<&str>) -> EntityListQuery {
+    EntityListQuery {
+        search: query_param(query, "search"),
+        stage_id: query_param(query, "stage_id"),
+        status: query_param(query, "status"),
+        include_archived: query_bool(query, "include_archived"),
+        limit: query_u64(query, "limit"),
+        offset: query_u64(query, "offset"),
+        page: query_u64(query, "page"),
+        page_size: query_u64(query, "page_size"),
+        sort_by: query_param(query, "sort_by"),
+        sort_direction: query_param(query, "sort_direction"),
+        ..EntityListQuery::default()
+    }
 }
 
 fn parse_body<T: for<'de> Deserialize<'de>>(
@@ -494,6 +606,74 @@ mod tests {
         assert_eq!(
             restore.body["errors"][0]["code"].as_str(),
             Some("restore_s3_stage_failed")
+        );
+
+        let next_stage = handle_json_request(
+            "POST",
+            "/api/workspaces/missing/stages/stage_a/next-stage",
+            Some(r#"{"next_stage":"stage_b"}"#),
+        );
+        assert_eq!(next_stage.status_code, 200);
+        assert_eq!(
+            next_stage.body["errors"][0]["code"].as_str(),
+            Some("next_stage_deprecated")
+        );
+    }
+
+    #[test]
+    fn entity_crud_routes_parse_request_bodies() {
+        let list = handle_json_request(
+            "GET",
+            "/api/workspaces/missing/entities?include_archived=true&limit=5&offset=0",
+            None,
+        );
+        assert_eq!(list.status_code, 200);
+        assert_eq!(
+            list.body["errors"][0]["code"].as_str(),
+            Some("list_entities_failed")
+        );
+
+        let update = handle_json_request(
+            "PATCH",
+            "/api/workspaces/missing/entities/entity-1",
+            Some(r#"{"operator_note":"reviewed","display_name":"Entity One"}"#),
+        );
+        assert_eq!(update.status_code, 200);
+        assert_eq!(
+            update.body["errors"][0]["code"].as_str(),
+            Some("update_entity_failed")
+        );
+
+        let archive =
+            handle_json_request("DELETE", "/api/workspaces/missing/entities/entity-1", None);
+        assert_eq!(archive.status_code, 200);
+        assert_eq!(
+            archive.body["errors"][0]["code"].as_str(),
+            Some("archive_entity_failed")
+        );
+
+        let restore = handle_json_request(
+            "POST",
+            "/api/workspaces/missing/entities/entity-1/restore",
+            None,
+        );
+        assert_eq!(restore.status_code, 200);
+        assert_eq!(
+            restore.body["errors"][0]["code"].as_str(),
+            Some("restore_entity_failed")
+        );
+
+        let import = handle_json_request(
+            "POST",
+            "/api/workspaces/missing/entities/import-json-batch",
+            Some(
+                r#"{"stage_id":"raw","files":[{"file_name":"a.json","content":{"id":"a"}}],"options":{"overwrite_existing":false}}"#,
+            ),
+        );
+        assert_eq!(import.status_code, 200);
+        assert_eq!(
+            import.body["errors"][0]["code"].as_str(),
+            Some("import_json_batch_failed")
         );
     }
 

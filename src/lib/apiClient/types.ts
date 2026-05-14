@@ -9,7 +9,10 @@ import type {
   EntityFilesResult,
   EntityListQuery,
   EntityListResult,
+  EntityMutationResult,
   FileCopyResult,
+  ImportJsonBatchRequest,
+  ImportJsonBatchResult,
   ManualEntityStageActionResult,
   OpenEntityPathResult,
   PipelineConfigDraft,
@@ -34,6 +37,7 @@ import type {
   UpdateS3StageRequest,
   UpdateStageNextStageRequest,
   UpdateStageNextStageResult,
+  UpdateEntityRequest,
   UpdateWorkspaceRequest,
   ValidatePipelineConfigDraftResult,
   WorkspaceExplorerResult,
@@ -95,12 +99,25 @@ export interface BeehiveApiClient {
     input: UpdateStageNextStageRequest,
   ): Promise<UpdateStageNextStageResult>;
   listEntities(path: string, query?: EntityListQuery): Promise<EntityListResult>;
+  listWorkspaceEntities(workspaceId: string, query?: EntityListQuery): Promise<EntityListResult>;
   listEntityFiles(path: string, entityId?: string | null): Promise<EntityFilesResult>;
   getEntity(
     path: string,
     entityId: string,
     selectedFileId?: number | null,
   ): Promise<EntityDetailResult>;
+  getWorkspaceEntity(workspaceId: string, entityId: string): Promise<EntityDetailResult>;
+  updateWorkspaceEntity(
+    workspaceId: string,
+    entityId: string,
+    input: UpdateEntityRequest,
+  ): Promise<EntityMutationResult>;
+  archiveWorkspaceEntity(workspaceId: string, entityId: string): Promise<EntityMutationResult>;
+  restoreWorkspaceEntity(workspaceId: string, entityId: string): Promise<EntityMutationResult>;
+  importWorkspaceEntitiesJsonBatch(
+    workspaceId: string,
+    input: ImportJsonBatchRequest,
+  ): Promise<ImportJsonBatchResult>;
   createNextStageCopy(
     path: string,
     entityId: string,

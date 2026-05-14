@@ -7,6 +7,7 @@ use aws_config::BehaviorVersion;
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::config::Region;
+use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use tokio::runtime::Runtime;
 
@@ -75,6 +76,40 @@ impl AwsS3MetadataClient {
             client: Client::from_conf(config),
         })
     }
+
+    pub(crate) fn put_json_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        bytes: Vec<u8>,
+        metadata: HashMap<String, String>,
+    ) -> Result<S3ObjectMetadata, String> {
+        let size = bytes.len() as u64;
+        let output = self
+            .runtime
+            .block_on(
+                self.client
+                    .put_object()
+                    .bucket(bucket)
+                    .key(key)
+                    .content_type("application/json")
+                    .set_metadata(Some(metadata.clone()))
+                    .body(ByteStream::from(bytes))
+                    .send(),
+            )
+            .map_err(|error| format!("Failed to upload S3 object s3://{bucket}/{key}: {error}"))?;
+
+        Ok(S3ObjectMetadata {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            version_id: output.version_id().map(ToOwned::to_owned),
+            etag: output.e_tag().map(ToOwned::to_owned),
+            checksum_sha256: output.checksum_sha256().map(ToOwned::to_owned),
+            size: Some(size),
+            last_modified: None,
+            metadata,
+        })
+    }
 }
 
 impl S3MetadataClient for AwsS3MetadataClient {
@@ -127,12 +162,13 @@ impl S3MetadataClient for AwsS3MetadataClient {
         {
             Ok(output) => output,
             Err(error) => {
-                let message = error.to_string();
-                if is_not_found_error(&message) {
+                let display_message = error.to_string();
+                let debug_message = format!("{error:?}");
+                if is_not_found_error(&display_message) || is_not_found_error(&debug_message) {
                     return Ok(None);
                 }
                 return Err(format!(
-                    "Failed to head S3 object s3://{bucket}/{key}: {message}"
+                    "Failed to head S3 object s3://{bucket}/{key}: {display_message}; {debug_message}"
                 ));
             }
         };
@@ -167,6 +203,7 @@ fn is_not_found_error(message: &str) -> bool {
     normalized.contains("notfound")
         || normalized.contains("not found")
         || normalized.contains("no such key")
+        || normalized.contains("nosuchkey")
         || normalized.contains("status: 404")
         || normalized.contains("404")
 }
@@ -278,5 +315,13 @@ mod tests {
         );
         assert_eq!(trim_dotenv_value("'region-1'"), "region-1");
         assert_eq!(trim_dotenv_value("value # comment"), "value");
+    }
+
+    #[test]
+    fn not_found_detection_handles_sdk_debug_status() {
+        assert!(is_not_found_error(
+            "ServiceError { raw: Response { status: 404, body: SdkBody } }"
+        ));
+        assert!(is_not_found_error("NoSuchKey"));
     }
 }

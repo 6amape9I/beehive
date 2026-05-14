@@ -12,9 +12,9 @@ use crate::domain::{
     EntityFileRecord, EntityFilters, EntityListQuery, EntityRecord, EntityStageStateRecord,
     EntityTableRow, EntityTimelineItem, EntityValidationStatus, InvalidDiscoveryRecord,
     PipelineConfig, RuntimeSummary, StageDefinition, StageRecord, StageRunRecord, StageStatus,
-    StatusCount, StorageProvider, WorkspaceEntityTrail, WorkspaceEntityTrailEdge,
-    WorkspaceEntityTrailNode, WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceFileNode,
-    WorkspaceStageTree, WorkspaceStageTreeCounters,
+    StatusCount, StorageProvider, UpdateEntityRequest, WorkspaceEntityTrail,
+    WorkspaceEntityTrailEdge, WorkspaceEntityTrailNode, WorkspaceExplorerResult,
+    WorkspaceExplorerTotals, WorkspaceFileNode, WorkspaceStageTree, WorkspaceStageTreeCounters,
 };
 use crate::state_machine::{
     parse_status as parse_runtime_status, status_value as runtime_status_value,
@@ -27,7 +27,7 @@ pub(crate) use entities::{
     evaluate_entity_file_allowed_actions, record_entity_file_json_edit_rejected,
 };
 
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 
 pub(crate) struct PersistEntityFileInput {
     pub entity_id: String,
@@ -346,9 +346,11 @@ pub fn list_entity_table_page(
     query: &EntityListQuery,
 ) -> Result<EntityTablePage, String> {
     let connection = open_connection(path)?;
-    let page = query.page.unwrap_or(1).max(1);
-    let page_size = query.page_size.unwrap_or(50).clamp(1, 200);
-    let offset = (page - 1) * page_size;
+    let page_size = query.limit.or(query.page_size).unwrap_or(50).clamp(1, 200);
+    let offset = query
+        .offset
+        .unwrap_or_else(|| (query.page.unwrap_or(1).max(1) - 1) * page_size);
+    let page = (offset / page_size) + 1;
 
     let mut where_clauses = Vec::new();
     let mut values: Vec<SqlValue> = Vec::new();
@@ -360,14 +362,19 @@ pub fn list_entity_table_page(
         .filter(|value| !value.is_empty())
     {
         where_clauses.push(
-            "(LOWER(entity.entity_id) LIKE ? OR LOWER(COALESCE(entity.latest_file_path, '')) LIKE ? OR LOWER(COALESCE(latest_file.file_name, '')) LIKE ? OR LOWER(COALESCE(latest_file.payload_json, '')) LIKE ?)"
+            "(LOWER(entity.entity_id) LIKE ? OR LOWER(COALESCE(entity.display_name, '')) LIKE ? OR LOWER(COALESCE(entity.operator_note, '')) LIKE ? OR LOWER(COALESCE(entity.latest_file_path, '')) LIKE ? OR LOWER(COALESCE(latest_file.file_name, '')) LIKE ? OR LOWER(COALESCE(latest_file.payload_json, '')) LIKE ?)"
                 .to_string(),
         );
         let pattern = format!("%{}%", search.to_lowercase());
         values.push(SqlValue::Text(pattern.clone()));
         values.push(SqlValue::Text(pattern.clone()));
         values.push(SqlValue::Text(pattern.clone()));
+        values.push(SqlValue::Text(pattern.clone()));
+        values.push(SqlValue::Text(pattern.clone()));
         values.push(SqlValue::Text(pattern));
+    }
+    if !query.include_archived.unwrap_or(false) {
+        where_clauses.push("entity.is_archived = 0".to_string());
     }
     if let Some(stage_id) = query
         .stage_id
@@ -431,6 +438,10 @@ pub fn list_entity_table_page(
         r#"
         SELECT
             entity.entity_id,
+            entity.display_name,
+            entity.operator_note,
+            entity.is_archived,
+            entity.archived_at,
             entity.current_stage_id,
             COALESCE(state.status, entity.current_status) AS runtime_status,
             entity.latest_file_path,
@@ -1207,6 +1218,10 @@ pub(crate) fn find_entity_by_id(
             r#"
             SELECT
                 entity_id,
+                display_name,
+                operator_note,
+                is_archived,
+                archived_at,
                 current_stage_id,
                 current_status,
                 latest_file_path,
@@ -1225,6 +1240,89 @@ pub(crate) fn find_entity_by_id(
         )
         .optional()
         .map_err(|error| format!("Failed to load entity '{entity_id}': {error}"))
+}
+
+pub fn update_entity_metadata(
+    path: &Path,
+    entity_id: &str,
+    input: &UpdateEntityRequest,
+) -> Result<Option<EntityRecord>, String> {
+    let connection = open_connection(path)?;
+    if find_entity_by_id(&connection, entity_id)?.is_none() {
+        return Ok(None);
+    }
+
+    let now = Utc::now().to_rfc3339();
+    if input.display_name.is_some() {
+        connection
+            .execute(
+                "UPDATE entities SET display_name = ?2, updated_at = ?3 WHERE entity_id = ?1",
+                params![
+                    entity_id,
+                    input.display_name.clone().and_then(non_empty_string),
+                    now
+                ],
+            )
+            .map_err(|error| {
+                format!("Failed to update display_name for entity '{entity_id}': {error}")
+            })?;
+    }
+    if input.operator_note.is_some() {
+        connection
+            .execute(
+                "UPDATE entities SET operator_note = ?2, updated_at = ?3 WHERE entity_id = ?1",
+                params![
+                    entity_id,
+                    input.operator_note.clone().and_then(non_empty_string),
+                    now
+                ],
+            )
+            .map_err(|error| {
+                format!("Failed to update operator_note for entity '{entity_id}': {error}")
+            })?;
+    }
+
+    find_entity_by_id(&connection, entity_id)
+}
+
+pub fn archive_entity(path: &Path, entity_id: &str) -> Result<Option<EntityRecord>, String> {
+    set_entity_archived(path, entity_id, true)
+}
+
+pub fn restore_entity(path: &Path, entity_id: &str) -> Result<Option<EntityRecord>, String> {
+    set_entity_archived(path, entity_id, false)
+}
+
+fn set_entity_archived(
+    path: &Path,
+    entity_id: &str,
+    archived: bool,
+) -> Result<Option<EntityRecord>, String> {
+    let connection = open_connection(path)?;
+    if find_entity_by_id(&connection, entity_id)?.is_none() {
+        return Ok(None);
+    }
+    let now = Utc::now().to_rfc3339();
+    connection
+        .execute(
+            r#"
+            UPDATE entities
+            SET is_archived = ?2,
+                archived_at = ?3,
+                updated_at = ?4
+            WHERE entity_id = ?1
+            "#,
+            params![
+                entity_id,
+                bool_to_i64(archived),
+                if archived { Some(now.clone()) } else { None },
+                now,
+            ],
+        )
+        .map_err(|error| {
+            format!("Failed to update archive state for entity '{entity_id}': {error}")
+        })?;
+    find_entity_by_id(&connection, entity_id)
 }
 
 pub(crate) fn find_entity_file_by_path(
@@ -2746,34 +2844,42 @@ pub(crate) fn load_setting(connection: &Connection, key: &str) -> Result<Option<
 
 fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
     match current_schema_version(connection)? {
-        0 => create_schema_v6(connection)?,
+        0 => create_schema_v7(connection)?,
         1 => {
             migrate_v1_to_v2(connection)?;
             migrate_v2_to_v3(connection)?;
             migrate_v3_to_v4(connection)?;
             migrate_v4_to_v5(connection)?;
             migrate_v5_to_v6(connection)?;
+            migrate_v6_to_v7(connection)?;
         }
         2 => {
             migrate_v2_to_v3(connection)?;
             migrate_v3_to_v4(connection)?;
             migrate_v4_to_v5(connection)?;
             migrate_v5_to_v6(connection)?;
+            migrate_v6_to_v7(connection)?;
         }
         3 => {
             migrate_v3_to_v4(connection)?;
             migrate_v4_to_v5(connection)?;
             migrate_v5_to_v6(connection)?;
+            migrate_v6_to_v7(connection)?;
         }
         4 => {
             migrate_v4_to_v5(connection)?;
             migrate_v5_to_v6(connection)?;
+            migrate_v6_to_v7(connection)?;
         }
-        5 => migrate_v5_to_v6(connection)?,
-        6 => {}
+        5 => {
+            migrate_v5_to_v6(connection)?;
+            migrate_v6_to_v7(connection)?;
+        }
+        6 => migrate_v6_to_v7(connection)?,
+        7 => {}
         version => {
             return Err(format!(
-                "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, 4, 5, or 6."
+                "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, 4, 5, 6, or 7."
             ))
         }
     }
@@ -2798,6 +2904,7 @@ fn ensure_query_indexes(connection: &Connection) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS idx_entity_stage_states_entity_stage ON entity_stage_states(entity_id, stage_id);
             CREATE INDEX IF NOT EXISTS idx_entities_updated_at ON entities(updated_at);
             CREATE INDEX IF NOT EXISTS idx_entities_current_stage_status ON entities(current_stage_id, current_status);
+            CREATE INDEX IF NOT EXISTS idx_entities_archived_updated_at ON entities(is_archived, updated_at);
             CREATE INDEX IF NOT EXISTS idx_stage_runs_started_at ON stage_runs(started_at);
             CREATE INDEX IF NOT EXISTS idx_stage_runs_entity_stage ON stage_runs(entity_id, stage_id);
             CREATE INDEX IF NOT EXISTS idx_app_events_level_created_at ON app_events(level, created_at);
@@ -2816,7 +2923,7 @@ fn current_schema_version(connection: &Connection) -> Result<u32, String> {
         .map_err(|error| format!("Failed to read PRAGMA user_version: {error}"))
 }
 
-fn create_schema_v6(connection: &Connection) -> Result<(), String> {
+fn create_schema_v7(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
             r#"
@@ -2855,6 +2962,10 @@ fn create_schema_v6(connection: &Connection) -> Result<(), String> {
                 file_count INTEGER NOT NULL DEFAULT 0,
                 validation_status TEXT NOT NULL DEFAULT 'valid',
                 validation_errors_json TEXT NOT NULL DEFAULT '[]',
+                display_name TEXT,
+                operator_note TEXT,
+                is_archived INTEGER NOT NULL DEFAULT 0,
+                archived_at TEXT,
                 first_seen_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -2962,10 +3073,10 @@ fn create_schema_v6(connection: &Connection) -> Result<(), String> {
             CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_files_s3_producer_artifact ON entity_files(producer_run_id, artifact_id)
                 WHERE storage_provider = 's3' AND producer_run_id IS NOT NULL AND artifact_id IS NOT NULL;
 
-            PRAGMA user_version = 6;
+            PRAGMA user_version = 7;
             "#,
         )
-        .map_err(|error| format!("Failed to create SQLite schema v6: {error}"))?;
+        .map_err(|error| format!("Failed to create SQLite schema v7: {error}"))?;
     Ok(())
 }
 
@@ -3533,6 +3644,35 @@ fn migrate_v5_to_v6(connection: &mut Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_v6_to_v7(connection: &mut Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            r#"
+            ALTER TABLE entities ADD COLUMN display_name TEXT;
+            ALTER TABLE entities ADD COLUMN operator_note TEXT;
+            ALTER TABLE entities ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE entities ADD COLUMN archived_at TEXT;
+
+            CREATE INDEX IF NOT EXISTS idx_entities_archived_updated_at ON entities(is_archived, updated_at);
+
+            PRAGMA user_version = 7;
+            "#,
+        )
+        .map_err(|error| format!("Failed to migrate schema from v6 to v7: {error}"))?;
+
+    let now = Utc::now().to_rfc3339();
+    insert_app_event(
+        connection,
+        AppEventLevel::Info,
+        "schema_migrated_to_v7",
+        "SQLite schema migrated from version 6 to version 7.",
+        None,
+        &now,
+    )?;
+    set_setting(connection, "schema_version", "7", &now)?;
+    Ok(())
+}
+
 fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Result<(), String> {
     let now = Utc::now().to_rfc3339();
     let transaction = connection
@@ -3758,6 +3898,10 @@ fn load_entities_from_connection(connection: &Connection) -> Result<Vec<EntityRe
             r#"
             SELECT
                 entity_id,
+                display_name,
+                operator_note,
+                is_archived,
+                archived_at,
                 current_stage_id,
                 current_status,
                 latest_file_path,
@@ -4680,25 +4824,32 @@ fn entity_table_sort_expression(sort_by: Option<&str>) -> &'static str {
 }
 
 fn entity_table_row_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityTableRow> {
-    let payload_json: Option<String> = row.get(5)?;
+    let payload_json: Option<String> = row.get(9)?;
+    let display_name: Option<String> = row
+        .get::<_, Option<String>>(1)?
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| entity_display_name_from_payload(payload_json.as_deref()));
     Ok(EntityTableRow {
         entity_id: row.get(0)?,
-        display_name: entity_display_name_from_payload(payload_json.as_deref()),
-        current_stage_id: row.get(1)?,
-        current_status: row.get(2)?,
-        latest_file_path: row.get(3)?,
-        latest_file_id: row.get(4)?,
-        file_count: row.get::<_, i64>(6)? as u64,
-        attempts: row.get::<_, Option<i64>>(7)?.map(|value| value as u64),
-        max_attempts: row.get::<_, Option<i64>>(8)?.map(|value| value as u64),
-        last_error: row.get(9)?,
-        last_http_status: row.get(10)?,
-        next_retry_at: row.get(11)?,
-        last_started_at: row.get(12)?,
-        last_finished_at: row.get(13)?,
-        validation_status: parse_validation_status(&row.get::<_, String>(14)?)?,
-        updated_at: row.get(15)?,
-        last_seen_at: row.get(16)?,
+        display_name,
+        operator_note: row.get(2)?,
+        is_archived: row.get::<_, i64>(3)? == 1,
+        archived_at: row.get(4)?,
+        current_stage_id: row.get(5)?,
+        current_status: row.get(6)?,
+        latest_file_path: row.get(7)?,
+        latest_file_id: row.get(8)?,
+        file_count: row.get::<_, i64>(10)? as u64,
+        attempts: row.get::<_, Option<i64>>(11)?.map(|value| value as u64),
+        max_attempts: row.get::<_, Option<i64>>(12)?.map(|value| value as u64),
+        last_error: row.get(13)?,
+        last_http_status: row.get(14)?,
+        next_retry_at: row.get(15)?,
+        last_started_at: row.get(16)?,
+        last_finished_at: row.get(17)?,
+        validation_status: parse_validation_status(&row.get::<_, String>(18)?)?,
+        updated_at: row.get(19)?,
+        last_seen_at: row.get(20)?,
     })
 }
 
@@ -4738,12 +4889,12 @@ fn load_available_entity_statuses(connection: &Connection) -> Result<Vec<String>
 }
 
 fn entity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityRecord> {
-    let validation_status = parse_validation_status(&row.get::<_, String>(6)?)?;
-    let validation_errors_json: String = row.get(7)?;
+    let validation_status = parse_validation_status(&row.get::<_, String>(10)?)?;
+    let validation_errors_json: String = row.get(11)?;
     let validation_errors = parse_json::<Vec<ConfigValidationIssue>>(&validation_errors_json)
         .map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                7,
+                11,
                 rusqlite::types::Type::Text,
                 Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
             )
@@ -4751,16 +4902,20 @@ fn entity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityRecord> {
 
     Ok(EntityRecord {
         entity_id: row.get(0)?,
-        current_stage_id: row.get(1)?,
-        current_status: row.get(2)?,
-        latest_file_path: row.get(3)?,
-        latest_file_id: row.get(4)?,
-        file_count: row.get::<_, i64>(5)? as u64,
+        display_name: row.get(1)?,
+        operator_note: row.get(2)?,
+        is_archived: row.get::<_, i64>(3)? == 1,
+        archived_at: row.get(4)?,
+        current_stage_id: row.get(5)?,
+        current_status: row.get(6)?,
+        latest_file_path: row.get(7)?,
+        latest_file_id: row.get(8)?,
+        file_count: row.get::<_, i64>(9)? as u64,
         validation_status,
         validation_errors,
-        first_seen_at: row.get(8)?,
-        last_seen_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        first_seen_at: row.get(12)?,
+        last_seen_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }
 
@@ -5177,7 +5332,7 @@ mod tests {
         let table_names = load_table_names(&connection).expect("table names");
 
         assert!(database_path.exists());
-        assert_eq!(result.schema_version, 6);
+        assert_eq!(result.schema_version, 7);
         assert!(table_names.contains(&"entity_files".to_string()));
         assert!(table_names.contains(&"entities".to_string()));
         assert!(table_names.contains(&"entity_stage_states".to_string()));
@@ -5243,7 +5398,7 @@ mod tests {
             load_entity_files_from_connection(&connection, Some("entity-1")).expect("load files");
         let events = load_app_events_from_connection(&connection, 20).expect("events");
 
-        assert_eq!(result.schema_version, 6);
+        assert_eq!(result.schema_version, 7);
         assert_eq!(entity.file_count, 1);
         assert_eq!(files.len(), 1);
         assert!(events
@@ -5265,7 +5420,7 @@ mod tests {
         let result = bootstrap_database(&database_path, &test_config(vec![stage("ingest", None)]))
             .expect("bootstrap");
 
-        assert_eq!(result.schema_version, 6);
+        assert_eq!(result.schema_version, 7);
     }
 
     #[test]

@@ -14,9 +14,8 @@ export function AppShell({ children }: { children: ReactNode }) {
     { to: "/workspaces", label: "Workspaces" },
     { to: workspaceBase ? `${workspaceBase}/workspace` : "/workspace", label: "Workspace Explorer" },
     { to: workspaceBase ? `${workspaceBase}/stages` : "/stages", label: "Stage Editor" },
+    { to: workspaceBase ? `${workspaceBase}/entities` : "/entities", label: "Entities" },
     { to: "/dashboard", label: "Dashboard" },
-    { to: "/entities", label: "Entities" },
-    { to: "/entities/entity-0001", label: "Entity Detail" },
     { to: "/settings", label: "Settings / Diagnostics" },
   ];
 

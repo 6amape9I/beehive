@@ -12,6 +12,7 @@ import { StageRunsPanel } from "../components/entity-detail/StageRunsPanel";
 import { ValidationIssues } from "../components/ValidationIssues";
 import {
   getEntity,
+  getWorkspaceEntity,
   openEntityFile,
   openEntityFolder,
   resetEntityStageToPending,
@@ -27,7 +28,7 @@ import type {
 } from "../types/domain";
 
 export function EntityDetailPage() {
-  const { entityId } = useParams();
+  const { entityId, workspaceId: routeWorkspaceId } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const { state } = useBootstrap();
   const [detail, setDetail] = useState<EntityDetailPayload | null>(null);
@@ -41,7 +42,8 @@ export function EntityDetailPage() {
   const [isSavingJson, setIsSavingJson] = useState(false);
 
   const workdirPath = state.selected_workdir_path;
-  const canQueryRuntime = state.phase === "fully_initialized" && !!workdirPath && !!entityId;
+  const workspaceId = routeWorkspaceId ?? state.selected_workspace_id;
+  const canQueryRuntime = !!entityId && Boolean(workspaceId || (state.phase === "fully_initialized" && workdirPath));
   const queryFileId = useMemo(() => {
     const value = searchParams.get("file_id");
     if (!value) return null;
@@ -69,7 +71,7 @@ export function EntityDetailPage() {
 
   const loadDetail = useCallback(
     async (fileId: number | null = null) => {
-      if (!canQueryRuntime || !workdirPath || !entityId) {
+      if (!canQueryRuntime || !entityId) {
         setDetail(null);
         setErrors([]);
         return;
@@ -77,7 +79,9 @@ export function EntityDetailPage() {
 
       setIsLoading(true);
       try {
-        const result = await getEntity(workdirPath, entityId, fileId);
+        const result = workspaceId
+          ? await getWorkspaceEntity(workspaceId, entityId)
+          : await getEntity(workdirPath ?? "", entityId, fileId);
         setDetail(result.detail);
         setErrors(result.errors);
         if (result.detail) {
@@ -93,7 +97,7 @@ export function EntityDetailPage() {
         setIsLoading(false);
       }
     },
-    [canQueryRuntime, entityId, workdirPath],
+    [canQueryRuntime, entityId, workdirPath, workspaceId],
   );
 
   useEffect(() => {
@@ -210,7 +214,7 @@ export function EntityDetailPage() {
         <section className="panel">
           <h2>{entityId ?? "No entity selected"}</h2>
           <p className="empty-text">
-            Open a fully initialized workdir and select an entity from the Entities table.
+            Open a workspace and select an entity from the Entities table.
           </p>
         </section>
       ) : isLoading ? (
@@ -240,15 +244,17 @@ export function EntityDetailPage() {
               </div>
             </section>
           ) : null}
-          <ManualActionsPanel
-            stageStates={detail.stage_states}
-            allowedActions={detail.allowed_actions}
-            loadingAction={loadingAction}
-            onRetry={(stageId) => void handleManualAction("retry", stageId)}
-            onReset={(stageId) => void handleManualAction("reset", stageId)}
-            onSkip={(stageId) => void handleManualAction("skip", stageId)}
-            onRun={(stageId) => void handleManualAction("run", stageId)}
-          />
+          {workdirPath ? (
+            <ManualActionsPanel
+              stageStates={detail.stage_states}
+              allowedActions={detail.allowed_actions}
+              loadingAction={loadingAction}
+              onRetry={(stageId) => void handleManualAction("retry", stageId)}
+              onReset={(stageId) => void handleManualAction("reset", stageId)}
+              onSkip={(stageId) => void handleManualAction("skip", stageId)}
+              onRun={(stageId) => void handleManualAction("run", stageId)}
+            />
+          ) : null}
           <EntityTimeline timeline={detail.timeline} />
           <ValidationIssues
             title="Validation Issues"
@@ -271,7 +277,7 @@ export function EntityDetailPage() {
             isSaving={isSavingJson}
             onSave={handleSaveJson}
           />
-          <StageRunsPanel runs={detail.stage_runs} workspaceId={state.selected_workspace_id} />
+          <StageRunsPanel runs={detail.stage_runs} workspaceId={workspaceId} />
         </>
       ) : (
         <section className="panel">

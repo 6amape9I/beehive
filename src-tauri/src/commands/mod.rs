@@ -8,18 +8,19 @@ use crate::discovery;
 use crate::domain::{
     AppEventsResult, BootstrapResult, CommandErrorInfo, ConfigValidationIssue,
     CreateS3StageRequest, CreateS3StageResult, CreateWorkspaceRequest, DashboardOverviewResult,
-    EntityDetailResult, EntityFilesResult, EntityListQuery, EntityListResult, FileCopyResult,
-    ManualEntityStageActionResult, OpenEntityPathPayload, OpenEntityPathResult,
-    PipelineConfigDraft, PipelineEditorStateResult, ReconcileStuckTasksResult,
-    RegisterS3SourceArtifactPayload, RegisterS3SourceArtifactRequest,
+    EntityDetailResult, EntityFilesResult, EntityListQuery, EntityListResult, EntityMutationResult,
+    FileCopyResult, ImportJsonBatchRequest, ImportJsonBatchResult, ManualEntityStageActionResult,
+    OpenEntityPathPayload, OpenEntityPathResult, PipelineConfigDraft, PipelineEditorStateResult,
+    ReconcileStuckTasksResult, RegisterS3SourceArtifactPayload, RegisterS3SourceArtifactRequest,
     RegisterS3SourceArtifactResult, RunDueTasksResult, RunEntityStageResult,
     RunPipelineWavesResult, RunSelectedPipelineWavesRequest, RunSelectedPipelineWavesResult,
     RuntimeSummaryResult, S3ReconciliationResult, S3StageMutationResult, SaveEntityFileJsonResult,
     SavePipelineConfigResult, ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult,
-    StageRunOutputsResult, StageRunsResult, UpdateS3StageRequest, UpdateStageNextStageRequest,
-    UpdateStageNextStageResult, UpdateWorkspaceRequest, ValidatePipelineConfigDraftResult,
-    ValidationSeverity, WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceMutationResult,
-    WorkspaceRegistryEntryResult, WorkspaceRegistryListResult,
+    StageRunOutputsResult, StageRunsResult, UpdateEntityRequest, UpdateS3StageRequest,
+    UpdateStageNextStageRequest, UpdateStageNextStageResult, UpdateWorkspaceRequest,
+    ValidatePipelineConfigDraftResult, ValidationSeverity, WorkspaceExplorerResult,
+    WorkspaceExplorerTotals, WorkspaceMutationResult, WorkspaceRegistryEntryResult,
+    WorkspaceRegistryListResult,
 };
 use crate::executor;
 use crate::file_open::{self, OpenEntityPathKind};
@@ -482,6 +483,103 @@ pub fn get_entity(
         Err(error) => EntityDetailResult {
             detail: None,
             errors: vec![error],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn list_workspace_entities(
+    workspace_id: String,
+    query: Option<EntityListQuery>,
+) -> EntityListResult {
+    match services::entities::list_entities_for_workspace(&workspace_id, query.unwrap_or_default())
+    {
+        Ok(result) => result,
+        Err(message) => EntityListResult {
+            entities: Vec::new(),
+            total: 0,
+            page: 1,
+            page_size: 50,
+            available_stages: Vec::new(),
+            available_statuses: Vec::new(),
+            errors: vec![command_error("list_entities_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn get_workspace_entity(workspace_id: String, entity_id: String) -> EntityDetailResult {
+    match services::entities::get_entity_for_workspace(&workspace_id, &entity_id) {
+        Ok(detail) => services::entities::entity_detail_result(
+            detail,
+            format!("Entity '{entity_id}' was not found."),
+        ),
+        Err(message) => EntityDetailResult {
+            detail: None,
+            errors: vec![command_error("get_entity_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn update_workspace_entity(
+    workspace_id: String,
+    entity_id: String,
+    input: UpdateEntityRequest,
+) -> EntityMutationResult {
+    match services::entities::update_entity_for_workspace(&workspace_id, &entity_id, &input) {
+        Ok(payload) => services::entities::entity_mutation_result(
+            payload,
+            format!("Entity '{entity_id}' was not found."),
+        ),
+        Err(message) => EntityMutationResult {
+            payload: None,
+            errors: vec![command_error("update_entity_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn archive_workspace_entity(workspace_id: String, entity_id: String) -> EntityMutationResult {
+    match services::entities::archive_entity_for_workspace(&workspace_id, &entity_id) {
+        Ok(payload) => services::entities::entity_mutation_result(
+            payload,
+            format!("Entity '{entity_id}' was not found."),
+        ),
+        Err(message) => EntityMutationResult {
+            payload: None,
+            errors: vec![command_error("archive_entity_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn restore_workspace_entity(workspace_id: String, entity_id: String) -> EntityMutationResult {
+    match services::entities::restore_entity_for_workspace(&workspace_id, &entity_id) {
+        Ok(payload) => services::entities::entity_mutation_result(
+            payload,
+            format!("Entity '{entity_id}' was not found."),
+        ),
+        Err(message) => EntityMutationResult {
+            payload: None,
+            errors: vec![command_error("restore_entity_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn import_workspace_entities_json_batch(
+    workspace_id: String,
+    input: ImportJsonBatchRequest,
+) -> ImportJsonBatchResult {
+    match services::entities::import_json_batch_for_workspace(&workspace_id, &input) {
+        Ok(payload) => ImportJsonBatchResult {
+            payload: Some(payload),
+            errors: Vec::new(),
+        },
+        Err(message) => ImportJsonBatchResult {
+            payload: None,
+            errors: vec![command_error("import_json_batch_failed", message, None)],
         },
     }
 }
@@ -1053,23 +1151,14 @@ pub fn update_stage_next_stage(
     stage_id: String,
     input: UpdateStageNextStageRequest,
 ) -> UpdateStageNextStageResult {
-    match services::pipeline::update_stage_next_stage_for_workspace(
-        &workspace_id,
-        &stage_id,
-        &input,
-    ) {
-        Ok(payload) => UpdateStageNextStageResult {
-            payload: Some(payload),
-            errors: Vec::new(),
-        },
-        Err(message) => UpdateStageNextStageResult {
-            payload: None,
-            errors: vec![command_error(
-                "update_stage_next_stage_failed",
-                message,
-                None,
-            )],
-        },
+    let _ = (workspace_id, stage_id, input);
+    UpdateStageNextStageResult {
+        payload: None,
+        errors: vec![command_error(
+            "next_stage_deprecated",
+            "next_stage is deprecated. Route outputs through n8n save_path.".to_string(),
+            None,
+        )],
     }
 }
 

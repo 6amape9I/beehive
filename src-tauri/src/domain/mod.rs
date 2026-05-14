@@ -385,8 +385,8 @@ pub struct WorkspaceRegistryEntryResult {
 pub struct CreateWorkspaceRequest {
     pub id: Option<String>,
     pub name: String,
-    pub bucket: String,
-    pub workspace_prefix: String,
+    pub bucket: Option<String>,
+    pub workspace_prefix: Option<String>,
     pub region: Option<String>,
     pub endpoint: Option<String>,
 }
@@ -445,6 +445,10 @@ pub enum EntityValidationStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityRecord {
     pub entity_id: String,
+    pub display_name: Option<String>,
+    pub operator_note: Option<String>,
+    pub is_archived: bool,
+    pub archived_at: Option<String>,
     pub current_stage_id: Option<String>,
     pub current_status: String,
     pub latest_file_path: Option<String>,
@@ -463,6 +467,9 @@ pub struct EntityListQuery {
     pub stage_id: Option<String>,
     pub status: Option<String>,
     pub validation_status: Option<EntityValidationStatus>,
+    pub include_archived: Option<bool>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
     pub sort_by: Option<String>,
     pub sort_direction: Option<String>,
     pub page: Option<u64>,
@@ -473,6 +480,9 @@ pub struct EntityListQuery {
 pub struct EntityTableRow {
     pub entity_id: String,
     pub display_name: Option<String>,
+    pub operator_note: Option<String>,
+    pub is_archived: bool,
+    pub archived_at: Option<String>,
     pub current_stage_id: Option<String>,
     pub current_status: String,
     pub latest_file_path: Option<String>,
@@ -973,6 +983,73 @@ pub struct EntityDetailPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntityDetailResult {
     pub detail: Option<EntityDetailPayload>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct UpdateEntityRequest {
+    pub display_name: Option<String>,
+    pub operator_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityMutationPayload {
+    pub entity: EntityRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityMutationResult {
+    pub payload: Option<EntityMutationPayload>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImportJsonFileInput {
+    pub relative_path: Option<String>,
+    pub file_name: String,
+    pub content: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ImportJsonBatchOptions {
+    pub overwrite_existing: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImportJsonBatchRequest {
+    pub stage_id: String,
+    pub files: Vec<ImportJsonFileInput>,
+    #[serde(default)]
+    pub options: ImportJsonBatchOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportJsonFileResult {
+    pub file_name: String,
+    pub status: String,
+    pub entity_id: Option<String>,
+    pub artifact_id: Option<String>,
+    pub bucket: Option<String>,
+    pub key: Option<String>,
+    pub object_key: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportJsonBatchPayload {
+    pub stage_id: String,
+    pub uploaded_count: u64,
+    pub registered_count: u64,
+    pub imported_count: u64,
+    pub invalid_count: u64,
+    pub failed_count: u64,
+    pub skipped_count: u64,
+    pub files: Vec<ImportJsonFileResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportJsonBatchResult {
+    pub payload: Option<ImportJsonBatchPayload>,
     pub errors: Vec<CommandErrorInfo>,
 }
 

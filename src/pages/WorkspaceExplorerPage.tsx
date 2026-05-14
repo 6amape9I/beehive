@@ -443,6 +443,18 @@ export function WorkspaceExplorerPage() {
         <div className="button-row">
           <button
             type="button"
+            className="button primary"
+            disabled={!workspaceId}
+            onClick={() =>
+              workspaceId
+                ? navigate(`/workspaces/${encodeURIComponent(workspaceId)}/entities`)
+                : navigate("/entities")
+            }
+          >
+            Upload entities
+          </button>
+          <button
+            type="button"
             className="button secondary"
             disabled={!canQueryRuntime || isLoading}
             onClick={() => void loadExplorer()}
@@ -1272,7 +1284,6 @@ function StageTreePanel({
         <p className="muted">Inactive stage: historical files remain visible, but new files are not scanned here.</p>
       ) : null}
       <div className="inline-meta">
-        <span>next {stage.next_stage ?? "terminal"}</span>
         <span>pending {stage.counters.pending}</span>
         <span>done {stage.counters.done}</span>
         <span>failed {stage.counters.failed}</span>
@@ -1284,6 +1295,7 @@ function StageTreePanel({
           <span className="muted">Stage counters and system paths</span>
         </summary>
         <div className="inline-meta">
+          <span>legacy link {stage.next_stage ?? "none"}</span>
           <span>input {stage.input_uri ?? stage.folder_path}</span>
           <span>output {stage.output_folder ?? "not required"}</span>
           <span>registered {stage.counters.registered_files}</span>

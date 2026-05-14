@@ -30,7 +30,7 @@ export function StageGraph({ overview }: { overview: DashboardOverview }) {
                   </div>
                   <div className="stage-node-meta">
                     <span>{node.is_active ? "active" : "inactive"}</span>
-                    <span>next: {node.next_stage ?? "terminal"}</span>
+                    <span>legacy link: {node.next_stage ?? "none"}</span>
                   </div>
                   <div className="stage-node-counters">
                     <span>pending {counter?.pending ?? 0}</span>
@@ -44,7 +44,7 @@ export function StageGraph({ overview }: { overview: DashboardOverview }) {
             })}
           </div>
           <div className="stage-links">
-            <h3>Stage Links</h3>
+            <h3>Legacy Links</h3>
             <div className="stage-link-list">
               {overview.stage_graph.edges.map((edge) => (
                 <article

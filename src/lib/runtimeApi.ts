@@ -8,7 +8,10 @@ import type {
   EntityFilesResult,
   EntityListQuery,
   EntityListResult,
+  EntityMutationResult,
   FileCopyResult,
+  ImportJsonBatchRequest,
+  ImportJsonBatchResult,
   ManualEntityStageActionResult,
   OpenEntityPathResult,
   PipelineConfigDraft,
@@ -33,6 +36,7 @@ import type {
   UpdateStageNextStageRequest,
   UpdateStageNextStageResult,
   UpdateS3StageRequest,
+  UpdateEntityRequest,
   ValidatePipelineConfigDraftResult,
   WorkspaceExplorerResult,
 } from "../types/domain";
@@ -139,6 +143,13 @@ export function listEntities(path: string, query?: EntityListQuery): Promise<Ent
   return apiClient.listEntities(path, query);
 }
 
+export function listWorkspaceEntities(
+  workspaceId: string,
+  query?: EntityListQuery,
+): Promise<EntityListResult> {
+  return apiClient.listWorkspaceEntities(workspaceId, query);
+}
+
 export function listEntityFiles(
   path: string,
   entityId?: string | null,
@@ -152,6 +163,42 @@ export function getEntity(
   selectedFileId?: number | null,
 ): Promise<EntityDetailResult> {
   return apiClient.getEntity(path, entityId, selectedFileId);
+}
+
+export function getWorkspaceEntity(
+  workspaceId: string,
+  entityId: string,
+): Promise<EntityDetailResult> {
+  return apiClient.getWorkspaceEntity(workspaceId, entityId);
+}
+
+export function updateWorkspaceEntity(
+  workspaceId: string,
+  entityId: string,
+  input: UpdateEntityRequest,
+): Promise<EntityMutationResult> {
+  return apiClient.updateWorkspaceEntity(workspaceId, entityId, input);
+}
+
+export function archiveWorkspaceEntity(
+  workspaceId: string,
+  entityId: string,
+): Promise<EntityMutationResult> {
+  return apiClient.archiveWorkspaceEntity(workspaceId, entityId);
+}
+
+export function restoreWorkspaceEntity(
+  workspaceId: string,
+  entityId: string,
+): Promise<EntityMutationResult> {
+  return apiClient.restoreWorkspaceEntity(workspaceId, entityId);
+}
+
+export function importWorkspaceEntitiesJsonBatch(
+  workspaceId: string,
+  input: ImportJsonBatchRequest,
+): Promise<ImportJsonBatchResult> {
+  return apiClient.importWorkspaceEntitiesJsonBatch(workspaceId, input);
 }
 
 export function createNextStageCopy(

@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -69,30 +68,14 @@ pub(crate) fn create_s3_stage_for_workspace(
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn update_stage_next_stage_for_workspace(
     workspace_id: &str,
     stage_id: &str,
     input: &UpdateStageNextStageRequest,
 ) -> Result<UpdateStageNextStagePayload, String> {
-    let workspace = get_workspace(workspace_id)?;
-    let mut config = load_or_create_config(&workspace)?;
-    let updated_stage = apply_next_stage_link(&mut config, stage_id, input)?;
-    let yaml_text = serde_yaml::to_string(&config)
-        .map_err(|error| format!("Failed to serialize updated pipeline.yaml: {error}"))?;
-    let reparsed = config::parse_pipeline_config(&yaml_text, Utc::now().to_rfc3339());
-    if !reparsed.validation.is_valid {
-        return Err(format!(
-            "Generated pipeline link config failed validation: {:?}",
-            reparsed.validation.issues
-        ));
-    }
-    let backup_path = write_pipeline_yaml_atomic(&workspace.pipeline_path, &yaml_text)?;
-    database::bootstrap_database(&workspace.database_path, &config)?;
-
-    Ok(UpdateStageNextStagePayload {
-        stage: updated_stage,
-        backup_path: backup_path.map(|path| path_string(&path)),
-    })
+    let _ = (workspace_id, stage_id, input);
+    Err("next_stage is deprecated. Route outputs through n8n save_path.".to_string())
 }
 
 pub(crate) fn update_s3_stage_for_workspace(
@@ -251,15 +234,12 @@ fn apply_stage_update(
     if let Some(allow_empty_outputs) = input.allow_empty_outputs {
         config.stages[stage_index].allow_empty_outputs = allow_empty_outputs;
     }
-    if let Some(next_stage) = input.next_stage.as_ref() {
-        let next_stage = normalize_optional(next_stage.clone());
-        validate_next_stage(config, &stage_id, next_stage.as_deref())?;
-        config.stages[stage_index].next_stage = next_stage;
-    }
+    let _ = input.next_stage.as_ref();
 
     Ok(config.stages[stage_index].clone())
 }
 
+#[allow(dead_code)]
 fn apply_next_stage_link(
     config: &mut PipelineConfig,
     stage_id: &str,
@@ -465,22 +445,7 @@ fn build_s3_stage(
         return Err("workflow_url must start with http:// or https://.".to_string());
     }
 
-    let next_stage = normalize_optional(input.next_stage.clone());
-    if let Some(next_stage) = next_stage.as_deref() {
-        if next_stage == stage_id {
-            return Err("next_stage cannot reference the same stage.".to_string());
-        }
-        let existing_ids = config
-            .stages
-            .iter()
-            .map(|stage| stage.id.as_str())
-            .collect::<HashSet<_>>();
-        if !existing_ids.contains(next_stage) {
-            return Err(format!(
-                "next_stage '{next_stage}' does not reference an existing stage."
-            ));
-        }
-    }
+    let _ = input.next_stage.as_ref();
 
     let bucket = workspace
         .bucket
@@ -508,7 +473,7 @@ fn build_s3_stage(
         workflow_url,
         max_attempts: input.max_attempts.unwrap_or(3).max(1),
         retry_delay_sec: input.retry_delay_sec.unwrap_or(30),
-        next_stage,
+        next_stage: None,
         save_path_aliases,
         allow_empty_outputs: input.allow_empty_outputs.unwrap_or(false),
     })
@@ -641,6 +606,7 @@ fn normalize_required(value: &str, path: &str) -> Result<String, String> {
     }
 }
 
+#[allow(dead_code)]
 fn normalize_optional(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
@@ -740,6 +706,49 @@ mod tests {
                 "s3://bucket/prefix/root/stages/semantic_rich".to_string(),
             ]
         );
+        assert_eq!(stage.next_stage, None);
+    }
+
+    #[test]
+    fn stage_creation_ignores_next_stage_for_save_path_only_model() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workspace = workspace(&tempdir);
+        let existing = StageDefinition {
+            id: "stage_b".to_string(),
+            input_folder: "stages/stage_b".to_string(),
+            input_uri: Some("s3://bucket/prefix/root/stages/stage_b".to_string()),
+            output_folder: "stages/stage_b_out".to_string(),
+            workflow_url: "https://n8n.example/webhook/b".to_string(),
+            max_attempts: 3,
+            retry_delay_sec: 30,
+            next_stage: None,
+            save_path_aliases: Vec::new(),
+            allow_empty_outputs: false,
+        };
+        let config = PipelineConfig {
+            project: ProjectConfig {
+                name: "Smoke".to_string(),
+                workdir: ".".to_string(),
+            },
+            storage: Some(workspace_storage_config(&workspace).expect("storage")),
+            runtime: RuntimeConfig::default(),
+            stages: vec![existing],
+        };
+        let stage = build_s3_stage(
+            &workspace,
+            &config,
+            &CreateS3StageRequest {
+                stage_id: "stage_a".to_string(),
+                workflow_url: "https://n8n.example/webhook/a".to_string(),
+                next_stage: Some("stage_b".to_string()),
+                max_attempts: None,
+                retry_delay_sec: None,
+                allow_empty_outputs: None,
+            },
+        )
+        .expect("stage");
+
+        assert_eq!(stage.next_stage, None);
     }
 
     #[test]
@@ -909,8 +918,26 @@ mod tests {
         assert_eq!(updated.max_attempts, 5);
         assert_eq!(updated.retry_delay_sec, 90);
         assert!(updated.allow_empty_outputs);
+        assert_eq!(updated.next_stage, None);
         assert_eq!(updated.input_uri, stage.input_uri);
         assert_eq!(updated.save_path_aliases, stage.save_path_aliases);
+    }
+
+    #[test]
+    fn next_stage_service_is_deprecated() {
+        let error = update_stage_next_stage_for_workspace(
+            "workspace",
+            "stage_a",
+            &UpdateStageNextStageRequest {
+                next_stage: Some("stage_b".to_string()),
+            },
+        )
+        .expect_err("deprecated");
+
+        assert_eq!(
+            error,
+            "next_stage is deprecated. Route outputs through n8n save_path."
+        );
     }
 
     #[test]

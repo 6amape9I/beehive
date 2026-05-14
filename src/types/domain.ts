@@ -242,8 +242,8 @@ export interface WorkspaceRegistryEntryResult {
 export interface CreateWorkspaceRequest {
   id?: string | null;
   name: string;
-  bucket: string;
-  workspace_prefix: string;
+  bucket?: string | null;
+  workspace_prefix?: string | null;
   region?: string | null;
   endpoint?: string | null;
 }
@@ -289,6 +289,10 @@ export interface StageRecord {
 
 export interface EntityRecord {
   entity_id: string;
+  display_name: string | null;
+  operator_note: string | null;
+  is_archived: boolean;
+  archived_at: string | null;
   current_stage_id: string | null;
   current_status: string;
   latest_file_path: string | null;
@@ -317,6 +321,9 @@ export interface EntityListQuery {
   stage_id?: string | null;
   status?: string | null;
   validation_status?: EntityValidationStatus | null;
+  include_archived?: boolean | null;
+  limit?: number | null;
+  offset?: number | null;
   sort_by?: EntityListSortBy | null;
   sort_direction?: SortDirection | null;
   page?: number;
@@ -326,6 +333,9 @@ export interface EntityListQuery {
 export interface EntityTableRow {
   entity_id: string;
   display_name: string | null;
+  operator_note: string | null;
+  is_archived: boolean;
+  archived_at: string | null;
   current_stage_id: string | null;
   current_status: string;
   latest_file_path: string | null;
@@ -769,6 +779,63 @@ export interface EntityDetailPayload {
 
 export interface EntityDetailResult {
   detail: EntityDetailPayload | null;
+  errors: CommandErrorInfo[];
+}
+
+export interface UpdateEntityRequest {
+  display_name?: string | null;
+  operator_note?: string | null;
+}
+
+export interface EntityMutationPayload {
+  entity: EntityRecord;
+}
+
+export interface EntityMutationResult {
+  payload: EntityMutationPayload | null;
+  errors: CommandErrorInfo[];
+}
+
+export interface ImportJsonFileInput {
+  relative_path?: string | null;
+  file_name: string;
+  content: Record<string, unknown> | unknown;
+}
+
+export interface ImportJsonBatchOptions {
+  overwrite_existing?: boolean | null;
+}
+
+export interface ImportJsonBatchRequest {
+  stage_id: string;
+  files: ImportJsonFileInput[];
+  options?: ImportJsonBatchOptions;
+}
+
+export interface ImportJsonFileResult {
+  file_name: string;
+  status: string;
+  entity_id: string | null;
+  artifact_id: string | null;
+  bucket: string | null;
+  key: string | null;
+  object_key: string | null;
+  error: string | null;
+}
+
+export interface ImportJsonBatchPayload {
+  stage_id: string;
+  uploaded_count: number;
+  registered_count: number;
+  imported_count: number;
+  invalid_count: number;
+  failed_count: number;
+  skipped_count: number;
+  files: ImportJsonFileResult[];
+}
+
+export interface ImportJsonBatchResult {
+  payload: ImportJsonBatchPayload | null;
   errors: CommandErrorInfo[];
 }
 

@@ -101,20 +101,7 @@ async function main() {
     `/api/workspaces/${encodeURIComponent(workspaceId)}/stages/stage_a/next-stage`,
     { next_stage: "stage_b" },
   );
-  assertNoErrors("POST next-stage", linkStages);
-
-  const blockedDelete = await request(
-    "DELETE",
-    `/api/workspaces/${encodeURIComponent(workspaceId)}/stages/stage_b`,
-  );
-  assertErrorCode("DELETE linked stage_b", blockedDelete, "delete_s3_stage_failed");
-
-  const clearLink = await request(
-    "POST",
-    `/api/workspaces/${encodeURIComponent(workspaceId)}/stages/stage_a/next-stage`,
-    { next_stage: null },
-  );
-  assertNoErrors("POST clear next-stage", clearLink);
+  assertErrorCode("POST next-stage", linkStages, "next_stage_deprecated");
 
   const deleteStageB = await request(
     "DELETE",
@@ -140,7 +127,7 @@ async function main() {
         : deleteWorkspace.payload?.archived
           ? "archived"
           : "unknown",
-      blocked_delete_code: blockedDelete.errors?.[0]?.code ?? null,
+      next_stage_code: linkStages.errors?.[0]?.code ?? null,
     }),
   );
 }

@@ -11,7 +11,10 @@ import type {
   EntityFilesResult,
   EntityListQuery,
   EntityListResult,
+  EntityMutationResult,
   FileCopyResult,
+  ImportJsonBatchRequest,
+  ImportJsonBatchResult,
   ManualEntityStageActionResult,
   OpenEntityPathResult,
   PipelineConfigDraft,
@@ -34,6 +37,7 @@ import type {
   StageRunOutputsResult,
   StageRunsResult,
   UpdateS3StageRequest,
+  UpdateEntityRequest,
   UpdateStageNextStageRequest,
   UpdateStageNextStageResult,
   UpdateWorkspaceRequest,
@@ -176,6 +180,9 @@ export const tauriClient: BeehiveApiClient = {
   listEntities(path: string, query?: EntityListQuery): Promise<EntityListResult> {
     return invoke<EntityListResult>("list_entities", { path, query });
   },
+  listWorkspaceEntities(workspaceId: string, query?: EntityListQuery): Promise<EntityListResult> {
+    return invoke<EntityListResult>("list_workspace_entities", { workspaceId, query });
+  },
   listEntityFiles(path: string, entityId?: string | null): Promise<EntityFilesResult> {
     return invoke<EntityFilesResult>("list_entity_files", { path, entityId });
   },
@@ -185,6 +192,35 @@ export const tauriClient: BeehiveApiClient = {
     selectedFileId?: number | null,
   ): Promise<EntityDetailResult> {
     return invoke<EntityDetailResult>("get_entity", { path, entityId, selectedFileId });
+  },
+  getWorkspaceEntity(workspaceId: string, entityId: string): Promise<EntityDetailResult> {
+    return invoke<EntityDetailResult>("get_workspace_entity", { workspaceId, entityId });
+  },
+  updateWorkspaceEntity(
+    workspaceId: string,
+    entityId: string,
+    input: UpdateEntityRequest,
+  ): Promise<EntityMutationResult> {
+    return invoke<EntityMutationResult>("update_workspace_entity", {
+      workspaceId,
+      entityId,
+      input,
+    });
+  },
+  archiveWorkspaceEntity(workspaceId: string, entityId: string): Promise<EntityMutationResult> {
+    return invoke<EntityMutationResult>("archive_workspace_entity", { workspaceId, entityId });
+  },
+  restoreWorkspaceEntity(workspaceId: string, entityId: string): Promise<EntityMutationResult> {
+    return invoke<EntityMutationResult>("restore_workspace_entity", { workspaceId, entityId });
+  },
+  importWorkspaceEntitiesJsonBatch(
+    workspaceId: string,
+    input: ImportJsonBatchRequest,
+  ): Promise<ImportJsonBatchResult> {
+    return invoke<ImportJsonBatchResult>("import_workspace_entities_json_batch", {
+      workspaceId,
+      input,
+    });
   },
   createNextStageCopy(
     path: string,

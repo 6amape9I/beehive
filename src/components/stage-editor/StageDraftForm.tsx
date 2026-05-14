@@ -3,7 +3,6 @@ import { StageUsageSummary as StageUsageSummaryView } from "./StageUsageSummary"
 
 interface StageDraftFormProps {
   stage: StageDefinitionDraft | null;
-  stages: StageDefinitionDraft[];
   usage: StageUsageSummary | null;
   disabled: boolean;
   removeBlockedReason: string | null;
@@ -13,7 +12,6 @@ interface StageDraftFormProps {
 
 export function StageDraftForm({
   stage,
-  stages,
   usage,
   disabled,
   removeBlockedReason,
@@ -31,7 +29,7 @@ export function StageDraftForm({
 
   const currentStage = stage;
   const stageIdLocked = !currentStage.is_new;
-  const terminal = !currentStage.next_stage;
+  const terminal = !!currentStage.allow_empty_outputs;
   const savePathAliases = currentStage.save_path_aliases ?? [];
 
   function update(patch: Partial<StageDefinitionDraft>) {
@@ -75,24 +73,6 @@ export function StageDraftForm({
             onChange={(event) => update({ id: event.target.value })}
           />
           {stageIdLocked ? <p className="field-hint">Saved stage IDs cannot be renamed in Stage 7.</p> : null}
-        </div>
-        <div className="form-row">
-          <label htmlFor="stage-next">Next stage</label>
-          <select
-            id="stage-next"
-            value={currentStage.next_stage ?? ""}
-            disabled={disabled}
-            onChange={(event) => update({ next_stage: event.target.value || null })}
-          >
-            <option value="">End / terminal</option>
-            {stages
-              .filter((candidate) => candidate.id !== currentStage.id)
-              .map((candidate) => (
-                <option key={candidate.id} value={candidate.id}>
-                  {candidate.id}
-                </option>
-              ))}
-          </select>
         </div>
         <div className="form-row">
           <label htmlFor="stage-input">Input folder</label>
@@ -166,7 +146,7 @@ export function StageDraftForm({
           />
         </div>
         <div className="form-row">
-          <label htmlFor="stage-allow-empty-outputs">Allow empty outputs</label>
+          <label htmlFor="stage-allow-empty-outputs">Terminal stage</label>
           <label className="checkbox-row">
             <input
               id="stage-allow-empty-outputs"
@@ -175,7 +155,7 @@ export function StageDraftForm({
               disabled={disabled}
               onChange={(event) => update({ allow_empty_outputs: event.target.checked })}
             />
-            <span>{currentStage.allow_empty_outputs ? "enabled" : "disabled"}</span>
+            <span>{currentStage.allow_empty_outputs ? "terminal" : "requires manifest output"}</span>
           </label>
         </div>
       </div>

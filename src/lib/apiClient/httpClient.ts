@@ -9,7 +9,10 @@ import type {
   EntityFilesResult,
   EntityListQuery,
   EntityListResult,
+  EntityMutationResult,
   FileCopyResult,
+  ImportJsonBatchRequest,
+  ImportJsonBatchResult,
   ManualEntityStageActionResult,
   OpenEntityPathResult,
   PipelineConfigDraft,
@@ -32,6 +35,7 @@ import type {
   StageRunOutputsResult,
   StageRunsResult,
   UpdateS3StageRequest,
+  UpdateEntityRequest,
   UpdateStageNextStageRequest,
   UpdateStageNextStageResult,
   UpdateWorkspaceRequest,
@@ -91,6 +95,22 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
 
   function deleteJson<T>(path: string): Promise<T> {
     return fetchJson<T>(path, { method: "DELETE" });
+  }
+
+  function entityQueryString(query?: EntityListQuery): string {
+    const params = new URLSearchParams();
+    if (query?.search) params.set("search", query.search);
+    if (query?.stage_id) params.set("stage_id", query.stage_id);
+    if (query?.status) params.set("status", query.status);
+    if (query?.include_archived) params.set("include_archived", "true");
+    if (query?.limit) params.set("limit", String(query.limit));
+    if (query?.offset) params.set("offset", String(query.offset));
+    if (query?.page) params.set("page", String(query.page));
+    if (query?.page_size) params.set("page_size", String(query.page_size));
+    if (query?.sort_by) params.set("sort_by", query.sort_by);
+    if (query?.sort_direction) params.set("sort_direction", query.sort_direction);
+    const text = params.toString();
+    return text ? `?${text}` : "";
   }
 
   function unsupported<T>(name: string): Promise<T> {
@@ -186,15 +206,62 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
         `/api/workspaces/${encodeURIComponent(workspaceId)}/stages/${encodeURIComponent(stageId)}/next-stage`,
         input,
       ),
-    listEntities: (path: string, _query?: EntityListQuery): Promise<EntityListResult> =>
-      unsupported(`listEntities(${path})`),
+    listEntities: (workspaceId: string, query?: EntityListQuery): Promise<EntityListResult> =>
+      fetchJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/entities${entityQueryString(query)}`,
+      ),
+    listWorkspaceEntities: (
+      workspaceId: string,
+      query?: EntityListQuery,
+    ): Promise<EntityListResult> =>
+      fetchJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/entities${entityQueryString(query)}`,
+      ),
     listEntityFiles: (path: string, _entityId?: string | null): Promise<EntityFilesResult> =>
       unsupported(`listEntityFiles(${path})`),
     getEntity: (
-      path: string,
-      _entityId: string,
+      workspaceId: string,
+      entityId: string,
       _selectedFileId?: number | null,
-    ): Promise<EntityDetailResult> => unsupported(`getEntity(${path})`),
+    ): Promise<EntityDetailResult> =>
+      fetchJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/entities/${encodeURIComponent(entityId)}`,
+      ),
+    getWorkspaceEntity: (workspaceId: string, entityId: string): Promise<EntityDetailResult> =>
+      fetchJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/entities/${encodeURIComponent(entityId)}`,
+      ),
+    updateWorkspaceEntity: (
+      workspaceId: string,
+      entityId: string,
+      input: UpdateEntityRequest,
+    ): Promise<EntityMutationResult> =>
+      patchJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/entities/${encodeURIComponent(entityId)}`,
+        input,
+      ),
+    archiveWorkspaceEntity: (
+      workspaceId: string,
+      entityId: string,
+    ): Promise<EntityMutationResult> =>
+      deleteJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/entities/${encodeURIComponent(entityId)}`,
+      ),
+    restoreWorkspaceEntity: (
+      workspaceId: string,
+      entityId: string,
+    ): Promise<EntityMutationResult> =>
+      postJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/entities/${encodeURIComponent(entityId)}/restore`,
+      ),
+    importWorkspaceEntitiesJsonBatch: (
+      workspaceId: string,
+      input: ImportJsonBatchRequest,
+    ): Promise<ImportJsonBatchResult> =>
+      postJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/entities/import-json-batch`,
+        input,
+      ),
     createNextStageCopy: (
       path: string,
       _entityId: string,

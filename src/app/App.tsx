@@ -17,6 +17,7 @@ export function App() {
         <Route path="/workspaces" element={<WorkspaceSelectorPage />} />
         <Route path="/workspaces/:workspaceId/workspace" element={<WorkspaceExplorerPage />} />
         <Route path="/workspaces/:workspaceId/stages" element={<StageEditorPage />} />
+        <Route path="/workspaces/:workspaceId/entities" element={<EntitiesPage />} />
         <Route path="/workspaces/:workspaceId/entities/:entityId" element={<EntityDetailPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/entities" element={<EntitiesPage />} />

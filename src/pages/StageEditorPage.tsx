@@ -16,7 +16,6 @@ import {
   restoreS3Stage,
   savePipelineConfig,
   updateS3Stage,
-  updateStageNextStage,
   validatePipelineConfigDraft,
 } from "../lib/runtimeApi";
 import type {
@@ -30,7 +29,6 @@ import type {
   StageDefinitionDraft,
   StageUsageSummary,
   UpdateS3StageRequest,
-  UpdateStageNextStagePayload,
   WorkspaceStageTree,
 } from "../types/domain";
 
@@ -39,34 +37,17 @@ const emptyValidation: ConfigValidationResult = { is_valid: true, issues: [] };
 interface S3StageCreationForm {
   stage_id: string;
   workflow_url: string;
-  next_stage: string;
   max_attempts: number;
   retry_delay_sec: number;
   allow_empty_outputs: boolean;
 }
 
-interface StageLinkForm {
-  source_stage_id: string;
-  next_stage: string;
-}
-
-interface StageOption {
-  id: string;
-  next_stage: string | null;
-}
-
 const defaultS3StageCreationForm: S3StageCreationForm = {
   stage_id: "",
   workflow_url: "",
-  next_stage: "",
   max_attempts: 3,
   retry_delay_sec: 30,
   allow_empty_outputs: false,
-};
-
-const defaultStageLinkForm: StageLinkForm = {
-  source_stage_id: "",
-  next_stage: "",
 };
 
 function makeNewStage(existingIds: string[]): StageDefinitionDraft {
@@ -103,7 +84,7 @@ function removeBlockedReason(draft: PipelineConfigDraft | null, stage: StageDefi
     .filter((candidate) => candidate.id !== stage.id && candidate.next_stage === stage.id)
     .map((candidate) => candidate.id);
   return refs.length > 0
-    ? `Clear next_stage references from ${refs.join(", ")} before removing this stage.`
+    ? `Clear legacy stage links from ${refs.join(", ")} before removing this stage.`
     : null;
 }
 
@@ -128,10 +109,6 @@ export function StageEditorPage() {
     defaultS3StageCreationForm,
   );
   const [createdS3Stage, setCreatedS3Stage] = useState<CreateS3StagePayload | null>(null);
-  const [stageLinkForm, setStageLinkForm] = useState<StageLinkForm>(defaultStageLinkForm);
-  const [updatedStageLink, setUpdatedStageLink] = useState<UpdateStageNextStagePayload | null>(
-    null,
-  );
   const [stageMutation, setStageMutation] = useState<S3StageMutationPayload | null>(null);
 
   const workdirPath = state.selected_workdir_path;
@@ -149,14 +126,6 @@ export function StageEditorPage() {
     () => JSON.stringify(draft) !== JSON.stringify(editorState?.draft ?? null),
     [draft, editorState],
   );
-  const stageOptions = useMemo<StageOption[]>(
-    () =>
-      draft
-        ? draft.stages.map((stage) => ({ id: stage.id, next_stage: stage.next_stage }))
-        : workspaceStages.map((stage) => ({ id: stage.stage_id, next_stage: stage.next_stage })),
-    [draft, workspaceStages],
-  );
-
   const loadEditor = useCallback(async () => {
     if (workspaceId && !workdirPath) {
       setIsLoading(true);
@@ -304,7 +273,6 @@ export function StageEditorPage() {
     const input: CreateS3StageRequest = {
       stage_id: s3StageForm.stage_id.trim(),
       workflow_url: s3StageForm.workflow_url.trim(),
-      next_stage: s3StageForm.next_stage.trim() || null,
       max_attempts: s3StageForm.max_attempts,
       retry_delay_sec: s3StageForm.retry_delay_sec,
       allow_empty_outputs: s3StageForm.allow_empty_outputs,
@@ -325,35 +293,6 @@ export function StageEditorPage() {
         setActionMessage(`S3 stage ${result.payload.stage.id} created.`);
       } else {
         setActionMessage("S3 stage creation was rejected.");
-      }
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  async function handleUpdateStageLink() {
-    if (!workspaceId || !stageLinkForm.source_stage_id) {
-      setActionMessage("Select a workspace and source stage before connecting stages.");
-      return;
-    }
-    setIsSaving(true);
-    setActionMessage(null);
-    setUpdatedStageLink(null);
-    try {
-      const result = await updateStageNextStage(workspaceId, stageLinkForm.source_stage_id, {
-        next_stage: stageLinkForm.next_stage || null,
-      });
-      setErrors(result.errors);
-      if (result.payload) {
-        setUpdatedStageLink(result.payload);
-        setActionMessage(
-          result.payload.stage.next_stage
-            ? `${result.payload.stage.id} now points to ${result.payload.stage.next_stage}.`
-            : `${result.payload.stage.id} is now terminal.`,
-        );
-        await loadEditor();
-      } else {
-        setActionMessage("Stage link update was rejected.");
       }
     } finally {
       setIsSaving(false);
@@ -465,17 +404,8 @@ export function StageEditorPage() {
             form={s3StageForm}
             payload={createdS3Stage}
             selectedWorkspaceId={workspaceId}
-            stages={stageOptions}
             onChange={setS3StageForm}
             onCreate={() => void handleCreateS3Stage()}
-          />
-          <StageLinkPanel
-            disabled={disabled}
-            form={stageLinkForm}
-            payload={updatedStageLink}
-            stages={stageOptions}
-            onChange={setStageLinkForm}
-            onSave={() => void handleUpdateStageLink()}
           />
           <StageCrudPanel
             disabled={disabled}
@@ -514,18 +444,8 @@ export function StageEditorPage() {
             form={s3StageForm}
             payload={createdS3Stage}
             selectedWorkspaceId={workspaceId}
-            stages={stageOptions}
             onChange={setS3StageForm}
             onCreate={() => void handleCreateS3Stage()}
-          />
-
-          <StageLinkPanel
-            disabled={disabled}
-            form={stageLinkForm}
-            payload={updatedStageLink}
-            stages={stageOptions}
-            onChange={setStageLinkForm}
-            onSave={() => void handleUpdateStageLink()}
           />
 
           <section className="panel">
@@ -558,7 +478,6 @@ export function StageEditorPage() {
           />
           <StageDraftForm
             stage={selectedStage}
-            stages={draft.stages}
             usage={selectedUsage}
             disabled={disabled}
             removeBlockedReason={blockedRemoveReason}
@@ -584,7 +503,6 @@ interface S3StageCreationPanelProps {
   form: S3StageCreationForm;
   payload: CreateS3StagePayload | null;
   selectedWorkspaceId: string | null;
-  stages: StageOption[];
   onChange: (form: S3StageCreationForm) => void;
   onCreate: () => void;
 }
@@ -594,7 +512,6 @@ function S3StageCreationPanel({
   form,
   payload,
   selectedWorkspaceId,
-  stages,
   onChange,
   onCreate,
 }: S3StageCreationPanelProps) {
@@ -645,22 +562,6 @@ function S3StageCreationPanel({
           />
         </div>
         <div className="form-row">
-          <label htmlFor="s3-stage-next">Next stage</label>
-          <select
-            id="s3-stage-next"
-            value={form.next_stage}
-            disabled={disabled}
-            onChange={(event) => update("next_stage", event.target.value)}
-          >
-            <option value="">Terminal or routed by save_path</option>
-            {stages.map((stage) => (
-              <option key={stage.id} value={stage.id}>
-                {stage.id}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="form-row">
           <label htmlFor="s3-stage-attempts">Max attempts</label>
           <input
             id="s3-stage-attempts"
@@ -691,9 +592,12 @@ function S3StageCreationPanel({
             disabled={disabled}
             onChange={(event) => update("allow_empty_outputs", event.target.checked)}
           />
-          Allow empty outputs
+          Terminal stage
         </label>
       </div>
+      <p className="field-hint">
+        Terminal stage means this workflow may finish successfully without output artifacts.
+      </p>
       <div className="button-row">
         <button type="button" className="button primary" disabled={!canCreate} onClick={onCreate}>
           Create S3 stage
@@ -726,103 +630,9 @@ function S3StageCreationPanel({
   );
 }
 
-interface StageLinkPanelProps {
-  disabled: boolean;
-  form: StageLinkForm;
-  payload: UpdateStageNextStagePayload | null;
-  stages: StageOption[];
-  onChange: (form: StageLinkForm) => void;
-  onSave: () => void;
-}
-
-function StageLinkPanel({
-  disabled,
-  form,
-  payload,
-  stages,
-  onChange,
-  onSave,
-}: StageLinkPanelProps) {
-  const targetOptions = stages.filter((stage) => stage.id !== form.source_stage_id);
-  const source = stages.find((stage) => stage.id === form.source_stage_id);
-
-  useEffect(() => {
-    if (!source) return;
-    onChange({ ...form, next_stage: source.next_stage ?? "" });
-  }, [source?.id]);
-
-  return (
-    <section className="panel">
-      <div className="panel-heading">
-        <div>
-          <h2>Connect Stages</h2>
-          <span className="muted">Set or clear next_stage between existing stages.</span>
-        </div>
-      </div>
-      <div className="stage-editor-form-grid">
-        <div className="form-row">
-          <label htmlFor="stage-link-source">Source stage</label>
-          <select
-            id="stage-link-source"
-            value={form.source_stage_id}
-            disabled={disabled}
-            onChange={(event) =>
-              onChange({
-                ...form,
-                source_stage_id: event.target.value,
-                next_stage:
-                  stages.find((stage) => stage.id === event.target.value)?.next_stage ?? "",
-              })
-            }
-          >
-            <option value="">Select source</option>
-            {stages.map((stage) => (
-              <option key={stage.id} value={stage.id}>
-                {stage.id}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="form-row">
-          <label htmlFor="stage-link-target">Target stage</label>
-          <select
-            id="stage-link-target"
-            value={form.next_stage}
-            disabled={disabled || !form.source_stage_id}
-            onChange={(event) => onChange({ ...form, next_stage: event.target.value })}
-          >
-            <option value="">Terminal</option>
-            {targetOptions.map((stage) => (
-              <option key={stage.id} value={stage.id}>
-                {stage.id}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-      <div className="button-row">
-        <button
-          type="button"
-          className="button primary"
-          disabled={disabled || !form.source_stage_id}
-          onClick={onSave}
-        >
-          Save stage link
-        </button>
-      </div>
-      {payload ? (
-        <p className="field-hint">
-          {payload.stage.id} next_stage is {payload.stage.next_stage ?? "terminal"}.
-        </p>
-      ) : null}
-    </section>
-  );
-}
-
 interface StageCrudForm {
   stage_id: string;
   workflow_url: string;
-  next_stage: string;
   max_attempts: number;
   retry_delay_sec: number;
   allow_empty_outputs: boolean;
@@ -850,7 +660,6 @@ function StageCrudPanel({
   const [form, setForm] = useState<StageCrudForm>({
     stage_id: "",
     workflow_url: "",
-    next_stage: "",
     max_attempts: 3,
     retry_delay_sec: 30,
     allow_empty_outputs: false,
@@ -861,7 +670,6 @@ function StageCrudPanel({
     setForm({
       stage_id: selectedStage.stage_id,
       workflow_url: selectedStage.workflow_url ?? "",
-      next_stage: selectedStage.next_stage ?? "",
       max_attempts: selectedStage.max_attempts,
       retry_delay_sec: selectedStage.retry_delay_sec,
       allow_empty_outputs: selectedStage.allow_empty_outputs,
@@ -878,7 +686,6 @@ function StageCrudPanel({
     }
   }
 
-  const activeStages = stages.filter((stage) => stage.is_active);
   const canSave = !!selectedStage && selectedStage.is_active && !!form.workflow_url.trim() && !disabled;
 
   return (
@@ -886,7 +693,7 @@ function StageCrudPanel({
       <div className="panel-heading">
         <div>
           <h2>Manage stages</h2>
-          <span className="muted">Edit runtime fields, connect stages, archive/delete, or restore.</span>
+          <span className="muted">Edit runtime fields, archive/delete, restore, and copy save_path aliases.</span>
         </div>
       </div>
       <div className="stage-editor-form-grid">
@@ -920,24 +727,6 @@ function StageCrudPanel({
           />
         </div>
         <div className="form-row">
-          <label htmlFor="crud-next-stage">Next stage</label>
-          <select
-            id="crud-next-stage"
-            value={form.next_stage}
-            disabled={disabled || !selectedStage?.is_active}
-            onChange={(event) => update("next_stage", event.target.value)}
-          >
-            <option value="">Terminal</option>
-            {activeStages
-              .filter((stage) => stage.stage_id !== selectedStage?.stage_id)
-              .map((stage) => (
-                <option key={stage.stage_id} value={stage.stage_id}>
-                  {stage.stage_id}
-                </option>
-              ))}
-          </select>
-        </div>
-        <div className="form-row">
           <label htmlFor="crud-max-attempts">Max attempts</label>
           <input
             id="crud-max-attempts"
@@ -968,9 +757,12 @@ function StageCrudPanel({
             disabled={disabled || !selectedStage?.is_active}
             onChange={(event) => update("allow_empty_outputs", event.target.checked)}
           />
-          Allow empty outputs
+          Terminal stage
         </label>
       </div>
+      <p className="field-hint">
+        Terminal stage means this workflow may finish successfully without output artifacts.
+      </p>
       <div className="button-row">
         <button
           type="button"
@@ -979,7 +771,6 @@ function StageCrudPanel({
           onClick={() =>
             onUpdate(form.stage_id, {
               workflow_url: form.workflow_url.trim(),
-              next_stage: form.next_stage.trim() || null,
               max_attempts: form.max_attempts,
               retry_delay_sec: form.retry_delay_sec,
               allow_empty_outputs: form.allow_empty_outputs,

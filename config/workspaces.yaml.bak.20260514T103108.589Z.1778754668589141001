@@ -27,31 +27,3 @@ workspaces:
   created_at: 2026-05-14T09:14:33.666896620+00:00
   updated_at: 2026-05-14T09:14:33.666896620+00:00
   archived_at: null
-- id: new_dir
-  name: new_dir
-  provider: s3
-  bucket: steos-s3-data
-  workspace_prefix: new_dir
-  region: ru-1
-  endpoint: https://s3.ru-1.storage.selcloud.ru
-  workdir_path: /tmp/beehive-web-workspaces/new_dir
-  pipeline_path: /tmp/beehive-web-workspaces/new_dir/pipeline.yaml
-  database_path: /tmp/beehive-web-workspaces/new_dir/app.db
-  is_archived: false
-  created_at: 2026-05-14T10:31:08.379561222+00:00
-  updated_at: 2026-05-14T10:31:08.379561222+00:00
-  archived_at: null
-- id: mvbm
-  name: mvbm
-  provider: s3
-  bucket: steos-s3-data
-  workspace_prefix: mvbm
-  region: ru-1
-  endpoint: https://s3.ru-1.storage.selcloud.ru
-  workdir_path: /tmp/beehive-web-workspaces/mvbm
-  pipeline_path: /tmp/beehive-web-workspaces/mvbm/pipeline.yaml
-  database_path: /tmp/beehive-web-workspaces/mvbm/app.db
-  is_archived: false
-  created_at: 2026-05-14T11:51:16.339320737+00:00
-  updated_at: 2026-05-14T11:51:16.339320737+00:00
-  archived_at: null

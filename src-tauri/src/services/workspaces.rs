@@ -16,6 +16,9 @@ use crate::domain::{
 use crate::workdir::path_string;
 
 const DEFAULT_WORKSPACES_ROOT: &str = "/tmp/beehive-web-workspaces";
+const DEFAULT_S3_BUCKET: &str = "steos-s3-data";
+const DEFAULT_S3_REGION: &str = "ru-1";
+const DEFAULT_S3_ENDPOINT: &str = "https://s3.ru-1.storage.selcloud.ru";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkspaceRegistryFile {
@@ -107,7 +110,7 @@ pub(crate) fn create_workspace(
         .map(|workspace| workspace.id.as_str())
         .collect::<HashSet<_>>();
 
-    let name = normalize_required(&input.name, "name")?;
+    let name = normalize_workspace_name(&input.name, "name")?;
     let id = match input
         .id
         .as_deref()
@@ -121,8 +124,14 @@ pub(crate) fn create_workspace(
         return Err(format!("Duplicate workspace id '{id}'."));
     }
 
-    let bucket = normalize_required(&input.bucket, "bucket")?;
-    let workspace_prefix = normalize_route_prefix(&input.workspace_prefix)?;
+    let bucket = match input.bucket.as_ref() {
+        Some(bucket) => normalize_required(bucket, "bucket")?,
+        None => DEFAULT_S3_BUCKET.to_string(),
+    };
+    let workspace_prefix = match input.workspace_prefix.as_ref() {
+        Some(prefix) => normalize_route_prefix(prefix)?,
+        None => name.clone(),
+    };
     let root = workspaces_root();
     let workdir_path = root.join(&id);
     let pipeline_path = workdir_path.join("pipeline.yaml");
@@ -148,8 +157,10 @@ pub(crate) fn create_workspace(
         provider: StorageProvider::S3,
         bucket: Some(bucket),
         workspace_prefix: Some(workspace_prefix),
-        region: normalize_optional(input.region.clone()),
-        endpoint: normalize_optional(input.endpoint.clone()),
+        region: normalize_optional(input.region.clone())
+            .or_else(|| Some(DEFAULT_S3_REGION.to_string())),
+        endpoint: normalize_optional(input.endpoint.clone())
+            .or_else(|| Some(DEFAULT_S3_ENDPOINT.to_string())),
         workdir_path: path_string(&workdir_path),
         pipeline_path: path_string(&pipeline_path),
         database_path: path_string(&database_path),
@@ -200,7 +211,7 @@ pub(crate) fn update_workspace(
     }
 
     if let Some(name) = input.name.as_ref() {
-        registry.workspaces[index].name = normalize_required(name, "name")?;
+        registry.workspaces[index].name = normalize_workspace_name(name, "name")?;
     }
     if input.bucket.is_some() {
         registry.workspaces[index].bucket = next_bucket;
@@ -632,6 +643,20 @@ fn normalize_required(value: &str, path: &str) -> Result<String, String> {
     }
 }
 
+fn normalize_workspace_name(value: &str, path: &str) -> Result<String, String> {
+    let value = normalize_required(value, path)?;
+    if value.contains('/') || value.contains('\\') {
+        return Err(format!("{path} must not contain '/' or '\\'."));
+    }
+    if value.contains("..") {
+        return Err(format!("{path} must not contain '..'."));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(format!("{path} must not contain control characters."));
+    }
+    Ok(value)
+}
+
 fn normalize_optional(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
@@ -707,7 +732,7 @@ fn generate_workspace_id(name: &str, existing_ids: &HashSet<&str>) -> String {
     }
     let slug = slug.trim_matches('-').to_string();
     let base = if slug.is_empty() {
-        "workspace".to_string()
+        generated_workspace_fallback_id()
     } else {
         slug
     };
@@ -721,6 +746,19 @@ fn generate_workspace_id(name: &str, existing_ids: &HashSet<&str>) -> String {
         }
     }
     unreachable!()
+}
+
+fn generated_workspace_fallback_id() -> String {
+    let now = Utc::now();
+    let date = now.format("%Y%m%d");
+    let suffix = format!(
+        "{:06x}",
+        now.timestamp_nanos_opt()
+            .unwrap_or_else(|| now.timestamp_micros() * 1000)
+            .unsigned_abs()
+            % 0x1000000
+    );
+    format!("workspace-{date}-{suffix}")
 }
 
 fn is_safe_workspace_id(value: &str) -> bool {
@@ -866,8 +904,8 @@ workspaces:
             let payload = create_workspace(&CreateWorkspaceRequest {
                 id: Some("pilot".to_string()),
                 name: "Pilot".to_string(),
-                bucket: "bucket".to_string(),
-                workspace_prefix: "prefix/root".to_string(),
+                bucket: Some("bucket".to_string()),
+                workspace_prefix: Some("prefix/root".to_string()),
                 region: Some("ru-1".to_string()),
                 endpoint: Some("https://s3.example".to_string()),
             })
@@ -883,6 +921,60 @@ workspaces:
     }
 
     #[test]
+    fn create_workspace_accepts_name_only_and_applies_s3_defaults() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let registry_path = tempdir.path().join("workspaces.yaml");
+        let root = tempdir.path().join("root");
+        with_test_env(&registry_path, &root, || {
+            let payload = create_workspace(&CreateWorkspaceRequest {
+                id: None,
+                name: "Медицинские сущности тест".to_string(),
+                bucket: None,
+                workspace_prefix: None,
+                region: None,
+                endpoint: None,
+            })
+            .expect("create workspace");
+            let descriptor = payload.workspace.expect("workspace");
+            assert!(descriptor.id.starts_with("workspace-"));
+            assert_eq!(descriptor.name, "Медицинские сущности тест");
+            assert_eq!(descriptor.bucket.as_deref(), Some(DEFAULT_S3_BUCKET));
+            assert_eq!(
+                descriptor.workspace_prefix.as_deref(),
+                Some("Медицинские сущности тест")
+            );
+            assert_eq!(descriptor.region.as_deref(), Some(DEFAULT_S3_REGION));
+            assert_eq!(descriptor.endpoint.as_deref(), Some(DEFAULT_S3_ENDPOINT));
+            assert!(root.join(&descriptor.id).join("pipeline.yaml").exists());
+            assert!(root.join(&descriptor.id).join("app.db").exists());
+        });
+    }
+
+    #[test]
+    fn create_workspace_rejects_unsafe_name() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let registry_path = tempdir.path().join("workspaces.yaml");
+        let root = tempdir.path().join("root");
+        with_test_env(&registry_path, &root, || {
+            for name in [" ", "bad/name", "bad\\name", "bad..name", "bad\nname"] {
+                let error = create_workspace(&CreateWorkspaceRequest {
+                    id: None,
+                    name: name.to_string(),
+                    bucket: None,
+                    workspace_prefix: None,
+                    region: None,
+                    endpoint: None,
+                })
+                .expect_err("unsafe name");
+                assert!(
+                    error.contains("name"),
+                    "error should mention name for {name:?}: {error}"
+                );
+            }
+        });
+    }
+
+    #[test]
     fn create_workspace_rejects_duplicate_id() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let registry_path = tempdir.path().join("workspaces.yaml");
@@ -891,8 +983,8 @@ workspaces:
             let input = CreateWorkspaceRequest {
                 id: Some("pilot".to_string()),
                 name: "Pilot".to_string(),
-                bucket: "bucket".to_string(),
-                workspace_prefix: "prefix/root".to_string(),
+                bucket: Some("bucket".to_string()),
+                workspace_prefix: Some("prefix/root".to_string()),
                 region: None,
                 endpoint: None,
             };
@@ -911,8 +1003,8 @@ workspaces:
             create_workspace(&CreateWorkspaceRequest {
                 id: Some("pilot".to_string()),
                 name: "Pilot".to_string(),
-                bucket: "bucket".to_string(),
-                workspace_prefix: "prefix/root".to_string(),
+                bucket: Some("bucket".to_string()),
+                workspace_prefix: Some("prefix/root".to_string()),
                 region: None,
                 endpoint: None,
             })
@@ -954,8 +1046,8 @@ workspaces:
             create_workspace(&CreateWorkspaceRequest {
                 id: Some("pilot".to_string()),
                 name: "Pilot".to_string(),
-                bucket: "bucket".to_string(),
-                workspace_prefix: "prefix/root".to_string(),
+                bucket: Some("bucket".to_string()),
+                workspace_prefix: Some("prefix/root".to_string()),
                 region: None,
                 endpoint: None,
             })
