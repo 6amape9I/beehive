@@ -575,6 +575,46 @@ pub fn get_stage_state_status(
     find_stage_state_identity(&connection, entity_id, stage_id).map(|state| state.map(|s| s.status))
 }
 
+pub fn get_stage_state(
+    path: &Path,
+    entity_id: &str,
+    stage_id: &str,
+) -> Result<Option<EntityStageStateRecord>, String> {
+    let connection = open_connection(path)?;
+    connection
+        .query_row(
+            r#"
+            SELECT
+                id,
+                entity_id,
+                stage_id,
+                file_path,
+                file_instance_id,
+                file_exists,
+                status,
+                attempts,
+                max_attempts,
+                last_error,
+                last_http_status,
+                next_retry_at,
+                last_started_at,
+                last_finished_at,
+                created_child_path,
+                discovered_at,
+                last_seen_at,
+                updated_at
+            FROM entity_stage_states
+            WHERE entity_id = ?1 AND stage_id = ?2
+            "#,
+            params![entity_id, stage_id],
+            stage_state_from_row,
+        )
+        .optional()
+        .map_err(|error| {
+            format!("Failed to load stage state for entity '{entity_id}' on stage '{stage_id}': {error}")
+        })
+}
+
 pub fn record_manual_retry_event(
     path: &Path,
     entity_id: &str,

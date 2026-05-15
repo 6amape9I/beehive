@@ -67,5 +67,19 @@ workspaces:
   database_path: /tmp/beehive-web-workspaces/full_test/app.db
   is_archived: false
   created_at: 2026-05-14T12:34:56.540000543+00:00
-  updated_at: 2026-05-14T12:34:56.540000543+00:00
+  updated_at: 2026-05-14T13:00:08.497269341+00:00
+  archived_at: null
+- id: test_run_1
+  name: test_run_1
+  provider: s3
+  bucket: steos-s3-data
+  workspace_prefix: test_run_1
+  region: ru-1
+  endpoint: https://s3.ru-1.storage.selcloud.ru
+  workdir_path: /tmp/beehive-web-workspaces/test_run_1
+  pipeline_path: /tmp/beehive-web-workspaces/test_run_1/pipeline.yaml
+  database_path: /tmp/beehive-web-workspaces/test_run_1/app.db
+  is_archived: false
+  created_at: 2026-05-15T12:02:48.656991367+00:00
+  updated_at: 2026-05-15T12:02:48.656991367+00:00
   archived_at: null

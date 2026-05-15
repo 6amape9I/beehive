@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const DEFAULT_REQUEST_TIMEOUT_SEC: u64 = 300;
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -74,7 +76,7 @@ impl Default for RuntimeConfig {
             scan_interval_sec: 5,
             max_parallel_tasks: 3,
             stuck_task_timeout_sec: 900,
-            request_timeout_sec: 30,
+            request_timeout_sec: DEFAULT_REQUEST_TIMEOUT_SEC,
             file_stability_delay_ms: 1000,
         }
     }
@@ -1322,6 +1324,8 @@ pub struct SelectedPipelineRootResult {
     pub s3_uri: Option<String>,
     pub status_before: String,
     pub status_after: Option<String>,
+    pub last_error_before: Option<String>,
+    pub last_error_after: Option<String>,
     pub run_ids: Vec<String>,
     pub output_count: u64,
     pub errors: Vec<CommandErrorInfo>,

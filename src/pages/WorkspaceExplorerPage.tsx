@@ -961,35 +961,48 @@ function SelectedPipelineSummaryPanel({ summary }: { summary: RunSelectedPipelin
               <th>Root</th>
               <th>Stage</th>
               <th>Status</th>
+              <th>Last error</th>
               <th>Runs</th>
               <th>Outputs</th>
               <th>S3</th>
             </tr>
           </thead>
           <tbody>
-            {summary.root_results.map((root) => (
-              <tr key={root.root_entity_file_id}>
-                <td>
-                  <div className="stacked-cell">
-                    <strong>{root.entity_id}</strong>
-                    <span className="muted">file #{root.root_entity_file_id}</span>
-                    {root.artifact_id ? <span className="muted">artifact {root.artifact_id}</span> : null}
-                  </div>
-                </td>
-                <td>{root.stage_id}</td>
-                <td>
-                  <div className="stacked-cell">
-                    <StatusBadge status={root.status_before} />
-                    {root.status_after ? <StatusBadge status={root.status_after} /> : null}
-                  </div>
-                </td>
-                <td>{root.run_ids.length ? root.run_ids.join(", ") : "none"}</td>
-                <td>{root.output_count}</td>
-                <td>
-                  <code>{root.s3_uri ?? root.key ?? "not available"}</code>
-                </td>
-              </tr>
-            ))}
+            {summary.root_results.map((root) => {
+              const lastError = root.last_error_after ?? root.last_error_before;
+              return (
+                <tr key={root.root_entity_file_id}>
+                  <td>
+                    <div className="stacked-cell">
+                      <strong>{root.entity_id}</strong>
+                      <span className="muted">file #{root.root_entity_file_id}</span>
+                      {root.artifact_id ? <span className="muted">artifact {root.artifact_id}</span> : null}
+                    </div>
+                  </td>
+                  <td>{root.stage_id}</td>
+                  <td>
+                    <div className="stacked-cell">
+                      <StatusBadge status={root.status_before} />
+                      {root.status_after ? <StatusBadge status={root.status_after} /> : null}
+                    </div>
+                  </td>
+                  <td>
+                    {lastError ? (
+                      <span className="error-text run-error-cell" title={lastError}>
+                        {lastError}
+                      </span>
+                    ) : (
+                      <span className="muted">none</span>
+                    )}
+                  </td>
+                  <td>{root.run_ids.length ? root.run_ids.join(", ") : "none"}</td>
+                  <td>{root.output_count}</td>
+                  <td>
+                    <code>{root.s3_uri ?? root.key ?? "not available"}</code>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

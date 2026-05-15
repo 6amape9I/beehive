@@ -792,6 +792,13 @@ textarea.compact-textarea {
   margin-top: 14px;
 }
 
+.run-error-cell {
+  display: block;
+  max-width: 360px;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
 .route-hints,
 .stage-run-output-list {
   display: grid;

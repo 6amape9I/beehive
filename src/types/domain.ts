@@ -1062,6 +1062,8 @@ export interface SelectedPipelineRootResult {
   s3_uri: string | null;
   status_before: string;
   status_after: string | null;
+  last_error_before: string | null;
+  last_error_after: string | null;
   run_ids: string[];
   output_count: number;
   errors: CommandErrorInfo[];

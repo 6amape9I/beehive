@@ -913,7 +913,7 @@ mod tests {
                 scan_interval_sec: 5,
                 max_parallel_tasks: 3,
                 stuck_task_timeout_sec: 900,
-                request_timeout_sec: 30,
+                request_timeout_sec: 300,
                 file_stability_delay_ms: 1000,
             },
             stages,

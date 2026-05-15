@@ -20,7 +20,7 @@ use crate::database::{
 use crate::domain::{
     AppEventLevel, ArtifactLocation, CommandErrorInfo, EntityFileRecord, PipelineWaveSummary,
     RunDueTasksSummary, RunPipelineWavesSummary, S3StorageConfig, StageRecord, StageStatus,
-    StorageProvider,
+    StorageProvider, DEFAULT_REQUEST_TIMEOUT_SEC,
 };
 use crate::file_ops;
 use crate::file_safety::read_stable_file;
@@ -997,7 +997,9 @@ fn call_webhook(
     timeout_sec: u64,
 ) -> Result<HttpResponse, AttemptFailure> {
     let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_sec.max(1)))
+        .timeout(std::time::Duration::from_secs(
+            effective_webhook_timeout_sec(timeout_sec),
+        ))
         .build()
         .map_err(|error| AttemptFailure {
             error_type: "network".to_string(),
@@ -1038,7 +1040,9 @@ fn call_s3_control_webhook(
     timeout_sec: u64,
 ) -> Result<HttpResponse, AttemptFailure> {
     let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_sec.max(1)))
+        .timeout(std::time::Duration::from_secs(
+            effective_webhook_timeout_sec(timeout_sec),
+        ))
         .build()
         .map_err(|error| AttemptFailure {
             error_type: "network".to_string(),
@@ -1071,6 +1075,10 @@ fn call_s3_control_webhook(
         response_json: None,
     })?;
     Ok(HttpResponse { status, body })
+}
+
+fn effective_webhook_timeout_sec(timeout_sec: u64) -> u64 {
+    timeout_sec.max(DEFAULT_REQUEST_TIMEOUT_SEC)
 }
 
 fn resolve_s3_control_target_prefix(
@@ -1418,6 +1426,23 @@ mod tests {
         StorageProvider,
     };
     use sha2::Digest;
+
+    #[test]
+    fn webhook_timeout_has_llm_friendly_floor() {
+        assert_eq!(
+            effective_webhook_timeout_sec(1),
+            DEFAULT_REQUEST_TIMEOUT_SEC
+        );
+        assert_eq!(
+            effective_webhook_timeout_sec(30),
+            DEFAULT_REQUEST_TIMEOUT_SEC
+        );
+        assert_eq!(
+            effective_webhook_timeout_sec(300),
+            DEFAULT_REQUEST_TIMEOUT_SEC
+        );
+        assert_eq!(effective_webhook_timeout_sec(450), 450);
+    }
 
     struct MockServer {
         url: String,

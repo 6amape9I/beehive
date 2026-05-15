@@ -18,6 +18,7 @@ coverage/
 tmp/
 test-workdirs/
 *.log
+*.bak.*
 
 .vscode/
 .env

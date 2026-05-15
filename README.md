@@ -157,7 +157,7 @@ In S3 mode, `allow_empty_outputs` defaults to `false`. A success manifest with z
 
 Runtime also supports:
 
-- `runtime.request_timeout_sec` with default `30`
+- `runtime.request_timeout_sec` with default `300`
 - `runtime.file_stability_delay_ms` with default `1000`
 
 `workflow_url` must come from `pipeline.yaml`. Do not hardcode real n8n webhook URLs into application code. The known development n8n production webhook may be used manually or in docs as an example, but automated tests use local mock HTTP servers.

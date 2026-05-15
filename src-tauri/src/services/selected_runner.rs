@@ -44,9 +44,17 @@ pub(crate) fn run_selected_pipeline_waves_with_context(
     let root_ids = validate_root_ids(&input.root_entity_file_ids)?;
     let root_files = load_and_validate_roots(&context.database_path, &root_ids)?;
 
-    let mut root_results = root_files
-        .iter()
-        .map(|file| SelectedPipelineRootResult {
+    let mut root_results = Vec::new();
+    for file in &root_files {
+        let state =
+            database::get_stage_state(&context.database_path, &file.entity_id, &file.stage_id)?
+                .ok_or_else(|| {
+                    format!(
+                        "entity_file_id '{}' has no runtime state for entity '{}' stage '{}'.",
+                        file.id, file.entity_id, file.stage_id
+                    )
+                })?;
+        root_results.push(SelectedPipelineRootResult {
             root_entity_file_id: file.id,
             entity_id: file.entity_id.clone(),
             stage_id: file.stage_id.clone(),
@@ -54,13 +62,15 @@ pub(crate) fn run_selected_pipeline_waves_with_context(
             bucket: file.bucket.clone(),
             key: file.key.clone(),
             s3_uri: s3_uri(file),
-            status_before: file.status.clone(),
+            status_before: state.status,
             status_after: None,
+            last_error_before: state.last_error,
+            last_error_after: None,
             run_ids: Vec::new(),
             output_count: 0,
             errors: Vec::new(),
-        })
-        .collect::<Vec<_>>();
+        });
+    }
 
     let mut frontier = root_files
         .iter()
@@ -400,8 +410,15 @@ fn refresh_root_statuses(
     roots: &mut [SelectedPipelineRootResult],
 ) -> Result<(), String> {
     for root in roots {
-        root.status_after =
-            database::get_stage_state_status(database_path, &root.entity_id, &root.stage_id)?;
+        if let Some(state) =
+            database::get_stage_state(database_path, &root.entity_id, &root.stage_id)?
+        {
+            root.status_after = Some(state.status);
+            root.last_error_after = state.last_error;
+        } else {
+            root.status_after = None;
+            root.last_error_after = None;
+        }
     }
     Ok(())
 }
@@ -473,6 +490,7 @@ mod tests {
     use std::thread;
 
     use chrono::Utc;
+    use rusqlite::{params, Connection};
     use serde_json::Value;
 
     use crate::database::{
@@ -742,6 +760,54 @@ mod tests {
             .expect("files")
             .iter()
             .any(|file| file.id == unrelated.id && file.status == "pending"));
+    }
+
+    #[test]
+    fn selected_runner_reports_previous_retry_error_for_selected_root() {
+        let server = mock_server_dynamic(1, |request| (200, manifest_for_request(request)));
+        let (_tempdir, context) = setup_context(&server.url);
+        let selected = register_source(
+            &context.database_path,
+            "retry-entity",
+            "prefix/raw/retry.json",
+        );
+        let connection = Connection::open(&context.database_path).expect("open db");
+        connection
+            .execute(
+                r#"
+                UPDATE entity_stage_states
+                SET status = 'retry_wait',
+                    attempts = 1,
+                    max_attempts = 2,
+                    last_error = 'previous n8n timeout',
+                    next_retry_at = ?1
+                WHERE entity_id = ?2 AND stage_id = 'raw'
+                "#,
+                params![Utc::now().to_rfc3339(), "retry-entity"],
+            )
+            .expect("seed retry state");
+
+        let summary = run_selected_pipeline_waves_with_context(
+            &context,
+            &RunSelectedPipelineWavesRequest {
+                root_entity_file_ids: vec![selected.id],
+                max_waves: Some(1),
+                max_tasks_per_wave: Some(1),
+                stop_on_first_failure: Some(true),
+            },
+        )
+        .expect("selected retry run");
+
+        assert_eq!(summary.root_results[0].status_before, "retry_wait");
+        assert_eq!(
+            summary.root_results[0].last_error_before.as_deref(),
+            Some("previous n8n timeout")
+        );
+        assert_eq!(
+            summary.root_results[0].status_after.as_deref(),
+            Some("done")
+        );
+        assert!(summary.root_results[0].last_error_after.is_none());
     }
 
     #[test]

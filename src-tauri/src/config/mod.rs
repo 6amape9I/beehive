@@ -7,6 +7,7 @@ use serde::Deserialize;
 use crate::domain::{
     ConfigValidationIssue, ConfigValidationResult, PipelineConfig, ProjectConfig, RuntimeConfig,
     StageDefinition, StorageConfig, StorageProvider, ValidationSeverity,
+    DEFAULT_REQUEST_TIMEOUT_SEC,
 };
 
 #[derive(Debug, Deserialize)]
@@ -71,7 +72,7 @@ runtime:
   scan_interval_sec: 5
   max_parallel_tasks: 3
   stuck_task_timeout_sec: 900
-  request_timeout_sec: 30
+  request_timeout_sec: 300
   file_stability_delay_ms: 1000
 
 stages:
@@ -185,7 +186,9 @@ fn validate_and_build(raw: RawPipelineConfig) -> (Option<PipelineConfig>, Config
 
     let runtime = match raw.runtime {
         Some(runtime) => {
-            let request_timeout_sec = runtime.request_timeout_sec.unwrap_or(30);
+            let request_timeout_sec = runtime
+                .request_timeout_sec
+                .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SEC);
             if request_timeout_sec == 0 {
                 issues.push(issue(
                     ValidationSeverity::Error,
@@ -198,7 +201,7 @@ fn validate_and_build(raw: RawPipelineConfig) -> (Option<PipelineConfig>, Config
                 scan_interval_sec: runtime.scan_interval_sec.unwrap_or(5),
                 max_parallel_tasks: runtime.max_parallel_tasks.unwrap_or(3),
                 stuck_task_timeout_sec: runtime.stuck_task_timeout_sec.unwrap_or(900),
-                request_timeout_sec: request_timeout_sec.max(1),
+                request_timeout_sec: request_timeout_sec.max(DEFAULT_REQUEST_TIMEOUT_SEC),
                 file_stability_delay_ms: runtime.file_stability_delay_ms.unwrap_or(1000),
             }
         }
@@ -716,6 +719,31 @@ stages:
             .issues
             .iter()
             .any(|issue| issue.code == "runtime_defaults_applied"));
+    }
+
+    #[test]
+    fn request_timeout_has_llm_friendly_default_floor() {
+        let yaml = r#"
+project:
+  name: beehive
+  workdir: .
+runtime:
+  request_timeout_sec: 30
+stages:
+  - id: ingest
+    input_folder: stages/incoming
+    output_folder: stages/normalized
+    workflow_url: http://localhost:5678/webhook/ingest
+"#;
+
+        let loaded = parse_pipeline_config(yaml, "now".to_string());
+        let config = loaded.config.expect("config");
+
+        assert!(loaded.validation.is_valid);
+        assert_eq!(
+            config.runtime.request_timeout_sec,
+            DEFAULT_REQUEST_TIMEOUT_SEC
+        );
     }
 
     #[test]

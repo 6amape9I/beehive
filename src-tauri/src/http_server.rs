@@ -21,6 +21,7 @@ pub struct ServerConfig {
     pub registry_path: PathBuf,
     pub max_body_bytes: usize,
     pub allowed_origins: Vec<String>,
+    pub cors_disabled: bool,
 }
 
 impl ServerConfig {
@@ -52,10 +53,10 @@ impl ServerConfig {
             })
             .transpose()?
             .unwrap_or(DEFAULT_MAX_BODY_BYTES);
-        let allowed_origins = parse_allowed_origins(
-            std::env::var("BEEHIVE_ALLOWED_ORIGIN").ok(),
-            !is_local_host(&host) || allow_non_local,
-        )?;
+        let cors_disabled = std::env::var("BEEHIVE_DISABLE_CORS")
+            .map(|value| env_flag_enabled(&value))
+            .unwrap_or(true);
+        let allowed_origins = parse_allowed_origins(std::env::var("BEEHIVE_ALLOWED_ORIGIN").ok());
 
         Ok(Self {
             host,
@@ -66,6 +67,7 @@ impl ServerConfig {
             registry_path: workspaces::registry_path(),
             max_body_bytes,
             allowed_origins,
+            cors_disabled,
         })
     }
 
@@ -85,6 +87,7 @@ pub fn run_server(config: ServerConfig) -> Result<(), String> {
             "static_root": config.static_root.display().to_string(),
             "max_body_bytes": config.max_body_bytes,
             "allowed_origins": &config.allowed_origins,
+            "cors_disabled": config.cors_disabled,
             "token_configured": config.operator_token.is_some(),
             "allow_non_local": config.allow_non_local,
         }),
@@ -399,11 +402,12 @@ fn extra_headers(
     config: &ServerConfig,
     request_headers: &HashMap<String, String>,
 ) -> Vec<(String, String)> {
+    let allowed_headers = request_headers
+        .get("access-control-request-headers")
+        .cloned()
+        .unwrap_or_else(|| "Authorization, Content-Type, Accept".to_string());
     let mut headers = vec![
-        (
-            "Access-Control-Allow-Headers".to_string(),
-            "Authorization, Content-Type, Accept".to_string(),
-        ),
+        ("Access-Control-Allow-Headers".to_string(), allowed_headers),
         (
             "Access-Control-Allow-Methods".to_string(),
             "GET, POST, PATCH, DELETE, OPTIONS".to_string(),
@@ -411,10 +415,20 @@ fn extra_headers(
         ("X-Content-Type-Options".to_string(), "nosniff".to_string()),
     ];
     if let Some(origin) = request_headers.get("origin") {
-        if origin_allowed(origin, &config.allowed_origins) {
+        if config.cors_disabled || origin_allowed(origin, &config.allowed_origins) {
             headers.push(("Access-Control-Allow-Origin".to_string(), origin.clone()));
             headers.push(("Vary".to_string(), "Origin".to_string()));
+            if config.cors_disabled {
+                headers.push((
+                    "Access-Control-Allow-Credentials".to_string(),
+                    "true".to_string(),
+                ));
+                headers.push(("Access-Control-Max-Age".to_string(), "86400".to_string()));
+            }
         }
+    } else if config.cors_disabled {
+        headers.push(("Access-Control-Allow-Origin".to_string(), "*".to_string()));
+        headers.push(("Access-Control-Max-Age".to_string(), "86400".to_string()));
     }
     headers
 }
@@ -445,27 +459,17 @@ fn reason_phrase(status_code: u16) -> &'static str {
     }
 }
 
-fn parse_allowed_origins(
-    raw: Option<String>,
-    non_local_enabled: bool,
-) -> Result<Vec<String>, String> {
-    let origins = raw
-        .map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .filter(|values| !values.is_empty())
-        .unwrap_or_else(default_allowed_origins);
-    if non_local_enabled && origins.iter().any(|origin| origin == "*") {
-        return Err(
-            "BEEHIVE_ALLOWED_ORIGIN='*' is not allowed when non-local bind is enabled.".to_string(),
-        );
-    }
-    Ok(origins)
+fn parse_allowed_origins(raw: Option<String>) -> Vec<String> {
+    raw.map(|value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>()
+    })
+    .filter(|values| !values.is_empty())
+    .unwrap_or_else(default_allowed_origins)
 }
 
 fn default_allowed_origins() -> Vec<String> {
@@ -489,6 +493,13 @@ fn request_body_too_large(content_length: usize, max_body_bytes: usize) -> bool 
 
 fn is_local_host(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+fn env_flag_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 fn default_static_root() -> PathBuf {
@@ -565,7 +576,7 @@ mod tests {
 
     #[test]
     fn cors_defaults_allow_local_dev_origins_without_wildcard() {
-        let origins = parse_allowed_origins(None, false).expect("origins");
+        let origins = parse_allowed_origins(None);
 
         assert!(origin_allowed("http://127.0.0.1:5173", &origins));
         assert!(origin_allowed("http://localhost:8787", &origins));
@@ -573,9 +584,43 @@ mod tests {
     }
 
     #[test]
-    fn non_local_cors_rejects_wildcard_origin() {
-        let result = parse_allowed_origins(Some("*".to_string()), true);
+    fn non_local_bind_still_requires_token_when_cors_is_disabled() {
+        assert!(validate_bind_security("0.0.0.0", true, None).is_err());
+        assert!(validate_bind_security("0.0.0.0", true, Some("token")).is_ok());
+    }
 
-        assert!(result.is_err());
+    #[test]
+    fn disabled_cors_allows_any_origin_and_requested_headers() {
+        let mut request_headers = HashMap::new();
+        request_headers.insert("origin".to_string(), "https://operator.example".to_string());
+        request_headers.insert(
+            "access-control-request-headers".to_string(),
+            "authorization, x-custom-header".to_string(),
+        );
+        let config = ServerConfig {
+            host: "0.0.0.0".to_string(),
+            port: 8787,
+            allow_non_local: true,
+            operator_token: Some("token".to_string()),
+            static_root: PathBuf::from("dist"),
+            registry_path: PathBuf::from("workspaces.yaml"),
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            allowed_origins: vec!["http://localhost:5173".to_string()],
+            cors_disabled: true,
+        };
+        let headers = extra_headers(&config, &request_headers);
+
+        assert!(headers.contains(&(
+            "Access-Control-Allow-Origin".to_string(),
+            "https://operator.example".to_string()
+        )));
+        assert!(headers.contains(&(
+            "Access-Control-Allow-Credentials".to_string(),
+            "true".to_string()
+        )));
+        assert!(headers.contains(&(
+            "Access-Control-Allow-Headers".to_string(),
+            "authorization, x-custom-header".to_string()
+        )));
     }
 }
