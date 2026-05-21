@@ -161,6 +161,7 @@ fn load_dashboard_stages(connection: &Connection) -> Result<Vec<StageRecord>, St
                 stage.next_stage,
                 stage.save_path_aliases_json,
                 stage.allow_empty_outputs,
+                stage.allow_multiple_outputs,
                 stage.is_active,
                 stage.archived_at,
                 stage.last_seen_in_config_at,
@@ -196,12 +197,13 @@ fn load_dashboard_stages(connection: &Connection) -> Result<Vec<StageRecord>, St
                 next_stage: row.get(7)?,
                 save_path_aliases,
                 allow_empty_outputs: row.get::<_, i64>(9)? == 1,
-                is_active: row.get::<_, i64>(10)? == 1,
-                archived_at: row.get(11)?,
-                last_seen_in_config_at: row.get(12)?,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
-                entity_count: row.get::<_, i64>(15)? as u64,
+                allow_multiple_outputs: row.get::<_, i64>(10)? == 1,
+                is_active: row.get::<_, i64>(11)? == 1,
+                archived_at: row.get(12)?,
+                last_seen_in_config_at: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
+                entity_count: row.get::<_, i64>(16)? as u64,
             })
         })
         .map_err(|error| format!("Failed to query dashboard stages: {error}"))?;
@@ -664,6 +666,7 @@ mod tests {
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
             allow_empty_outputs: false,
+            allow_multiple_outputs: false,
         }
     }
 

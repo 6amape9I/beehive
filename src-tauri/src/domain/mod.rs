@@ -148,7 +148,10 @@ pub struct StageStorageConfig {
     pub input_uri: Option<String>,
     pub input_folder: Option<String>,
     pub save_path_aliases: Vec<String>,
+    #[serde(rename = "allow_zero_outputs", alias = "allow_empty_outputs")]
     pub allow_empty_outputs: bool,
+    #[serde(default)]
+    pub allow_multiple_outputs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -164,8 +167,15 @@ pub struct StageDefinition {
     pub next_stage: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub save_path_aliases: Vec<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(
+        default,
+        rename = "allow_zero_outputs",
+        alias = "allow_empty_outputs",
+        skip_serializing_if = "is_false"
+    )]
     pub allow_empty_outputs: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_multiple_outputs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -205,8 +215,15 @@ pub struct StageDefinitionDraft {
     pub next_stage: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub save_path_aliases: Vec<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(
+        default,
+        rename = "allow_zero_outputs",
+        alias = "allow_empty_outputs",
+        skip_serializing_if = "is_false"
+    )]
     pub allow_empty_outputs: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_multiple_outputs: bool,
     pub original_stage_id: Option<String>,
     pub is_new: bool,
 }
@@ -427,7 +444,9 @@ pub struct StageRecord {
     pub retry_delay_sec: u64,
     pub next_stage: Option<String>,
     pub save_path_aliases: Vec<String>,
+    #[serde(rename = "allow_zero_outputs", alias = "allow_empty_outputs")]
     pub allow_empty_outputs: bool,
+    pub allow_multiple_outputs: bool,
     pub is_active: bool,
     pub archived_at: Option<String>,
     pub last_seen_in_config_at: Option<String>,
@@ -898,13 +917,34 @@ pub struct RegisterS3SourceArtifactResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutputRegistrationReportItem {
+    pub artifact_id: Option<String>,
+    pub entity_id: Option<String>,
+    pub target_stage_id: Option<String>,
+    pub status: String,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct OutputRegistrationReport {
+    pub registered_count: u64,
+    pub skipped_count: u64,
+    pub invalid_count: u64,
+    pub conflict_count: u64,
+    pub failed_count: u64,
+    pub outputs: Vec<OutputRegistrationReportItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateS3StageRequest {
     pub stage_id: String,
     pub workflow_url: String,
     pub next_stage: Option<String>,
     pub max_attempts: Option<u64>,
     pub retry_delay_sec: Option<u64>,
+    pub allow_zero_outputs: Option<bool>,
     pub allow_empty_outputs: Option<bool>,
+    pub allow_multiple_outputs: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -933,7 +973,9 @@ pub struct UpdateS3StageRequest {
     pub next_stage: Option<Option<String>>,
     pub max_attempts: Option<u64>,
     pub retry_delay_sec: Option<u64>,
+    pub allow_zero_outputs: Option<bool>,
     pub allow_empty_outputs: Option<bool>,
+    pub allow_multiple_outputs: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1137,7 +1179,9 @@ pub struct WorkspaceStageTree {
     pub retry_delay_sec: u64,
     pub next_stage: Option<String>,
     pub save_path_aliases: Vec<String>,
+    #[serde(rename = "allow_zero_outputs", alias = "allow_empty_outputs")]
     pub allow_empty_outputs: bool,
+    pub allow_multiple_outputs: bool,
     pub is_active: bool,
     pub archived_at: Option<String>,
     pub folder_path: String,

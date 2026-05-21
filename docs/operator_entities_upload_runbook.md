@@ -45,11 +45,14 @@ Rejected names:
    - production n8n webhook URL;
    - max attempts;
    - retry delay;
-   - `Terminal stage` if the workflow may finish without output artifacts.
+   - `Разрешено 0 выходов` if the workflow may filter out a source and return no outputs;
+   - `Разрешено несколько выходов` if the workflow may fan out into more than one output entity.
 4. Click `Create S3 stage`.
 5. Copy generated save_path aliases when configuring n8n outputs.
 
 Do not configure `next_stage`. It is deprecated. n8n must choose the output route by manifest `save_path`.
+
+Default cardinality is exactly one output. The legacy `allow_empty_outputs` field is still accepted by the API as an alias, but new operator UI and docs use `allow_zero_outputs`.
 
 ## Upload Entities
 
@@ -145,3 +148,20 @@ Expected high-level result:
 - one entity archived and restored;
 - selected-run route responds;
 - stage and workspace are archived/deleted from the temporary registry.
+
+## B10 Contract Smoke
+
+The B10 contract smoke uses a temporary workspace and an in-process mock n8n webhook:
+
+```bash
+BEEHIVE_API_BASE_URL=http://127.0.0.1:8787 node scripts/web_operator_contract_smoke.mjs
+```
+
+Expected high-level result:
+
+- stage creation accepts `allow_zero_outputs` and `allow_multiple_outputs`;
+- a Cyrillic `entity_id` works in direct GET/PATCH/DELETE/restore routes;
+- Cyrillic query search is decoded correctly;
+- selected pipeline waves call the mock webhook once;
+- two valid outputs are registered while one conflicting sibling is skipped;
+- source run succeeds and the two child outputs are visible through the stage-run output route.

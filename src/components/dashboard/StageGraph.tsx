@@ -7,7 +7,7 @@ function countersFor(stageId: string, counters: DashboardStageCounters[]) {
 
 export function StageGraph({ overview }: { overview: DashboardOverview }) {
   const edgeSources = new Set(overview.stage_graph.edges.map((edge) => edge.from_stage_id));
-  const terminalNodes = overview.stage_graph.nodes.filter((node) => !edgeSources.has(node.id));
+  const endNodes = overview.stage_graph.nodes.filter((node) => !edgeSources.has(node.id));
 
   return (
     <section className="panel">
@@ -58,10 +58,10 @@ export function StageGraph({ overview }: { overview: DashboardOverview }) {
                   <span>{edge.problem ?? "Link target is active."}</span>
                 </article>
               ))}
-              {terminalNodes.map((node) => (
-                <article className="stage-link-row stage-link-terminal" key={`${node.id}-terminal`}>
-                  <StatusBadge status="terminal" />
-                  <strong>{node.id} -&gt; terminal</strong>
+              {endNodes.map((node) => (
+                <article className="stage-link-row stage-link-terminal" key={`${node.id}-end`}>
+                  <StatusBadge status="end" />
+                  <strong>{node.id} -&gt; end</strong>
                   <span>No next stage configured.</span>
                 </article>
               ))}

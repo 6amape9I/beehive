@@ -285,6 +285,7 @@ fn validate_draft(
                 next_stage: normalize_optional(&stage.next_stage),
                 save_path_aliases: stage.save_path_aliases.clone(),
                 allow_empty_outputs: stage.allow_empty_outputs,
+                allow_multiple_outputs: stage.allow_multiple_outputs,
             })
             .collect(),
     };
@@ -728,6 +729,7 @@ fn draft_from_config(config: &PipelineConfig) -> PipelineConfigDraft {
                 next_stage: stage.next_stage.clone(),
                 save_path_aliases: stage.save_path_aliases.clone(),
                 allow_empty_outputs: stage.allow_empty_outputs,
+                allow_multiple_outputs: stage.allow_multiple_outputs,
                 original_stage_id: Some(stage.id.clone()),
                 is_new: false,
             })
@@ -887,6 +889,7 @@ mod tests {
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
             allow_empty_outputs: false,
+            allow_multiple_outputs: false,
         }
     }
 
@@ -934,6 +937,7 @@ mod tests {
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
             allow_empty_outputs: false,
+            allow_multiple_outputs: false,
             original_stage_id: None,
             is_new: true,
         }

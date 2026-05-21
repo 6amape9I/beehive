@@ -58,7 +58,8 @@ async function main() {
     workflow_url: "https://n8n.example.test/webhook/raw-entities",
     max_attempts: 1,
     retry_delay_sec: 0,
-    allow_empty_outputs: false,
+    allow_zero_outputs: false,
+    allow_multiple_outputs: false,
   });
   assertNoErrors("POST stage", createStage);
   if (createStage.payload?.stage?.next_stage !== null) {

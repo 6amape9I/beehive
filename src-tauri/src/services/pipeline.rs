@@ -191,6 +191,7 @@ fn restore_stage(
         next_stage: record.next_stage,
         save_path_aliases: record.save_path_aliases,
         allow_empty_outputs: record.allow_empty_outputs,
+        allow_multiple_outputs: record.allow_multiple_outputs,
     };
     validate_stage_links_for_stage(&config, &stage)?;
     config.stages.push(stage.clone());
@@ -233,6 +234,12 @@ fn apply_stage_update(
     }
     if let Some(allow_empty_outputs) = input.allow_empty_outputs {
         config.stages[stage_index].allow_empty_outputs = allow_empty_outputs;
+    }
+    if let Some(allow_zero_outputs) = input.allow_zero_outputs {
+        config.stages[stage_index].allow_empty_outputs = allow_zero_outputs;
+    }
+    if let Some(allow_multiple_outputs) = input.allow_multiple_outputs {
+        config.stages[stage_index].allow_multiple_outputs = allow_multiple_outputs;
     }
     let _ = input.next_stage.as_ref();
 
@@ -475,7 +482,11 @@ fn build_s3_stage(
         retry_delay_sec: input.retry_delay_sec.unwrap_or(30),
         next_stage: None,
         save_path_aliases,
-        allow_empty_outputs: input.allow_empty_outputs.unwrap_or(false),
+        allow_empty_outputs: input
+            .allow_zero_outputs
+            .or(input.allow_empty_outputs)
+            .unwrap_or(false),
+        allow_multiple_outputs: input.allow_multiple_outputs.unwrap_or(false),
     })
 }
 
@@ -689,7 +700,9 @@ mod tests {
                 next_stage: None,
                 max_attempts: None,
                 retry_delay_sec: None,
+                allow_zero_outputs: None,
                 allow_empty_outputs: None,
+                allow_multiple_outputs: None,
             },
         )
         .expect("stage");
@@ -724,6 +737,7 @@ mod tests {
             next_stage: None,
             save_path_aliases: Vec::new(),
             allow_empty_outputs: false,
+            allow_multiple_outputs: false,
         };
         let config = PipelineConfig {
             project: ProjectConfig {
@@ -743,7 +757,9 @@ mod tests {
                 next_stage: Some("stage_b".to_string()),
                 max_attempts: None,
                 retry_delay_sec: None,
+                allow_zero_outputs: None,
                 allow_empty_outputs: None,
+                allow_multiple_outputs: None,
             },
         )
         .expect("stage");
@@ -773,7 +789,9 @@ mod tests {
                 next_stage: None,
                 max_attempts: None,
                 retry_delay_sec: None,
+                allow_zero_outputs: None,
                 allow_empty_outputs: None,
+                allow_multiple_outputs: None,
             },
         )
         .expect_err("bad workflow url should be rejected");
@@ -796,6 +814,7 @@ mod tests {
             next_stage: None,
             save_path_aliases: Vec::new(),
             allow_empty_outputs: false,
+            allow_multiple_outputs: false,
         };
         let config = PipelineConfig {
             project: ProjectConfig {
@@ -815,7 +834,9 @@ mod tests {
                 next_stage: None,
                 max_attempts: None,
                 retry_delay_sec: None,
+                allow_zero_outputs: None,
                 allow_empty_outputs: None,
+                allow_multiple_outputs: None,
             },
         )
         .expect_err("duplicate should be rejected");
@@ -846,7 +867,9 @@ mod tests {
                     next_stage: None,
                     max_attempts: None,
                     retry_delay_sec: None,
+                    allow_zero_outputs: None,
                     allow_empty_outputs: None,
+                    allow_multiple_outputs: None,
                 },
             )
             .expect("stage");
@@ -894,7 +917,9 @@ mod tests {
                 next_stage: None,
                 max_attempts: None,
                 retry_delay_sec: None,
+                allow_zero_outputs: None,
                 allow_empty_outputs: None,
+                allow_multiple_outputs: None,
             },
         )
         .expect("stage");
@@ -909,7 +934,9 @@ mod tests {
                 next_stage: Some(None),
                 max_attempts: Some(5),
                 retry_delay_sec: Some(90),
+                allow_zero_outputs: None,
                 allow_empty_outputs: Some(true),
+                allow_multiple_outputs: None,
             },
         )
         .expect("update");
@@ -963,7 +990,9 @@ mod tests {
                     next_stage: None,
                     max_attempts: None,
                     retry_delay_sec: None,
+                    allow_zero_outputs: None,
                     allow_empty_outputs: None,
+                    allow_multiple_outputs: None,
                 },
             )
             .expect("stage");
@@ -1000,7 +1029,9 @@ mod tests {
                 next_stage: None,
                 max_attempts: None,
                 retry_delay_sec: None,
+                allow_zero_outputs: None,
                 allow_empty_outputs: None,
+                allow_multiple_outputs: None,
             },
         )
         .expect("stage");
@@ -1037,7 +1068,9 @@ mod tests {
                 next_stage: None,
                 max_attempts: None,
                 retry_delay_sec: None,
+                allow_zero_outputs: None,
                 allow_empty_outputs: None,
+                allow_multiple_outputs: None,
             },
         )
         .expect("stage");

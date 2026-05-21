@@ -45,17 +45,15 @@ fn route_json_request(
     body: Option<&str>,
 ) -> Result<HttpApiResponse, (u16, &'static str, String)> {
     let (path_only, query) = split_path_query(path);
-    let parts = path_only
-        .trim_matches('/')
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
+    let decoded_parts = decode_path_segments(path_only)?;
+    let parts = decoded_parts.iter().map(String::as_str).collect::<Vec<_>>();
+    let query_pairs = decode_query_pairs(query)?;
 
     if method == "GET" && parts == ["api", "health"] {
         return Ok(json_response(200, json!({ "status": "ok" })));
     }
     if method == "GET" && parts == ["api", "workspaces"] {
-        let include_archived = query_bool(query, "include_archived").unwrap_or(false);
+        let include_archived = query_bool(&query_pairs, "include_archived").unwrap_or(false);
         let result = match workspaces::list_workspace_descriptors(include_archived) {
             Ok(workspaces) => WorkspaceRegistryListResult {
                 workspaces,
@@ -162,7 +160,7 @@ fn route_json_request(
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
             }
             ("GET", ["api", "workspaces", _, "entities"]) => {
-                let query = entity_list_query_from_query(query);
+                let query = entity_list_query_from_query(&query_pairs);
                 let result = match entities::list_entities_for_workspace(workspace_id, query) {
                     Ok(result) => result,
                     Err(message) => EntityListResult {
@@ -400,21 +398,85 @@ fn split_path_query(path: &str) -> (&str, Option<&str>) {
     }
 }
 
-fn query_bool(query: Option<&str>, key: &str) -> Option<bool> {
-    let query = query?;
-    for pair in query.split('&') {
-        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+fn decode_path_segments(path: &str) -> Result<Vec<String>, (u16, &'static str, String)> {
+    path.trim_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(|part| percent_decode(part, false))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|message| (400, "request_url_invalid", message))
+}
+
+fn decode_query_pairs(
+    query: Option<&str>,
+) -> Result<Vec<(String, String)>, (u16, &'static str, String)> {
+    let Some(query) = query else {
+        return Ok(Vec::new());
+    };
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+            Ok((percent_decode(name, true)?, percent_decode(value, true)?))
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(|message| (400, "request_url_invalid", message))
+}
+
+fn percent_decode(value: &str, plus_as_space: bool) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                if index + 2 >= bytes.len() {
+                    return Err(format!(
+                        "Invalid percent escape in URL component '{value}'."
+                    ));
+                }
+                let hi = hex_value(bytes[index + 1])
+                    .ok_or_else(|| format!("Invalid percent escape in URL component '{value}'."))?;
+                let lo = hex_value(bytes[index + 2])
+                    .ok_or_else(|| format!("Invalid percent escape in URL component '{value}'."))?;
+                decoded.push((hi << 4) | lo);
+                index += 3;
+            }
+            b'+' if plus_as_space => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded)
+        .map_err(|_| format!("URL component '{value}' is not valid UTF-8 after decoding."))
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn query_bool(query: &[(String, String)], key: &str) -> Option<bool> {
+    for (name, value) in query {
         if name == key {
-            return Some(matches!(value, "true" | "1" | "yes"));
+            return Some(matches!(value.as_str(), "true" | "1" | "yes"));
         }
     }
     None
 }
 
-fn query_param(query: Option<&str>, key: &str) -> Option<String> {
-    let query = query?;
-    for pair in query.split('&') {
-        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+fn query_param(query: &[(String, String)], key: &str) -> Option<String> {
+    for (name, value) in query {
         if name == key {
             let value = value.trim();
             if !value.is_empty() {
@@ -425,11 +487,11 @@ fn query_param(query: Option<&str>, key: &str) -> Option<String> {
     None
 }
 
-fn query_u64(query: Option<&str>, key: &str) -> Option<u64> {
+fn query_u64(query: &[(String, String)], key: &str) -> Option<u64> {
     query_param(query, key).and_then(|value| value.parse::<u64>().ok())
 }
 
-fn entity_list_query_from_query(query: Option<&str>) -> EntityListQuery {
+fn entity_list_query_from_query(query: &[(String, String)]) -> EntityListQuery {
     EntityListQuery {
         search: query_param(query, "search"),
         stage_id: query_param(query, "stage_id"),
@@ -674,6 +736,49 @@ mod tests {
         assert_eq!(
             import.body["errors"][0]["code"].as_str(),
             Some("import_json_batch_failed")
+        );
+    }
+
+    #[test]
+    fn url_decoding_handles_cyrillic_path_and_query_contracts() {
+        let entity_id = decode_path_segments(
+            "/api/workspaces/smoke/entities/symptom_%D0%9A%D0%BE%D0%BB%D1%8C%D1%86%D0%B0_%D0%9A%D0%B0%D0%B9%D0%B7%D0%B5%D1%80%D0%B0-%D0%A4%D0%BB%D0%B5%D0%B9%D1%88%D0%B5%D1%80%D0%B0_e74b3ffa92f0",
+        )
+        .expect("path decode")
+        .pop()
+        .expect("entity id");
+        assert_eq!(entity_id, "symptom_Кольца_Кайзера-Флейшера_e74b3ffa92f0");
+        assert_eq!(
+            decode_path_segments(
+                "/api/workspaces/smoke/entities/%D0%BC%D0%B8%D0%BB%D0%BB%D0%B8%D0%B3%D1%80%D0%B0%D0%BC%D0%BC"
+            )
+            .expect("path decode")
+            .last()
+            .map(String::as_str),
+            Some("миллиграмм")
+        );
+
+        let plus_path =
+            decode_path_segments("/api/workspaces/smoke/entities/a+b%2Bc").expect("plus path");
+        assert_eq!(plus_path.last().map(String::as_str), Some("a+b+c"));
+
+        let query = decode_query_pairs(Some(
+            "search=%D0%9A%D0%BE%D0%BB%D1%8C%D1%86%D0%B0+%D0%9A%D0%B0%D0%B9%D0%B7%D0%B5%D1%80%D0%B0%2B%D0%A4%D0%BB%D0%B5%D0%B9%D1%88%D0%B5%D1%80%D0%B0",
+        ))
+        .expect("query decode");
+        assert_eq!(
+            query_param(&query, "search").as_deref(),
+            Some("Кольца Кайзера+Флейшера")
+        );
+    }
+
+    #[test]
+    fn invalid_percent_escape_returns_400() {
+        let response = handle_json_request("GET", "/api/workspaces/%ZZ", None);
+        assert_eq!(response.status_code, 400);
+        assert_eq!(
+            response.body["errors"][0]["code"].as_str(),
+            Some("request_url_invalid")
         );
     }
 

@@ -108,6 +108,7 @@ mod tests {
                 next_stage: None,
                 save_path_aliases: vec!["prefix/processed".to_string()],
                 allow_empty_outputs: false,
+                allow_multiple_outputs: false,
             }],
         }
     }

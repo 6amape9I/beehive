@@ -838,6 +838,7 @@ mod tests {
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
             allow_empty_outputs: false,
+            allow_multiple_outputs: false,
         }
     }
 

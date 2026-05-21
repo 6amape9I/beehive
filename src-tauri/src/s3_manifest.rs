@@ -78,6 +78,7 @@ impl S3ManifestRelationToSource {
 pub(crate) enum S3ManifestValidationErrorKind {
     Invalid,
     BlockedRoute,
+    BlockedContract,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +145,12 @@ pub(crate) fn parse_and_validate_s3_manifest(
         .as_deref()
         .ok_or_else(|| invalid("Claimed source artifact does not have an S3 key."))?;
     if manifest.source.bucket != expected_bucket || manifest.source.key != expected_key {
+        if manifest.source.bucket == expected_bucket && manifest.source.key.contains('%') {
+            return Err(invalid(format!(
+                "Manifest source key must match the literal claimed S3 key '{}'; got '{}'. Do not URL-encode source.key in the n8n manifest.",
+                expected_key, manifest.source.key
+            )));
+        }
         return Err(invalid(
             "Manifest source bucket/key does not match claimed artifact.",
         ));
@@ -159,10 +166,16 @@ fn validate_success_manifest(
     manifest: S3ArtifactManifest,
     context: &S3ManifestValidationContext,
 ) -> Result<ValidatedS3Manifest, S3ManifestValidationError> {
-    if manifest.outputs.is_empty() && !context.source_stage.allow_empty_outputs {
-        return Err(invalid(
-            "Success manifest may omit outputs only when source stage allow_empty_outputs is true.",
+    let output_count = manifest.outputs.len();
+    if output_count == 0 && !context.source_stage.allow_empty_outputs {
+        return Err(blocked_contract(
+            "Success manifest returned 0 outputs, but this stage expects exactly 1 output. Enable allow_zero_outputs for workflows that may filter out a source.",
         ));
+    }
+    if output_count > 1 && !context.source_stage.allow_multiple_outputs {
+        return Err(blocked_contract(format!(
+            "Success manifest returned {output_count} outputs, but this stage expects exactly 1 output. Enable allow_multiple_outputs for fan-out workflows."
+        )));
     }
     let mut outputs = Vec::new();
     let mut artifact_ids = HashSet::new();
@@ -171,7 +184,7 @@ fn validate_success_manifest(
             return Err(invalid("Manifest output artifact_id is required."));
         }
         if !artifact_ids.insert(output.artifact_id.clone()) {
-            return Err(invalid(format!(
+            return Err(blocked_contract(format!(
                 "Manifest output artifact_id '{}' appears more than once.",
                 output.artifact_id
             )));
@@ -266,7 +279,13 @@ fn reject_business_payload_fields(value: &Value) -> Result<(), S3ManifestValidat
     let Some(root) = value.as_object() else {
         return Err(invalid("Manifest root must be a JSON object."));
     };
-    for forbidden in ["payload", "business_payload", "business_json", "data"] {
+    for forbidden in [
+        "body",
+        "payload",
+        "business_payload",
+        "business_json",
+        "data",
+    ] {
         if root.contains_key(forbidden) {
             return Err(invalid(format!(
                 "Manifest must not contain business payload field '{}'.",
@@ -277,7 +296,13 @@ fn reject_business_payload_fields(value: &Value) -> Result<(), S3ManifestValidat
     if let Some(outputs) = root.get("outputs").and_then(Value::as_array) {
         for output in outputs {
             if let Some(output) = output.as_object() {
-                for forbidden in ["payload", "business_payload", "business_json", "data"] {
+                for forbidden in [
+                    "body",
+                    "payload",
+                    "business_payload",
+                    "business_json",
+                    "data",
+                ] {
                     if output.contains_key(forbidden) {
                         return Err(invalid(format!(
                             "Manifest output must not contain business payload field '{}'.",
@@ -298,6 +323,13 @@ fn invalid(message: impl Into<String>) -> S3ManifestValidationError {
     }
 }
 
+fn blocked_contract(message: impl Into<String>) -> S3ManifestValidationError {
+    S3ManifestValidationError {
+        kind: S3ManifestValidationErrorKind::BlockedContract,
+        message: message.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +346,7 @@ mod tests {
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
             allow_empty_outputs: false,
+            allow_multiple_outputs: false,
             is_active: true,
             archived_at: None,
             last_seen_in_config_at: None,
@@ -402,12 +435,76 @@ mod tests {
   "created_at":"2026-05-12T00:00:00Z"
 }"#;
         let rejected = parse_and_validate_s3_manifest(manifest, &context()).expect_err("rejected");
-        assert!(rejected.message.contains("allow_empty_outputs"));
+        assert_eq!(
+            rejected.kind,
+            S3ManifestValidationErrorKind::BlockedContract
+        );
+        assert!(rejected.message.contains("allow_zero_outputs"));
 
         let mut allow_context = context();
         allow_context.source_stage.allow_empty_outputs = true;
         let accepted = parse_and_validate_s3_manifest(manifest, &allow_context).expect("accepted");
         assert!(accepted.outputs.is_empty());
+    }
+
+    #[test]
+    fn multiple_output_success_requires_explicit_stage_opt_in() {
+        let manifest = r#"{
+  "schema":"beehive.s3_artifact_manifest.v1",
+  "workspace_id":"beehive-s3-dev",
+  "run_id":"run_123",
+  "source":{"bucket":"steos-s3-data","key":"main_dir/raw/input_001.json"},
+  "status":"success",
+  "outputs":[
+    {"artifact_id":"art_001","entity_id":"entity-1-child-a","relation_to_source":"child_entity","bucket":"steos-s3-data","key":"main_dir/processed/raw_entities/art_001.json","save_path":"main_dir/processed/raw_entities","content_type":"application/json","checksum_sha256":null,"size":123},
+    {"artifact_id":"art_002","entity_id":"entity-1-child-b","relation_to_source":"child_entity","bucket":"steos-s3-data","key":"main_dir/processed/raw_entities/art_002.json","save_path":"main_dir/processed/raw_entities","content_type":"application/json","checksum_sha256":null,"size":123}
+  ],
+  "created_at":"2026-05-12T00:00:00Z"
+}"#;
+        let rejected = parse_and_validate_s3_manifest(manifest, &context()).expect_err("many");
+        assert_eq!(
+            rejected.kind,
+            S3ManifestValidationErrorKind::BlockedContract
+        );
+        assert!(rejected.message.contains("allow_multiple_outputs"));
+
+        let mut allow_context = context();
+        allow_context.source_stage.allow_multiple_outputs = true;
+        let accepted = parse_and_validate_s3_manifest(manifest, &allow_context).expect("accepted");
+        assert_eq!(accepted.outputs.len(), 2);
+    }
+
+    #[test]
+    fn zero_and_multiple_output_flags_can_be_enabled_together() {
+        let empty_manifest = r#"{
+  "schema":"beehive.s3_artifact_manifest.v1",
+  "workspace_id":"beehive-s3-dev",
+  "run_id":"run_123",
+  "source":{"bucket":"steos-s3-data","key":"main_dir/raw/input_001.json"},
+  "status":"success",
+  "outputs":[],
+  "created_at":"2026-05-12T00:00:00Z"
+}"#;
+        let mut allow_context = context();
+        allow_context.source_stage.allow_empty_outputs = true;
+        allow_context.source_stage.allow_multiple_outputs = true;
+
+        assert!(
+            parse_and_validate_s3_manifest(empty_manifest, &allow_context)
+                .expect("zero")
+                .outputs
+                .is_empty()
+        );
+        assert_eq!(
+            parse_and_validate_s3_manifest(
+                &success_manifest("main_dir/processed/raw_entities"),
+                &allow_context,
+            )
+            .expect("one")
+            .outputs
+            .len(),
+            1
+        );
     }
 
     #[test]
@@ -428,8 +525,15 @@ mod tests {
   ],
   "created_at":"2026-05-12T00:00:00Z"
 }"#;
+        let mut duplicate_context = context();
+        duplicate_context.source_stage.allow_multiple_outputs = true;
         let duplicate_error =
-            parse_and_validate_s3_manifest(duplicate_artifact_id, &context()).expect_err("dup");
+            parse_and_validate_s3_manifest(duplicate_artifact_id, &duplicate_context)
+                .expect_err("dup");
+        assert_eq!(
+            duplicate_error.kind,
+            S3ManifestValidationErrorKind::BlockedContract
+        );
         assert!(duplicate_error.message.contains("appears more than once"));
 
         let same_entity_mismatch = success_manifest("main_dir/processed/raw_entities").replace(
@@ -488,11 +592,37 @@ mod tests {
             ),
             success_manifest("main_dir/processed/raw_entities")
                 .replace("\"outputs\":[", "\"payload\":{\"x\":1},\"outputs\":["),
+            success_manifest("main_dir/processed/raw_entities")
+                .replace("\"outputs\":[", "\"body\":{\"ok\":true},\"outputs\":["),
         ] {
             assert!(
                 parse_and_validate_s3_manifest(&manifest, &context()).is_err(),
                 "manifest should reject: {manifest}"
             );
         }
+    }
+
+    #[test]
+    fn manifest_root_shape_is_strict() {
+        for manifest in [
+            "[]",
+            r#""ok""#,
+            r#"{"body":{"schema":"beehive.s3_artifact_manifest.v1"}}"#,
+        ] {
+            assert!(
+                parse_and_validate_s3_manifest(manifest, &context()).is_err(),
+                "manifest should reject: {manifest}"
+            );
+        }
+    }
+
+    #[test]
+    fn url_encoded_source_key_is_rejected_clearly() {
+        let manifest = success_manifest("main_dir/processed/raw_entities").replace(
+            "main_dir/raw/input_001.json",
+            "main_dir%2Fraw%2Finput_001.json",
+        );
+        let error = parse_and_validate_s3_manifest(&manifest, &context()).expect_err("encoded");
+        assert!(error.message.contains("Do not URL-encode source.key"));
     }
 }

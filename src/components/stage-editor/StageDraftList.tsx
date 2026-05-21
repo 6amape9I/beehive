@@ -24,6 +24,19 @@ function issueCount(issues: ConfigValidationIssue[], index: number, stageId: str
   ).length;
 }
 
+function allowsZeroOutputs(stage: StageDefinitionDraft) {
+  return !!(stage.allow_zero_outputs ?? stage.allow_empty_outputs ?? false);
+}
+
+function cardinalityLabel(stage: StageDefinitionDraft) {
+  const zero = allowsZeroOutputs(stage);
+  const many = !!stage.allow_multiple_outputs;
+  if (zero && many) return "0, 1, or many outputs";
+  if (zero) return "0 or 1 output";
+  if (many) return "1 or many outputs";
+  return "Exactly 1 output";
+}
+
 export function StageDraftList({
   stages,
   usages,
@@ -74,8 +87,8 @@ export function StageDraftList({
                       {stage.is_new ? <div className="muted">new</div> : null}
                     </td>
                     <td><code>{stage.input_uri ?? stage.input_folder}</code></td>
-                    <td>{stage.allow_empty_outputs ? "Terminal" : <code>{stage.output_folder}</code>}</td>
-                    <td>{stage.allow_empty_outputs ? "Terminal" : "Manifest outputs"}</td>
+                    <td><code>{stage.output_folder}</code></td>
+                    <td>{cardinalityLabel(stage)}</td>
                     <td>{stage.max_attempts} / {stage.retry_delay_sec}s</td>
                     <td>
                       {usage ? (

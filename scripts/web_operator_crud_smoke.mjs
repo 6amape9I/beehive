@@ -69,7 +69,8 @@ async function main() {
     next_stage: null,
     max_attempts: 3,
     retry_delay_sec: 30,
-    allow_empty_outputs: false,
+    allow_zero_outputs: false,
+    allow_multiple_outputs: true,
   });
   assertNoErrors("POST stage_a", createStageA);
 
@@ -79,7 +80,8 @@ async function main() {
     next_stage: null,
     max_attempts: 2,
     retry_delay_sec: 15,
-    allow_empty_outputs: true,
+    allow_zero_outputs: true,
+    allow_multiple_outputs: false,
   });
   assertNoErrors("POST stage_b", createStageB);
 
@@ -90,7 +92,8 @@ async function main() {
       workflow_url: "https://n8n.example.test/webhook/stage-b-updated",
       max_attempts: 4,
       retry_delay_sec: 45,
-      allow_empty_outputs: false,
+      allow_zero_outputs: false,
+      allow_multiple_outputs: false,
       next_stage: null,
     },
   );

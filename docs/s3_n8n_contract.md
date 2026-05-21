@@ -134,11 +134,15 @@ s3://steos-s3-data/main_dir/processed/raw_entities
 
 Beehive blocks the run if `save_path` is unsafe, unknown, ambiguous, points to the wrong bucket, or if the output key is outside the resolved stage prefix.
 
-## Empty Outputs
+## Output Cardinality
 
-`allow_empty_outputs` is a Beehive stage config flag. It defaults to `false`.
+`allow_zero_outputs` and `allow_multiple_outputs` are Beehive stage contract flags. Both default to `false`, so a stage expects exactly one output.
 
-A success manifest may have zero outputs only when the source stage explicitly sets `allow_empty_outputs: true`. This is independent from `next_stage`; a terminal-looking S3 stage still rejects zero-output success unless this flag is set.
+A success manifest may have zero outputs only when the source stage explicitly sets `allow_zero_outputs: true`.
+
+A success manifest may have more than one output only when the source stage explicitly sets `allow_multiple_outputs: true`.
+
+Legacy `allow_empty_outputs: true` is still accepted as a deprecated alias for `allow_zero_outputs: true`. This is independent from `next_stage`.
 
 ## Registration Conflicts
 

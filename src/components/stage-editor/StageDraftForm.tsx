@@ -10,6 +10,13 @@ interface StageDraftFormProps {
   onRemove: () => void;
 }
 
+const OUTPUT_CARDINALITY_HELP =
+  'По умолчанию stage ожидает ровно 1 output. Если workflow может отфильтровать вход и ничего не вернуть - включите "Разрешено 0 выходов". Если workflow может породить несколько новых сущностей - включите "Разрешено несколько выходов".';
+
+function allowsZeroOutputs(stage: StageDefinitionDraft) {
+  return !!(stage.allow_zero_outputs ?? stage.allow_empty_outputs ?? false);
+}
+
 export function StageDraftForm({
   stage,
   usage,
@@ -29,7 +36,7 @@ export function StageDraftForm({
 
   const currentStage = stage;
   const stageIdLocked = !currentStage.is_new;
-  const terminal = !!currentStage.allow_empty_outputs;
+  const zeroOutputsAllowed = allowsZeroOutputs(currentStage);
   const savePathAliases = currentStage.save_path_aliases ?? [];
 
   function update(patch: Partial<StageDefinitionDraft>) {
@@ -93,9 +100,7 @@ export function StageDraftForm({
           />
         </div>
         <div className="form-row">
-          <label htmlFor="stage-output">
-            Output folder {terminal ? "(optional for terminal stage)" : ""}
-          </label>
+          <label htmlFor="stage-output">Output folder</label>
           <input
             id="stage-output"
             value={currentStage.output_folder}
@@ -146,17 +151,28 @@ export function StageDraftForm({
           />
         </div>
         <div className="form-row">
-          <label htmlFor="stage-allow-empty-outputs">Terminal stage</label>
+          <label htmlFor="stage-allow-zero-outputs">Output cardinality</label>
           <label className="checkbox-row">
             <input
-              id="stage-allow-empty-outputs"
+              id="stage-allow-zero-outputs"
               type="checkbox"
-              checked={!!currentStage.allow_empty_outputs}
+              checked={zeroOutputsAllowed}
               disabled={disabled}
-              onChange={(event) => update({ allow_empty_outputs: event.target.checked })}
+              onChange={(event) => update({ allow_zero_outputs: event.target.checked })}
             />
-            <span>{currentStage.allow_empty_outputs ? "terminal" : "requires manifest output"}</span>
+            <span>Разрешено 0 выходов</span>
           </label>
+          <label className="checkbox-row">
+            <input
+              id="stage-allow-multiple-outputs"
+              type="checkbox"
+              checked={!!currentStage.allow_multiple_outputs}
+              disabled={disabled}
+              onChange={(event) => update({ allow_multiple_outputs: event.target.checked })}
+            />
+            <span>Разрешено несколько выходов</span>
+          </label>
+          <p className="field-hint">{OUTPUT_CARDINALITY_HELP}</p>
         </div>
       </div>
       <StageUsageSummaryView usage={usage} />

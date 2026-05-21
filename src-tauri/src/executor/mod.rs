@@ -12,7 +12,7 @@ use crate::database::{
     block_stage_state, claim_eligible_runtime_tasks, claim_specific_runtime_task,
     find_latest_entity_file_for_stage, find_stage_by_id, finish_stage_run, insert_app_event,
     load_active_stages_from_connection, load_setting, open_connection,
-    reconcile_orphan_stage_runs_for_queued_state, register_s3_artifact_pointers,
+    reconcile_orphan_stage_runs_for_queued_state, register_s3_artifact_pointers_best_effort,
     release_queued_claim, start_claimed_stage_run, update_stage_state_failure,
     update_stage_state_failure_with_reason, update_stage_state_success, FinishStageRunInput,
     NewStageRunInput, RegisterS3ArtifactPointerInput, RuntimeTaskRecord,
@@ -658,7 +658,13 @@ fn execute_s3_task(
     };
     let validated = match parse_and_validate_s3_manifest(&response.body, &context) {
         Ok(validated) => validated,
-        Err(error) if error.kind == S3ManifestValidationErrorKind::BlockedRoute => {
+        Err(error)
+            if matches!(
+                error.kind,
+                S3ManifestValidationErrorKind::BlockedRoute
+                    | S3ManifestValidationErrorKind::BlockedContract
+            ) =>
+        {
             finish_manifest_blocked(
                 &connection,
                 &task,
@@ -742,25 +748,50 @@ fn execute_s3_task(
             status: StageStatus::Pending,
         })
         .collect::<Vec<_>>();
-    let registered_files = match register_s3_artifact_pointers(database_path, &output_inputs) {
-        Ok(files) => files,
-        Err(message) => {
-            return finish_failure(
-                &connection,
-                &task,
-                &run_id,
-                attempt_no,
-                AttemptFailure {
-                    error_type: "artifact_registration_failed".to_string(),
-                    message,
-                    http_status: Some(response.status),
-                    response_json: Some(response.body),
-                },
-                finished_at,
-                duration_ms,
-            );
-        }
+    let (registered_files, registration_report) =
+        register_s3_artifact_pointers_best_effort(database_path, &output_inputs)?;
+    let accepted_output_count =
+        registration_report.registered_count + registration_report.skipped_count;
+    let report_level = if registration_report.invalid_count > 0
+        || registration_report.conflict_count > 0
+        || registration_report.failed_count > 0
+    {
+        AppEventLevel::Warning
+    } else {
+        AppEventLevel::Info
     };
+    insert_app_event(
+        &connection,
+        report_level,
+        "output_registration_report",
+        &format!(
+            "S3 output registration for run '{}' registered {}, skipped {}, invalid {}, conflict {}, failed {}.",
+            run_id,
+            registration_report.registered_count,
+            registration_report.skipped_count,
+            registration_report.invalid_count,
+            registration_report.conflict_count,
+            registration_report.failed_count
+        ),
+        Some(serde_json::to_value(&registration_report).map_err(|error| {
+            format!("Failed to serialize output registration report: {error}")
+        })?),
+        &finished_at.to_rfc3339(),
+    )?;
+    if accepted_output_count == 0 && !validated.outputs.is_empty() {
+        finish_manifest_blocked(
+            &connection,
+            &task,
+            &run_id,
+            "No manifest outputs could be registered; see output_registration_report app event for per-output errors."
+                .to_string(),
+            response.status,
+            response.body,
+            finished_at,
+            duration_ms,
+        )?;
+        return Ok(TaskOutcome::Blocked);
+    }
     let created_child_paths = registered_files
         .iter()
         .map(|file| file.file_path.clone())
@@ -799,6 +830,7 @@ fn execute_s3_task(
             "stage_id": task.stage_id,
             "run_id": run_id,
             "output_count": created_child_paths.len(),
+            "output_registration_report": registration_report,
             "created_child_paths": created_child_paths,
         })),
         &finished_at.to_rfc3339(),
@@ -1565,6 +1597,7 @@ mod tests {
                     next_stage: Some("normalized".to_string()),
                     save_path_aliases: Vec::new(),
                     allow_empty_outputs: false,
+                    allow_multiple_outputs: false,
                 },
                 StageDefinition {
                     id: "normalized".to_string(),
@@ -1577,6 +1610,7 @@ mod tests {
                     next_stage: None,
                     save_path_aliases: Vec::new(),
                     allow_empty_outputs: false,
+                    allow_multiple_outputs: false,
                 },
             ],
         }
@@ -1599,6 +1633,7 @@ mod tests {
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
             allow_empty_outputs: false,
+            allow_multiple_outputs: false,
         }
     }
 
@@ -1719,6 +1754,7 @@ mod tests {
         workflow_url: &str,
         raw_next_stage: Option<&str>,
         allow_empty_outputs: bool,
+        allow_multiple_outputs: bool,
     ) -> PipelineConfig {
         PipelineConfig {
             project: ProjectConfig {
@@ -1748,6 +1784,7 @@ mod tests {
                         "/main_dir/raw".to_string(),
                     ],
                     allow_empty_outputs,
+                    allow_multiple_outputs,
                 },
                 StageDefinition {
                     id: "raw_entities".to_string(),
@@ -1765,6 +1802,7 @@ mod tests {
                         "/main_dir/processed/raw_entities".to_string(),
                     ],
                     allow_empty_outputs: false,
+                    allow_multiple_outputs: false,
                 },
             ],
         }
@@ -1774,13 +1812,14 @@ mod tests {
         workflow_url: &str,
         raw_next_stage: Option<&str>,
     ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
-        prepare_s3_workdir_with_allow_empty_outputs(workflow_url, raw_next_stage, false)
+        prepare_s3_workdir_with_allow_empty_outputs(workflow_url, raw_next_stage, false, false)
     }
 
     fn prepare_s3_workdir_with_allow_empty_outputs(
         workflow_url: &str,
         raw_next_stage: Option<&str>,
         allow_empty_outputs: bool,
+        allow_multiple_outputs: bool,
     ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let workdir = tempdir.path().join("workdir");
@@ -1789,6 +1828,7 @@ mod tests {
             workflow_url,
             raw_next_stage,
             allow_empty_outputs,
+            allow_multiple_outputs,
         );
         bootstrap_database(&database_path, &config).expect("bootstrap");
         register_s3_artifact_pointer(
@@ -1879,7 +1919,7 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let workdir = tempdir.path().join("workdir");
         let database_path = workdir.join("app.db");
-        let config = s3_test_config_with_allow_empty_outputs(workflow_url, None, true);
+        let config = s3_test_config_with_allow_empty_outputs(workflow_url, None, true, false);
         bootstrap_database(&database_path, &config).expect("bootstrap");
         for index in 1..=count {
             register_s3_artifact_pointer(
@@ -1932,6 +1972,7 @@ mod tests {
                     next_stage: Some("raw_entities".to_string()),
                     save_path_aliases: vec!["main_dir/raw".to_string()],
                     allow_empty_outputs: false,
+                    allow_multiple_outputs: false,
                 },
                 StageDefinition {
                     id: "raw_entities".to_string(),
@@ -1946,6 +1987,7 @@ mod tests {
                     next_stage: Some("final".to_string()),
                     save_path_aliases: vec!["main_dir/processed/raw_entities".to_string()],
                     allow_empty_outputs: false,
+                    allow_multiple_outputs: false,
                 },
                 StageDefinition {
                     id: "final".to_string(),
@@ -1958,6 +2000,7 @@ mod tests {
                     next_stage: None,
                     save_path_aliases: vec!["main_dir/final".to_string()],
                     allow_empty_outputs: true,
+                    allow_multiple_outputs: false,
                 },
             ],
         }
@@ -1966,6 +2009,7 @@ mod tests {
     fn s3_branching_config(workflow_url: &str) -> PipelineConfig {
         let mut config = s3_multistage_config(workflow_url);
         config.stages[0].next_stage = Some("raw_entities".to_string());
+        config.stages[0].allow_multiple_outputs = true;
         config.stages[1].next_stage = None;
         config.stages[2] = StageDefinition {
             id: "raw_representations".to_string(),
@@ -1980,6 +2024,7 @@ mod tests {
             next_stage: None,
             save_path_aliases: vec!["main_dir/processed/raw_representations".to_string()],
             allow_empty_outputs: false,
+            allow_multiple_outputs: false,
         };
         config
     }
@@ -2192,6 +2237,176 @@ mod tests {
     }
 
     #[test]
+    fn partial_s3_output_registration_keeps_valid_siblings_and_reports_conflict() {
+        let server = mock_server_dynamic(1, |request| {
+            let control = serde_json::from_str::<Value>(request_body(request))
+                .expect("S3 control envelope JSON");
+            let run_id = control["run_id"].as_str().expect("run id");
+            let source_key = control["source_key"].as_str().expect("source key");
+            (
+                200,
+                format!(
+                    r#"{{
+  "schema":"beehive.s3_artifact_manifest.v1",
+  "workspace_id":"beehive-s3-dev",
+  "run_id":"{run_id}",
+  "source":{{"bucket":"steos-s3-data","key":"{source_key}"}},
+  "status":"success",
+  "outputs":[
+    {{"artifact_id":"valid-a","entity_id":"entity-branch-a","relation_to_source":"child_entity","bucket":"steos-s3-data","key":"main_dir/processed/raw_entities/valid-a.json","save_path":"main_dir/processed/raw_entities","content_type":"application/json","checksum_sha256":null,"size":100}},
+    {{"artifact_id":"valid-b","entity_id":"entity-branch-b","relation_to_source":"representation_of","bucket":"steos-s3-data","key":"main_dir/processed/raw_representations/valid-b.json","save_path":"main_dir/processed/raw_representations","content_type":"application/json","checksum_sha256":null,"size":200}},
+    {{"artifact_id":"conflict-c","entity_id":"entity-branch-a","relation_to_source":"child_entity","bucket":"steos-s3-data","key":"main_dir/processed/raw_entities/conflict-c.json","save_path":"main_dir/processed/raw_entities","content_type":"application/json","checksum_sha256":null,"size":300}}
+  ],
+  "created_at":"2026-05-12T00:00:00Z"
+}}"#
+                ),
+            )
+        });
+        let (_tempdir, workdir, database_path) =
+            prepare_s3_config_workdir(&server.url, s3_branching_config(&server.url));
+
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+        let raw_state = crate::database::get_stage_state_status(&database_path, "entity-1", "raw")
+            .expect("state");
+        let report = crate::database::list_app_events(&database_path, 20)
+            .expect("events")
+            .into_iter()
+            .find(|event| event.code == "output_registration_report")
+            .expect("output report");
+
+        assert_eq!(summary.succeeded, 1, "summary: {summary:?}");
+        assert_eq!(runs[0].success, true);
+        assert_eq!(raw_state.as_deref(), Some("done"));
+        assert_eq!(files_for_stage(&database_path, "raw_entities").len(), 1);
+        assert_eq!(
+            files_for_stage(&database_path, "raw_representations").len(),
+            1
+        );
+        let context = report.context.expect("report context");
+        assert_eq!(context["registered_count"].as_u64(), Some(2));
+        assert_eq!(context["conflict_count"].as_u64(), Some(1));
+        assert_eq!(context["outputs"].as_array().expect("outputs").len(), 3);
+    }
+
+    #[test]
+    fn all_idempotent_s3_outputs_succeed_without_retry_loop() {
+        let database_for_mock = Arc::new(Mutex::new(None::<std::path::PathBuf>));
+        let database_for_handler = Arc::clone(&database_for_mock);
+        let server = mock_server_dynamic(1, move |request| {
+            let control = serde_json::from_str::<Value>(request_body(request))
+                .expect("S3 control envelope JSON");
+            let run_id = control["run_id"].as_str().expect("run id");
+            let source_key = control["source_key"].as_str().expect("source key");
+            let database_path = database_for_handler
+                .lock()
+                .expect("db path lock")
+                .clone()
+                .expect("db path");
+            register_s3_artifact_pointer(
+                &database_path,
+                &RegisterS3ArtifactPointerInput {
+                    entity_id: "idempotent-entity".to_string(),
+                    artifact_id: "idempotent-artifact".to_string(),
+                    relation_to_source: Some("child_entity".to_string()),
+                    stage_id: "raw_entities".to_string(),
+                    bucket: "steos-s3-data".to_string(),
+                    key: "main_dir/processed/raw_entities/idempotent.json".to_string(),
+                    version_id: None,
+                    etag: None,
+                    checksum_sha256: None,
+                    size: Some(123),
+                    last_modified: None,
+                    source_file_id: None,
+                    producer_run_id: Some(run_id.to_string()),
+                    status: StageStatus::Pending,
+                },
+            )
+            .expect("seed idempotent output");
+            (
+                200,
+                s3_success_manifest_for_source(
+                    run_id,
+                    source_key,
+                    "main_dir/processed/raw_entities",
+                    "main_dir/processed/raw_entities/idempotent.json",
+                    "idempotent-artifact",
+                    "idempotent-entity",
+                ),
+            )
+        });
+        let (_tempdir, workdir, database_path) =
+            prepare_s3_workdir(&server.url, Some("raw_entities"));
+        *database_for_mock.lock().expect("db path lock") = Some(database_path.clone());
+
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run");
+        let report = crate::database::list_app_events(&database_path, 20)
+            .expect("events")
+            .into_iter()
+            .find(|event| event.code == "output_registration_report")
+            .expect("output report");
+
+        assert_eq!(summary.succeeded, 1, "summary: {summary:?}");
+        assert_eq!(files_for_stage(&database_path, "raw_entities").len(), 1);
+        let context = report.context.expect("report context");
+        assert_eq!(context["skipped_count"].as_u64(), Some(1));
+        assert_eq!(context["registered_count"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn all_conflicting_s3_outputs_block_without_retry() {
+        let server = mock_server_dynamic(1, |request| {
+            let control = serde_json::from_str::<Value>(request_body(request))
+                .expect("S3 control envelope JSON");
+            let run_id = control["run_id"].as_str().expect("run id");
+            let source_key = control["source_key"].as_str().expect("source key");
+            (
+                200,
+                s3_success_manifest_for_source(
+                    run_id,
+                    source_key,
+                    "main_dir/processed/raw_entities",
+                    "main_dir/processed/raw_entities/conflict.json",
+                    "conflict-artifact",
+                    "entity-1",
+                ),
+            )
+        });
+        let (_tempdir, workdir, database_path) =
+            prepare_s3_workdir(&server.url, Some("raw_entities"));
+        register_s3_artifact_pointer(
+            &database_path,
+            &RegisterS3ArtifactPointerInput {
+                entity_id: "entity-1".to_string(),
+                artifact_id: "existing-target".to_string(),
+                relation_to_source: Some("child_entity".to_string()),
+                stage_id: "raw_entities".to_string(),
+                bucket: "steos-s3-data".to_string(),
+                key: "main_dir/processed/raw_entities/existing.json".to_string(),
+                version_id: None,
+                etag: None,
+                checksum_sha256: None,
+                size: Some(1),
+                last_modified: None,
+                source_file_id: None,
+                producer_run_id: Some("existing-run".to_string()),
+                status: StageStatus::Pending,
+            },
+        )
+        .expect("existing conflict seed");
+
+        let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run");
+        let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
+        let raw_state = crate::database::get_stage_state_status(&database_path, "entity-1", "raw")
+            .expect("state");
+
+        assert_eq!(summary.blocked, 1, "summary: {summary:?}");
+        assert_eq!(summary.retry_scheduled, 0);
+        assert_eq!(runs[0].error_type.as_deref(), Some("manifest_blocked"));
+        assert_eq!(raw_state.as_deref(), Some("blocked"));
+    }
+
+    #[test]
     fn s3_mode_sends_json_control_body_and_registers_output_pointer() {
         let server = mock_server_dynamic(1, |request| {
             let control = serde_json::from_str::<Value>(request_body(request))
@@ -2346,14 +2561,14 @@ mod tests {
         let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run");
         let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
 
-        assert_eq!(summary.failed, 1);
-        assert_eq!(stage_status(&database_path, "raw"), "failed");
-        assert_eq!(runs[0].error_type.as_deref(), Some("manifest_invalid"));
+        assert_eq!(summary.blocked, 1);
+        assert_eq!(stage_status(&database_path, "raw"), "blocked");
+        assert_eq!(runs[0].error_type.as_deref(), Some("manifest_blocked"));
         assert!(runs[0]
             .error_message
             .as_deref()
             .unwrap_or_default()
-            .contains("allow_empty_outputs"));
+            .contains("allow_zero_outputs"));
     }
 
     #[test]
@@ -2379,7 +2594,7 @@ mod tests {
             )
         });
         let (_tempdir, workdir, database_path) =
-            prepare_s3_workdir_with_allow_empty_outputs(&server.url, None, true);
+            prepare_s3_workdir_with_allow_empty_outputs(&server.url, None, true, false);
 
         let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run");
 
@@ -3400,6 +3615,7 @@ mod tests {
                     next_stage: None,
                     save_path_aliases: Vec::new(),
                     allow_empty_outputs: false,
+                    allow_multiple_outputs: false,
                 }],
             },
         )

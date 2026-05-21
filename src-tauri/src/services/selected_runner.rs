@@ -589,6 +589,7 @@ mod tests {
                     next_stage: Some("processed".to_string()),
                     save_path_aliases: vec!["prefix/raw".to_string()],
                     allow_empty_outputs: false,
+                    allow_multiple_outputs: true,
                 },
                 StageDefinition {
                     id: "processed".to_string(),
@@ -605,6 +606,7 @@ mod tests {
                         "s3://bucket/prefix/processed".to_string(),
                     ],
                     allow_empty_outputs: true,
+                    allow_multiple_outputs: false,
                 },
             ],
         }

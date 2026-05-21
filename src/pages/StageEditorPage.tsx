@@ -39,7 +39,8 @@ interface S3StageCreationForm {
   workflow_url: string;
   max_attempts: number;
   retry_delay_sec: number;
-  allow_empty_outputs: boolean;
+  allow_zero_outputs: boolean;
+  allow_multiple_outputs: boolean;
 }
 
 const defaultS3StageCreationForm: S3StageCreationForm = {
@@ -47,8 +48,19 @@ const defaultS3StageCreationForm: S3StageCreationForm = {
   workflow_url: "",
   max_attempts: 3,
   retry_delay_sec: 30,
-  allow_empty_outputs: false,
+  allow_zero_outputs: false,
+  allow_multiple_outputs: false,
 };
+
+const OUTPUT_CARDINALITY_HELP =
+  'По умолчанию stage ожидает ровно 1 output. Если workflow может отфильтровать вход и ничего не вернуть - включите "Разрешено 0 выходов". Если workflow может породить несколько новых сущностей - включите "Разрешено несколько выходов".';
+
+function allowsZeroOutputs(stage: {
+  allow_zero_outputs?: boolean | null;
+  allow_empty_outputs?: boolean | null;
+}) {
+  return !!(stage.allow_zero_outputs ?? stage.allow_empty_outputs ?? false);
+}
 
 function makeNewStage(existingIds: string[]): StageDefinitionDraft {
   let suffix = 1;
@@ -67,7 +79,8 @@ function makeNewStage(existingIds: string[]): StageDefinitionDraft {
     retry_delay_sec: 10,
     next_stage: null,
     save_path_aliases: [],
-    allow_empty_outputs: false,
+    allow_zero_outputs: false,
+    allow_multiple_outputs: false,
     original_stage_id: null,
     is_new: true,
   };
@@ -275,7 +288,8 @@ export function StageEditorPage() {
       workflow_url: s3StageForm.workflow_url.trim(),
       max_attempts: s3StageForm.max_attempts,
       retry_delay_sec: s3StageForm.retry_delay_sec,
-      allow_empty_outputs: s3StageForm.allow_empty_outputs,
+      allow_zero_outputs: s3StageForm.allow_zero_outputs,
+      allow_multiple_outputs: s3StageForm.allow_multiple_outputs,
     };
     setIsSaving(true);
     setActionMessage(null);
@@ -588,16 +602,23 @@ function S3StageCreationPanel({
         <label className="checkbox-row">
           <input
             type="checkbox"
-            checked={form.allow_empty_outputs}
+            checked={form.allow_zero_outputs}
             disabled={disabled}
-            onChange={(event) => update("allow_empty_outputs", event.target.checked)}
+            onChange={(event) => update("allow_zero_outputs", event.target.checked)}
           />
-          Terminal stage
+          Разрешено 0 выходов
+        </label>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={form.allow_multiple_outputs}
+            disabled={disabled}
+            onChange={(event) => update("allow_multiple_outputs", event.target.checked)}
+          />
+          Разрешено несколько выходов
         </label>
       </div>
-      <p className="field-hint">
-        Terminal stage means this workflow may finish successfully without output artifacts.
-      </p>
+      <p className="field-hint">{OUTPUT_CARDINALITY_HELP}</p>
       <div className="button-row">
         <button type="button" className="button primary" disabled={!canCreate} onClick={onCreate}>
           Create S3 stage
@@ -635,7 +656,8 @@ interface StageCrudForm {
   workflow_url: string;
   max_attempts: number;
   retry_delay_sec: number;
-  allow_empty_outputs: boolean;
+  allow_zero_outputs: boolean;
+  allow_multiple_outputs: boolean;
 }
 
 interface StageCrudPanelProps {
@@ -662,7 +684,8 @@ function StageCrudPanel({
     workflow_url: "",
     max_attempts: 3,
     retry_delay_sec: 30,
-    allow_empty_outputs: false,
+    allow_zero_outputs: false,
+    allow_multiple_outputs: false,
   });
 
   useEffect(() => {
@@ -672,7 +695,8 @@ function StageCrudPanel({
       workflow_url: selectedStage.workflow_url ?? "",
       max_attempts: selectedStage.max_attempts,
       retry_delay_sec: selectedStage.retry_delay_sec,
-      allow_empty_outputs: selectedStage.allow_empty_outputs,
+      allow_zero_outputs: allowsZeroOutputs(selectedStage),
+      allow_multiple_outputs: !!selectedStage.allow_multiple_outputs,
     });
   }, [selectedStage?.stage_id]);
 
@@ -753,16 +777,23 @@ function StageCrudPanel({
         <label className="checkbox-row">
           <input
             type="checkbox"
-            checked={form.allow_empty_outputs}
+            checked={form.allow_zero_outputs}
             disabled={disabled || !selectedStage?.is_active}
-            onChange={(event) => update("allow_empty_outputs", event.target.checked)}
+            onChange={(event) => update("allow_zero_outputs", event.target.checked)}
           />
-          Terminal stage
+          Разрешено 0 выходов
+        </label>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={form.allow_multiple_outputs}
+            disabled={disabled || !selectedStage?.is_active}
+            onChange={(event) => update("allow_multiple_outputs", event.target.checked)}
+          />
+          Разрешено несколько выходов
         </label>
       </div>
-      <p className="field-hint">
-        Terminal stage means this workflow may finish successfully without output artifacts.
-      </p>
+      <p className="field-hint">{OUTPUT_CARDINALITY_HELP}</p>
       <div className="button-row">
         <button
           type="button"
@@ -773,7 +804,8 @@ function StageCrudPanel({
               workflow_url: form.workflow_url.trim(),
               max_attempts: form.max_attempts,
               retry_delay_sec: form.retry_delay_sec,
-              allow_empty_outputs: form.allow_empty_outputs,
+              allow_zero_outputs: form.allow_zero_outputs,
+              allow_multiple_outputs: form.allow_multiple_outputs,
             })
           }
         >

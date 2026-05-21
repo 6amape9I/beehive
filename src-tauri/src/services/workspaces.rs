@@ -1017,7 +1017,9 @@ workspaces:
                     next_stage: None,
                     max_attempts: None,
                     retry_delay_sec: None,
+                    allow_zero_outputs: None,
                     allow_empty_outputs: None,
+                    allow_multiple_outputs: None,
                 },
             )
             .expect("create stage");
@@ -1060,7 +1062,9 @@ workspaces:
                     next_stage: None,
                     max_attempts: None,
                     retry_delay_sec: None,
+                    allow_zero_outputs: None,
                     allow_empty_outputs: None,
+                    allow_multiple_outputs: None,
                 },
             )
             .expect("create stage");

@@ -689,6 +689,7 @@ mod tests {
             next_stage: None,
             save_path_aliases: Vec::new(),
             allow_empty_outputs: false,
+            allow_multiple_outputs: false,
         }
     }
 
@@ -1456,6 +1457,7 @@ mod tests {
                         format!("/{}/raw", prefix.trim_matches('/')),
                     ],
                     allow_empty_outputs: false,
+                    allow_multiple_outputs: false,
                 },
                 StageDefinition {
                     id: "smoke_processed".to_string(),
@@ -1477,6 +1479,7 @@ mod tests {
                         format!("s3://{}/{}/processed", bucket, prefix.trim_matches('/')),
                     ],
                     allow_empty_outputs: true,
+                    allow_multiple_outputs: false,
                 },
             ],
         }
@@ -1522,6 +1525,7 @@ mod tests {
                     next_stage: Some("smoke_processed".to_string()),
                     save_path_aliases: vec![format!("{prefix}/raw"), format!("/{prefix}/raw")],
                     allow_empty_outputs: false,
+                    allow_multiple_outputs: false,
                 },
                 StageDefinition {
                     id: "smoke_processed".to_string(),
@@ -1538,6 +1542,7 @@ mod tests {
                         format!("s3://{bucket}/{prefix}/processed"),
                     ],
                     allow_empty_outputs: false,
+                    allow_multiple_outputs: false,
                 },
                 StageDefinition {
                     id: "smoke_final".to_string(),
@@ -1555,6 +1560,7 @@ mod tests {
                         format!("s3://{bucket}/{prefix}/final"),
                     ],
                     allow_empty_outputs: true,
+                    allow_multiple_outputs: false,
                 },
             ],
         }

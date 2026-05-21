@@ -59,7 +59,9 @@ export interface StageDefinition {
   retry_delay_sec: number;
   next_stage: string | null;
   save_path_aliases?: string[];
+  allow_zero_outputs?: boolean;
   allow_empty_outputs?: boolean;
+  allow_multiple_outputs?: boolean;
 }
 
 export interface PipelineConfig {
@@ -92,7 +94,9 @@ export interface StageDefinitionDraft {
   retry_delay_sec: number;
   next_stage: string | null;
   save_path_aliases?: string[];
+  allow_zero_outputs?: boolean;
   allow_empty_outputs?: boolean;
+  allow_multiple_outputs?: boolean;
   original_stage_id: string | null;
   is_new: boolean;
 }
@@ -278,7 +282,9 @@ export interface StageRecord {
   retry_delay_sec: number;
   next_stage: string | null;
   save_path_aliases: string[];
+  allow_zero_outputs?: boolean;
   allow_empty_outputs: boolean;
+  allow_multiple_outputs: boolean;
   is_active: boolean;
   archived_at: string | null;
   last_seen_in_config_at: string | null;
@@ -710,7 +716,9 @@ export interface CreateS3StageRequest {
   next_stage?: string | null;
   max_attempts?: number | null;
   retry_delay_sec?: number | null;
+  allow_zero_outputs?: boolean | null;
   allow_empty_outputs?: boolean | null;
+  allow_multiple_outputs?: boolean | null;
 }
 
 export interface S3StageRouteHints {
@@ -734,7 +742,9 @@ export interface UpdateS3StageRequest {
   next_stage?: string | null;
   max_attempts?: number | null;
   retry_delay_sec?: number | null;
+  allow_zero_outputs?: boolean | null;
   allow_empty_outputs?: boolean | null;
+  allow_multiple_outputs?: boolean | null;
 }
 
 export interface S3StageMutationPayload {
@@ -928,7 +938,9 @@ export interface WorkspaceStageTree {
   retry_delay_sec: number;
   next_stage: string | null;
   save_path_aliases: string[];
+  allow_zero_outputs?: boolean;
   allow_empty_outputs: boolean;
+  allow_multiple_outputs: boolean;
   is_active: boolean;
   archived_at: string | null;
   folder_path: string;

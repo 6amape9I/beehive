@@ -53,7 +53,9 @@ struct RawStageDefinition {
     retry_delay_sec: Option<i64>,
     next_stage: Option<String>,
     save_path_aliases: Option<Vec<String>>,
+    allow_zero_outputs: Option<bool>,
     allow_empty_outputs: Option<bool>,
+    allow_multiple_outputs: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -450,6 +452,11 @@ fn build_stages(
             save_path_aliases.push(alias);
         }
 
+        let allow_zero_outputs = raw_stage
+            .allow_zero_outputs
+            .or(raw_stage.allow_empty_outputs)
+            .unwrap_or(false);
+
         if let (Some(id), Some(workflow_url)) = (id, workflow_url) {
             stages.push(StageDefinition {
                 id,
@@ -461,7 +468,8 @@ fn build_stages(
                 retry_delay_sec: retry_delay_sec.max(0) as u64,
                 next_stage,
                 save_path_aliases,
-                allow_empty_outputs: raw_stage.allow_empty_outputs.unwrap_or(false),
+                allow_empty_outputs: allow_zero_outputs,
+                allow_multiple_outputs: raw_stage.allow_multiple_outputs.unwrap_or(false),
             });
         }
     }
@@ -807,6 +815,58 @@ stages:
             Some("s3://steos-s3-data/main_dir/processed/raw_entities")
         );
         assert_eq!(config.stages[1].save_path_aliases.len(), 1);
+    }
+
+    #[test]
+    fn legacy_allow_empty_outputs_maps_to_allow_zero_outputs() {
+        let legacy_yaml = r#"
+project:
+  name: beehive-s3-dev
+  workdir: .
+storage:
+  provider: s3
+  bucket: steos-s3-data
+  workspace_prefix: main_dir
+stages:
+  - id: raw
+    input_uri: s3://steos-s3-data/main_dir/raw
+    workflow_url: http://localhost:5678/webhook/raw
+    allow_empty_outputs: true
+"#;
+        let current_yaml = legacy_yaml.replace("allow_empty_outputs", "allow_zero_outputs");
+
+        for yaml in [legacy_yaml.to_string(), current_yaml] {
+            let loaded = parse_pipeline_config(&yaml, "now".to_string());
+            let config = loaded.config.expect("s3 config");
+            assert!(loaded.validation.is_valid, "{:?}", loaded.validation.issues);
+            assert!(config.stages[0].allow_empty_outputs);
+            assert!(!config.stages[0].allow_multiple_outputs);
+        }
+    }
+
+    #[test]
+    fn allow_multiple_outputs_parses_as_stage_contract_flag() {
+        let yaml = r#"
+project:
+  name: beehive-s3-dev
+  workdir: .
+storage:
+  provider: s3
+  bucket: steos-s3-data
+  workspace_prefix: main_dir
+stages:
+  - id: raw
+    input_uri: s3://steos-s3-data/main_dir/raw
+    workflow_url: http://localhost:5678/webhook/raw
+    allow_multiple_outputs: true
+"#;
+
+        let loaded = parse_pipeline_config(yaml, "now".to_string());
+        let config = loaded.config.expect("s3 config");
+
+        assert!(loaded.validation.is_valid, "{:?}", loaded.validation.issues);
+        assert!(config.stages[0].allow_multiple_outputs);
+        assert!(!config.stages[0].allow_empty_outputs);
     }
 
     #[test]

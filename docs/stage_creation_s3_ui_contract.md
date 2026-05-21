@@ -6,14 +6,16 @@
 {
   "stage_id": "semantic_rich",
   "workflow_url": "https://n8n.example/webhook/semantic_rich",
-  "next_stage": "weight_entity",
   "max_attempts": 3,
   "retry_delay_sec": 30,
-  "allow_empty_outputs": false
+  "allow_zero_outputs": false,
+  "allow_multiple_outputs": false
 }
 ```
 
-Only `stage_id` and `workflow_url` are required. The UI asks for stage identity, production n8n webhook URL, optional next stage, retry settings, and whether zero-output success is allowed.
+Only `stage_id` and `workflow_url` are required. The UI asks for stage identity, production n8n webhook URL, retry settings, whether zero-output success is allowed, and whether multiple outputs are allowed.
+
+The legacy `allow_empty_outputs` request field is still accepted as an alias for `allow_zero_outputs`, but new UI should send `allow_zero_outputs`.
 
 ## Backend Validation
 
@@ -22,7 +24,6 @@ Backend rejects:
 - empty or unsafe stage IDs;
 - duplicate stage IDs in active config/history;
 - non-HTTP workflow URLs;
-- unknown `next_stage`;
 - non-S3 workspaces;
 - pipeline storage that conflicts with the workspace registry.
 
@@ -58,26 +59,12 @@ Stage creation writes `pipeline.yaml` atomically, keeps a backup when replacing 
 
 ## Connecting Existing Stages
 
-B6 adds a separate link action so stages can be created in any order:
+`next_stage` links are deprecated for the current S3 operator contract. n8n routes outputs by returning manifest outputs with target stage `save_path` aliases.
+
+The old link route remains as a compatibility endpoint:
 
 ```text
 POST /api/workspaces/{workspace_id}/stages/{stage_id}/next-stage
 ```
 
-Request:
-
-```json
-{
-  "next_stage": "target_stage_id"
-}
-```
-
-Clear terminal state:
-
-```json
-{
-  "next_stage": null
-}
-```
-
-Backend validates that the source stage exists, the target exists when provided, and source/target are not the same stage. The operation updates `pipeline.yaml` atomically and syncs SQLite.
+It returns `next_stage_deprecated` and does not update the pipeline.
