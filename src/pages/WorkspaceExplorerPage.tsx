@@ -88,6 +88,8 @@ const defaultManualS3RegistrationForm: ManualS3RegistrationForm = {
   size: "",
 };
 
+const DEFAULT_STAGE_FILE_RENDER_LIMIT = 200;
+const STAGE_FILE_RENDER_STEP = 200;
 const defaultPipelineWaveControls: PipelineWaveControls = {
   max_waves: 5,
   max_tasks_per_wave: 3,
@@ -99,6 +101,7 @@ export function WorkspaceExplorerPage() {
   const { workspaceId: routeWorkspaceId } = useParams();
   const navigate = useNavigate();
   const [explorer, setExplorer] = useState<WorkspaceExplorerResult | null>(null);
+  const [stageFileRenderLimits, setStageFileRenderLimits] = useState<Record<string, number>>({});
   const [errors, setErrors] = useState<CommandErrorInfo[]>([]);
   const [filters, setFilters] = useState<ExplorerFilters>(defaultFilters);
   const [selectedFileId, setSelectedFileId] = useState<number | null>(null);
@@ -201,6 +204,19 @@ export function WorkspaceExplorerPage() {
           : [],
       }));
   }, [explorer, filters]);
+
+    const visibleFilteredStages = useMemo(
+      () =>
+        filteredStages.map((stage) => {
+          const limit = stageFileRenderLimits[stage.stage_id] ?? DEFAULT_STAGE_FILE_RENDER_LIMIT;
+          return {
+            ...stage,
+            totalFilteredFiles: stage.files.length,
+            files: stage.files.slice(0, limit),
+          };
+        }),
+      [filteredStages, stageFileRenderLimits],
+    );
 
   const selectedFile = useMemo(() => {
     if (!explorer || !selectedFileId) return null;
@@ -521,14 +537,14 @@ export function WorkspaceExplorerPage() {
             runtimeStatuses={runtimeStatuses}
             onChange={setFilters}
           />
-          {filteredStages.length === 0 ? (
+          {visibleFilteredStages.length === 0 ? (
             <section className="panel">
               <p className="empty-text">No stage folders match the current filters.</p>
             </section>
           ) : (
             <div className="workspace-layout">
               <div className="workspace-stage-tree">
-                {filteredStages.map((stage) => (
+                {visibleFilteredStages.map((stage) => (
                   <StageTreePanel
                     key={stage.stage_id}
                     stage={stage}
@@ -541,6 +557,13 @@ export function WorkspaceExplorerPage() {
                     onOpenFolder={(fileId) => void handleOpen("folder", fileId)}
                     onCopyS3Uri={(file) => void handleCopyS3Uri(file)}
                     onGoToEntity={goToEntity}
+                    totalFilteredFiles={stage.totalFilteredFiles}
+                    onShowMoreFiles={(stageId) =>
+                      setStageFileRenderLimits((current) => ({
+                        ...current,
+                        [stageId]: (current[stageId] ?? DEFAULT_STAGE_FILE_RENDER_LIMIT) + STAGE_FILE_RENDER_STEP,
+                      }))
+                    }
                   />
                 ))}
               </div>
@@ -1253,12 +1276,14 @@ interface StageTreePanelProps {
   selectedFileId: number | null;
   selectedRootFileIds: number[];
   activeAction: string | null;
+  totalFilteredFiles?: number;
   onSelectFile: (fileId: number) => void;
   onToggleSelectedRoot: (file: WorkspaceFileNode, checked: boolean) => void;
   onOpenFile: (fileId: number) => void;
   onOpenFolder: (fileId: number) => void;
   onCopyS3Uri: (file: WorkspaceFileNode) => void;
   onGoToEntity: (file: WorkspaceFileNode) => void;
+  onShowMoreFiles?: (stageId: string) => void;
 }
 
 function StageTreePanel({
@@ -1272,6 +1297,8 @@ function StageTreePanel({
   onOpenFolder,
   onCopyS3Uri,
   onGoToEntity,
+  totalFilteredFiles,
+  onShowMoreFiles,
 }: StageTreePanelProps) {
   return (
     <details className="panel workspace-stage-panel" open>
@@ -1430,6 +1457,20 @@ function StageTreePanel({
                 </tbody>
               </table>
             </div>
+            {totalFilteredFiles && totalFilteredFiles > stage.files.length ? (
+              <div className="button-row" style={{ marginTop: "0.75rem" }}>
+                <button
+                  type="button"
+                  className="button secondary"
+                  onClick={() => onShowMoreFiles?.(stage.stage_id)}
+                >
+                  Show {Math.min(STAGE_FILE_RENDER_STEP, totalFilteredFiles - stage.files.length)} more
+                </button>
+                <span className="muted">
+                  Showing {stage.files.length} of {totalFilteredFiles} matching files.
+                </span>
+              </div>
+            ) : null}
           )}
         </div>
         <div>
