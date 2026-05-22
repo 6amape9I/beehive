@@ -88,8 +88,8 @@ const defaultManualS3RegistrationForm: ManualS3RegistrationForm = {
   size: "",
 };
 
-const DEFAULT_STAGE_FILE_RENDER_LIMIT = 200;
-const STAGE_FILE_RENDER_STEP = 200;
+const DEFAULT_STAGE_FILE_RENDER_LIMIT = 10;
+const STAGE_FILE_RENDER_STEP = 10;
 const defaultPipelineWaveControls: PipelineWaveControls = {
   max_waves: 5,
   max_tasks_per_wave: 3,
