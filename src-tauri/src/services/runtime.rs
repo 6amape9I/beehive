@@ -10,6 +10,7 @@ use crate::domain::{
 };
 use crate::executor;
 use crate::s3_reconciliation;
+use crate::services::workers;
 use crate::services::workspaces::get_workspace;
 use crate::workdir;
 
@@ -109,6 +110,7 @@ pub(crate) fn run_small_batch(
     workspace_id: &str,
     max_tasks: u64,
 ) -> Result<RunDueTasksSummary, String> {
+    ensure_broad_run_allowed(workspace_id)?;
     let context = load_workspace_context(workspace_id)?;
     executor::run_due_tasks(
         &context.workdir_path,
@@ -126,6 +128,7 @@ pub(crate) fn run_pipeline_waves(
     max_tasks_per_wave: u64,
     stop_on_first_failure: bool,
 ) -> Result<RunPipelineWavesSummary, String> {
+    ensure_broad_run_allowed(workspace_id)?;
     let context = load_workspace_context(workspace_id)?;
     executor::run_pipeline_waves(
         &context.workdir_path,
@@ -137,6 +140,13 @@ pub(crate) fn run_pipeline_waves(
         context.config.runtime.stuck_task_timeout_sec,
         context.config.runtime.file_stability_delay_ms,
     )
+}
+
+fn ensure_broad_run_allowed(workspace_id: &str) -> Result<(), String> {
+    if workers::workspace_workers_enabled(workspace_id) {
+        return Err(workers::BROAD_RUN_DISABLED_MESSAGE.to_string());
+    }
+    Ok(())
 }
 
 fn command_error(code: &str, message: impl Into<String>) -> crate::domain::CommandErrorInfo {

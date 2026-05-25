@@ -30,7 +30,7 @@ pub(crate) use entities::{
     evaluate_entity_file_allowed_actions, record_entity_file_json_edit_rejected,
 };
 
-const SCHEMA_VERSION: u32 = 10;
+const SCHEMA_VERSION: u32 = 11;
 
 pub(crate) struct PersistEntityFileInput {
     pub entity_id: String,
@@ -241,10 +241,30 @@ pub fn open_connection(path: &Path) -> Result<Connection, String> {
             path.display()
         )
     })?;
-    connection
-        .execute_batch("PRAGMA foreign_keys = ON;")
-        .map_err(|error| format!("Failed to enable SQLite foreign keys: {error}"))?;
+    configure_sqlite_connection(&connection, true)?;
     Ok(connection)
+}
+
+fn configure_sqlite_connection(connection: &Connection, writable: bool) -> Result<(), String> {
+    connection
+        .execute_batch(
+            r#"
+            PRAGMA foreign_keys = ON;
+            PRAGMA busy_timeout = 5000;
+            "#,
+        )
+        .map_err(|error| format!("Failed to configure SQLite connection pragmas: {error}"))?;
+    if writable {
+        connection
+            .execute_batch(
+                r#"
+                PRAGMA journal_mode = WAL;
+                PRAGMA synchronous = NORMAL;
+                "#,
+            )
+            .map_err(|error| format!("Failed to configure SQLite WAL pragmas: {error}"))?;
+    }
+    Ok(())
 }
 
 fn open_readonly_connection(path: &Path) -> Result<Connection, String> {
@@ -261,6 +281,7 @@ fn open_readonly_connection(path: &Path) -> Result<Connection, String> {
                 path.display()
             )
         })?;
+    configure_sqlite_connection(&connection, false)?;
     Ok(connection)
 }
 
@@ -1744,6 +1765,9 @@ pub(crate) fn claim_worker_runtime_tasks(
     if input.limit == 0 {
         return Ok(Vec::new());
     }
+    if worker_pool_is_paused_with_connection(connection, input.resource_class)? {
+        return Ok(Vec::new());
+    }
     let now = input.now.to_rfc3339();
     let lease_until = (input.now + Duration::seconds(input.lease_ttl_sec as i64)).to_rfc3339();
     let transaction = connection
@@ -1859,6 +1883,94 @@ pub(crate) fn claim_worker_runtime_tasks(
         .commit()
         .map_err(|error| format!("Failed to commit worker lease claim transaction: {error}"))?;
     Ok(claimed)
+}
+
+pub fn set_worker_pool_paused(
+    path: &Path,
+    resource_class: ResourceClass,
+    is_paused: bool,
+    reason: Option<&str>,
+) -> Result<(), String> {
+    let connection = open_connection(path)?;
+    set_worker_pool_paused_with_connection(&connection, resource_class, is_paused, reason)
+}
+
+pub fn set_all_worker_pools_paused(
+    path: &Path,
+    is_paused: bool,
+    reason: Option<&str>,
+) -> Result<(), String> {
+    let connection = open_connection(path)?;
+    for resource_class in [ResourceClass::Default, ResourceClass::LocalLlm] {
+        set_worker_pool_paused_with_connection(&connection, resource_class, is_paused, reason)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn set_worker_pool_paused_with_connection(
+    connection: &Connection,
+    resource_class: ResourceClass,
+    is_paused: bool,
+    reason: Option<&str>,
+) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    let normalized_reason = reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    connection
+        .execute(
+            r#"
+            INSERT INTO worker_pool_controls (resource_class, is_paused, pause_reason, updated_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(resource_class) DO UPDATE SET
+                is_paused = excluded.is_paused,
+                pause_reason = excluded.pause_reason,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                resource_class.as_str(),
+                if is_paused { 1_i64 } else { 0_i64 },
+                if is_paused {
+                    normalized_reason.as_deref()
+                } else {
+                    None
+                },
+                now
+            ],
+        )
+        .map_err(|error| {
+            format!(
+                "Failed to update worker pool '{}' pause state: {error}",
+                resource_class.as_str()
+            )
+        })?;
+    Ok(())
+}
+
+pub fn worker_pool_is_paused(path: &Path, resource_class: ResourceClass) -> Result<bool, String> {
+    let connection = open_connection(path)?;
+    worker_pool_is_paused_with_connection(&connection, resource_class)
+}
+
+pub(crate) fn worker_pool_is_paused_with_connection(
+    connection: &Connection,
+    resource_class: ResourceClass,
+) -> Result<bool, String> {
+    connection
+        .query_row(
+            "SELECT is_paused FROM worker_pool_controls WHERE resource_class = ?1",
+            params![resource_class.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map(|value| value.unwrap_or(0) != 0)
+        .map_err(|error| {
+            format!(
+                "Failed to read worker pool '{}' pause state: {error}",
+                resource_class.as_str()
+            )
+        })
 }
 
 fn list_eligible_worker_runtime_tasks(
@@ -2163,12 +2275,102 @@ pub(crate) fn recover_expired_worker_leases_with_connection(
     Ok(recovered)
 }
 
+pub fn release_worker_lease(path: &Path, lease_id: &str, reason: &str) -> Result<bool, String> {
+    let connection = open_connection(path)?;
+    release_worker_lease_with_connection(&connection, lease_id, reason, &Utc::now().to_rfc3339())
+}
+
+pub(crate) fn release_worker_lease_with_connection(
+    connection: &Connection,
+    lease_id: &str,
+    reason: &str,
+    now: &str,
+) -> Result<bool, String> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err("Manual worker lease release requires a reason.".to_string());
+    }
+    let lease = find_worker_lease_by_id(connection, lease_id)?
+        .ok_or_else(|| format!("Worker lease '{lease_id}' was not found."))?;
+    if lease.status != "active" {
+        return Err(format!(
+            "Worker lease '{lease_id}' is '{}' and cannot be manually released.",
+            lease.status
+        ));
+    }
+
+    let run_finished = lease_run_finished(connection, lease.run_id.as_deref())?;
+    let expired = lease.lease_until.as_str() < now;
+    let state_status = find_stage_state_by_id(connection, lease.state_id)?
+        .map(|state| state.status)
+        .unwrap_or_else(|| "missing".to_string());
+    let state_is_running = matches!(state_status.as_str(), "queued" | "in_progress");
+    if !run_finished && !(expired && !state_is_running) {
+        return Err(format!(
+            "Worker lease '{lease_id}' is still active. Use recover expired leases for expired unfinished work, or wait for the worker heartbeat to expire."
+        ));
+    }
+
+    let affected = connection
+        .execute(
+            r#"
+            UPDATE worker_leases
+            SET status = 'released',
+                released_at = ?2,
+                release_reason = ?3,
+                updated_at = ?2
+            WHERE lease_id = ?1 AND status = 'active'
+            "#,
+            params![lease_id, now, reason],
+        )
+        .map_err(|error| format!("Failed to release worker lease '{lease_id}': {error}"))?;
+    if affected != 1 {
+        return Ok(false);
+    }
+
+    insert_app_event(
+        connection,
+        AppEventLevel::Warning,
+        "worker_lease_manually_released",
+        &format!(
+            "Worker lease '{}' was manually released for entity '{}' on stage '{}'.",
+            lease.lease_id, lease.entity_id, lease.stage_id
+        ),
+        Some(json!({
+            "lease_id": lease.lease_id,
+            "state_id": lease.state_id,
+            "entity_id": lease.entity_id,
+            "stage_id": lease.stage_id,
+            "resource_class": lease.resource_class.as_str(),
+            "worker_id": lease.worker_id,
+            "run_finished": run_finished,
+            "expired": expired,
+            "state_status": state_status,
+            "reason": reason,
+        })),
+        now,
+    )?;
+    Ok(true)
+}
+
 pub fn get_worker_summary(path: &Path, config: &PipelineConfig) -> Result<WorkerSummary, String> {
     let connection = open_connection(path)?;
-    let default_active = lease_count(&connection, ResourceClass::Default, "active")?;
-    let local_active = lease_count(&connection, ResourceClass::LocalLlm, "active")?;
-    let default_expired = lease_count(&connection, ResourceClass::Default, "expired")?;
-    let local_expired = lease_count(&connection, ResourceClass::LocalLlm, "expired")?;
+    let now = Utc::now().to_rfc3339();
+    let default_pool = worker_pool_summary(
+        &connection,
+        ResourceClass::Default,
+        config.runtime.worker_pools.default.concurrency,
+        &now,
+    )?;
+    let local_llm_pool = worker_pool_summary(
+        &connection,
+        ResourceClass::LocalLlm,
+        config.runtime.worker_pools.local_llm.concurrency,
+        &now,
+    )?;
+    let active_leases_total = default_pool.active_leases + local_llm_pool.active_leases;
+    let expired_leases_total = default_pool.expired_leases + local_llm_pool.expired_leases;
+    let paused_all = default_pool.is_paused && local_llm_pool.is_paused;
     let recent_leases = list_recent_worker_leases(&connection, 20)?;
     let last_recovery_at = connection
         .query_row(
@@ -2180,22 +2382,12 @@ pub fn get_worker_summary(path: &Path, config: &PipelineConfig) -> Result<Worker
     Ok(WorkerSummary {
         worker_lease_sec: config.runtime.worker_lease_sec,
         worker_heartbeat_sec: config.runtime.worker_heartbeat_sec,
-        pools: vec![
-            WorkerPoolRuntimeSummary {
-                resource_class: ResourceClass::Default,
-                configured_concurrency: config.runtime.worker_pools.default.concurrency,
-                active_leases: default_active,
-                expired_leases: default_expired,
-            },
-            WorkerPoolRuntimeSummary {
-                resource_class: ResourceClass::LocalLlm,
-                configured_concurrency: config.runtime.worker_pools.local_llm.concurrency,
-                active_leases: local_active,
-                expired_leases: local_expired,
-            },
-        ],
-        active_leases_total: default_active + local_active,
-        expired_leases_total: default_expired + local_expired,
+        workers_enabled: false,
+        broad_runs_disabled: false,
+        paused_all,
+        pools: vec![default_pool, local_llm_pool],
+        active_leases_total,
+        expired_leases_total,
         last_recovery_at,
         recent_leases,
     })
@@ -2256,9 +2448,232 @@ fn lease_count(
 ) -> Result<u64, String> {
     query_count(
         connection,
-        "SELECT COUNT(*) FROM worker_leases WHERE resource_class = ?1 AND status = ?2",
+        r#"
+        SELECT COUNT(*)
+        FROM worker_leases lease
+        JOIN entity_stage_states state ON state.id = lease.state_id
+        JOIN stages stage ON stage.stage_id = lease.stage_id
+        JOIN entity_files file ON file.id = lease.entity_file_id
+        JOIN entities entity ON entity.entity_id = lease.entity_id
+        WHERE lease.resource_class = ?1
+          AND lease.status = ?2
+          AND stage.resource_class = ?1
+          AND stage.is_active = 1
+          AND entity.is_archived = 0
+          AND state.file_exists = 1
+          AND file.file_exists = 1
+        "#,
         params![resource_class.as_str(), status],
     )
+}
+
+fn worker_pool_summary(
+    connection: &Connection,
+    resource_class: ResourceClass,
+    configured_concurrency: u32,
+    now: &str,
+) -> Result<WorkerPoolRuntimeSummary, String> {
+    let active_leases = lease_count(connection, resource_class, "active")?;
+    let expired_leases = lease_count(connection, resource_class, "expired")?;
+    let (is_paused, pause_reason) = worker_pool_pause_state(connection, resource_class)?;
+    Ok(WorkerPoolRuntimeSummary {
+        resource_class,
+        configured_concurrency,
+        active_leases,
+        expired_leases,
+        pending_count: queue_count(connection, resource_class, "pending", now)?,
+        retry_wait_due_count: retry_wait_count(connection, resource_class, true, now)?,
+        retry_wait_not_due_count: retry_wait_count(connection, resource_class, false, now)?,
+        queued_count: queue_count(connection, resource_class, "queued", now)?,
+        in_progress_count: queue_count(connection, resource_class, "in_progress", now)?,
+        blocked_count: queue_count(connection, resource_class, "blocked", now)?,
+        failed_count: queue_count(connection, resource_class, "failed", now)?,
+        is_paused,
+        pause_reason,
+        oldest_pending_age_sec: oldest_pending_age_sec(connection, resource_class, now)?,
+        average_duration_ms: average_duration_ms(connection, resource_class)?,
+        last_error: last_worker_pool_error(connection, resource_class)?,
+    })
+}
+
+fn worker_pool_pause_state(
+    connection: &Connection,
+    resource_class: ResourceClass,
+) -> Result<(bool, Option<String>), String> {
+    connection
+        .query_row(
+            "SELECT is_paused, pause_reason FROM worker_pool_controls WHERE resource_class = ?1",
+            params![resource_class.as_str()],
+            |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map(|value| value.unwrap_or((false, None)))
+        .map_err(|error| {
+            format!(
+                "Failed to read worker pool '{}' control state: {error}",
+                resource_class.as_str()
+            )
+        })
+}
+
+fn queue_count(
+    connection: &Connection,
+    resource_class: ResourceClass,
+    status: &str,
+    now: &str,
+) -> Result<u64, String> {
+    query_count(
+        connection,
+        r#"
+        SELECT COUNT(*)
+        FROM entity_stage_states state
+        JOIN stages stage ON stage.stage_id = state.stage_id
+        JOIN entity_files file ON file.id = state.file_instance_id
+        JOIN entities entity ON entity.entity_id = state.entity_id
+        WHERE stage.resource_class = ?1
+          AND stage.is_active = 1
+          AND entity.is_archived = 0
+          AND state.file_exists = 1
+          AND file.file_exists = 1
+          AND TRIM(stage.workflow_url) <> ''
+          AND state.status = ?2
+          AND (?2 != 'retry_wait' OR state.next_retry_at IS NULL OR state.next_retry_at <= ?3)
+        "#,
+        params![resource_class.as_str(), status, now],
+    )
+}
+
+fn retry_wait_count(
+    connection: &Connection,
+    resource_class: ResourceClass,
+    due: bool,
+    now: &str,
+) -> Result<u64, String> {
+    let due_clause = if due {
+        "state.next_retry_at IS NOT NULL AND state.next_retry_at <= ?2"
+    } else {
+        "state.next_retry_at IS NULL OR state.next_retry_at > ?2"
+    };
+    query_count(
+        connection,
+        &format!(
+            r#"
+            SELECT COUNT(*)
+            FROM entity_stage_states state
+            JOIN stages stage ON stage.stage_id = state.stage_id
+            JOIN entity_files file ON file.id = state.file_instance_id
+            JOIN entities entity ON entity.entity_id = state.entity_id
+            WHERE stage.resource_class = ?1
+              AND stage.is_active = 1
+              AND entity.is_archived = 0
+              AND state.file_exists = 1
+              AND file.file_exists = 1
+              AND TRIM(stage.workflow_url) <> ''
+              AND state.status = 'retry_wait'
+              AND ({due_clause})
+            "#
+        ),
+        params![resource_class.as_str(), now],
+    )
+}
+
+fn oldest_pending_age_sec(
+    connection: &Connection,
+    resource_class: ResourceClass,
+    now: &str,
+) -> Result<Option<u64>, String> {
+    connection
+        .query_row(
+            r#"
+            SELECT CAST((julianday(?2) - julianday(MIN(state.updated_at))) * 86400 AS INTEGER)
+            FROM entity_stage_states state
+            JOIN stages stage ON stage.stage_id = state.stage_id
+            JOIN entity_files file ON file.id = state.file_instance_id
+            JOIN entities entity ON entity.entity_id = state.entity_id
+            WHERE stage.resource_class = ?1
+              AND stage.is_active = 1
+              AND entity.is_archived = 0
+              AND state.file_exists = 1
+              AND file.file_exists = 1
+              AND TRIM(stage.workflow_url) <> ''
+              AND (
+                    state.status = 'pending'
+                    OR (
+                        state.status = 'retry_wait'
+                        AND state.next_retry_at IS NOT NULL
+                        AND state.next_retry_at <= ?2
+                    )
+                  )
+            "#,
+            params![resource_class.as_str(), now],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .map(|value| value.and_then(|seconds| u64::try_from(seconds.max(0)).ok()))
+        .map_err(|error| {
+            format!(
+                "Failed to query oldest pending age for worker pool '{}': {error}",
+                resource_class.as_str()
+            )
+        })
+}
+
+fn average_duration_ms(
+    connection: &Connection,
+    resource_class: ResourceClass,
+) -> Result<Option<u64>, String> {
+    connection
+        .query_row(
+            r#"
+            SELECT AVG(run.duration_ms)
+            FROM stage_runs run
+            JOIN stages stage ON stage.stage_id = run.stage_id
+            WHERE stage.resource_class = ?1
+              AND run.duration_ms IS NOT NULL
+              AND run.finished_at IS NOT NULL
+            "#,
+            params![resource_class.as_str()],
+            |row| row.get::<_, Option<f64>>(0),
+        )
+        .map(|value| value.map(|duration| duration.round().max(0.0) as u64))
+        .map_err(|error| {
+            format!(
+                "Failed to query average duration for worker pool '{}': {error}",
+                resource_class.as_str()
+            )
+        })
+}
+
+fn last_worker_pool_error(
+    connection: &Connection,
+    resource_class: ResourceClass,
+) -> Result<Option<String>, String> {
+    connection
+        .query_row(
+            r#"
+            SELECT state.last_error
+            FROM entity_stage_states state
+            JOIN stages stage ON stage.stage_id = state.stage_id
+            JOIN entity_files file ON file.id = state.file_instance_id
+            JOIN entities entity ON entity.entity_id = state.entity_id
+            WHERE stage.resource_class = ?1
+              AND stage.is_active = 1
+              AND entity.is_archived = 0
+              AND state.file_exists = 1
+              AND file.file_exists = 1
+              AND TRIM(COALESCE(state.last_error, '')) <> ''
+            ORDER BY state.updated_at DESC, state.id DESC
+            LIMIT 1
+            "#,
+            params![resource_class.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| {
+            format!(
+                "Failed to query last error for worker pool '{}': {error}",
+                resource_class.as_str()
+            )
+        })
 }
 
 fn list_recent_worker_leases(
@@ -2298,6 +2713,39 @@ fn list_recent_worker_leases(
         leases.push(row.map_err(|error| format!("Failed to read worker lease row: {error}"))?);
     }
     Ok(leases)
+}
+
+fn find_worker_lease_by_id(
+    connection: &Connection,
+    lease_id: &str,
+) -> Result<Option<WorkerLeaseRecord>, String> {
+    connection
+        .query_row(
+            r#"
+            SELECT
+                lease_id,
+                state_id,
+                entity_id,
+                entity_file_id,
+                stage_id,
+                resource_class,
+                worker_id,
+                status,
+                run_id,
+                leased_at,
+                lease_until,
+                heartbeat_at,
+                released_at,
+                release_reason,
+                updated_at
+            FROM worker_leases
+            WHERE lease_id = ?1
+            "#,
+            params![lease_id],
+            worker_lease_from_row,
+        )
+        .optional()
+        .map_err(|error| format!("Failed to load worker lease '{lease_id}': {error}"))
 }
 
 fn worker_lease_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkerLeaseRecord> {
@@ -3715,7 +4163,7 @@ pub(crate) fn load_setting(connection: &Connection, key: &str) -> Result<Option<
 
 fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
     match current_schema_version(connection)? {
-        0 => create_schema_v10(connection)?,
+        0 => create_schema_v11(connection)?,
         1 => {
             migrate_v1_to_v2(connection)?;
             migrate_v2_to_v3(connection)?;
@@ -3726,6 +4174,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)?;
         }
         2 => {
             migrate_v2_to_v3(connection)?;
@@ -3736,6 +4185,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)?;
         }
         3 => {
             migrate_v3_to_v4(connection)?;
@@ -3745,6 +4195,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)?;
         }
         4 => {
             migrate_v4_to_v5(connection)?;
@@ -3753,6 +4204,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)?;
         }
         5 => {
             migrate_v5_to_v6(connection)?;
@@ -3760,27 +4212,35 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)?;
         }
         6 => {
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)?;
         }
         7 => {
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)?;
         }
         8 => {
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)?;
         }
-        9 => migrate_v9_to_v10(connection)?,
-        10 => {}
+        9 => {
+            migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)?;
+        }
+        10 => migrate_v10_to_v11(connection)?,
+        11 => {}
         version => {
             return Err(format!(
-            "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, or 10."
+            "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, or 11."
         ))
         }
     }
@@ -3828,7 +4288,7 @@ fn current_schema_version(connection: &Connection) -> Result<u32, String> {
         .map_err(|error| format!("Failed to read PRAGMA user_version: {error}"))
 }
 
-fn create_schema_v10(connection: &Connection) -> Result<(), String> {
+fn create_schema_v11(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
             r#"
@@ -3987,6 +4447,13 @@ fn create_schema_v10(connection: &Connection) -> Result<(), String> {
                 FOREIGN KEY (stage_id) REFERENCES stages(stage_id)
             );
 
+            CREATE TABLE IF NOT EXISTS worker_pool_controls (
+                resource_class TEXT PRIMARY KEY CHECK (resource_class IN ('default', 'local_llm')),
+                is_paused INTEGER NOT NULL DEFAULT 0,
+                pause_reason TEXT,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS app_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 level TEXT NOT NULL,
@@ -4007,10 +4474,10 @@ fn create_schema_v10(connection: &Connection) -> Result<(), String> {
             CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_files_s3_producer_artifact ON entity_files(producer_run_id, artifact_id)
                 WHERE storage_provider = 's3' AND producer_run_id IS NOT NULL AND artifact_id IS NOT NULL;
 
-            PRAGMA user_version = 10;
+            PRAGMA user_version = 11;
             "#,
         )
-        .map_err(|error| format!("Failed to create SQLite schema v10: {error}"))?;
+        .map_err(|error| format!("Failed to create SQLite schema v11: {error}"))?;
     Ok(())
 }
 
@@ -4702,6 +5169,35 @@ fn migrate_v9_to_v10(connection: &mut Connection) -> Result<(), String> {
         &now,
     )?;
     set_setting(connection, "schema_version", "10", &now)?;
+    Ok(())
+}
+
+fn migrate_v10_to_v11(connection: &mut Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS worker_pool_controls (
+                resource_class TEXT PRIMARY KEY CHECK (resource_class IN ('default', 'local_llm')),
+                is_paused INTEGER NOT NULL DEFAULT 0,
+                pause_reason TEXT,
+                updated_at TEXT NOT NULL
+            );
+
+            PRAGMA user_version = 11;
+            "#,
+        )
+        .map_err(|error| format!("Failed to migrate schema from v10 to v11: {error}"))?;
+
+    let now = Utc::now().to_rfc3339();
+    insert_app_event(
+        connection,
+        AppEventLevel::Info,
+        "schema_migrated_to_v11",
+        "SQLite schema migrated from version 10 to version 11.",
+        None,
+        &now,
+    )?;
+    set_setting(connection, "schema_version", "11", &now)?;
     Ok(())
 }
 
@@ -6425,11 +6921,12 @@ mod tests {
         let table_names = load_table_names(&connection).expect("table names");
 
         assert!(database_path.exists());
-        assert_eq!(result.schema_version, 10);
+        assert_eq!(result.schema_version, 11);
         assert!(table_names.contains(&"entity_files".to_string()));
         assert!(table_names.contains(&"entities".to_string()));
         assert!(table_names.contains(&"entity_stage_states".to_string()));
         assert!(table_names.contains(&"worker_leases".to_string()));
+        assert!(table_names.contains(&"worker_pool_controls".to_string()));
         let stages = list_stages(&database_path).expect("stages");
         assert_eq!(stages[0].resource_class, ResourceClass::Default);
     }
@@ -6494,7 +6991,7 @@ mod tests {
             load_entity_files_from_connection(&connection, Some("entity-1")).expect("load files");
         let events = load_app_events_from_connection(&connection, 20).expect("events");
 
-        assert_eq!(result.schema_version, 10);
+        assert_eq!(result.schema_version, 11);
         assert_eq!(entity.file_count, 1);
         assert_eq!(files.len(), 1);
         assert!(events
@@ -6509,6 +7006,9 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.code == "schema_migrated_to_v10"));
+        assert!(events
+            .iter()
+            .any(|event| event.code == "schema_migrated_to_v11"));
     }
 
     #[test]
@@ -6522,7 +7022,7 @@ mod tests {
         let result = bootstrap_database(&database_path, &test_config(vec![stage("ingest", None)]))
             .expect("bootstrap");
 
-        assert_eq!(result.schema_version, 10);
+        assert_eq!(result.schema_version, 11);
     }
 
     #[test]
@@ -6582,6 +7082,135 @@ mod tests {
         assert_eq!(llm_tasks.len(), 1);
         assert_eq!(llm_tasks[0].stage_id, "llm_stage");
         assert_eq!(llm_tasks[0].resource_class, ResourceClass::LocalLlm);
+    }
+
+    #[test]
+    fn sqlite_connection_pragmas_include_busy_timeout_and_wal() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("app.db");
+        let connection = open_connection(&database_path).expect("open");
+
+        let busy_timeout: i64 = connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("busy timeout");
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("journal mode");
+
+        assert_eq!(busy_timeout, 5000);
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+    }
+
+    #[test]
+    fn worker_pool_pause_prevents_claim_and_resume_allows_claim() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![
+                stage_with_resource("default_stage", None, ResourceClass::Default),
+                stage_with_resource("llm_stage", None, ResourceClass::LocalLlm),
+            ],
+            &[
+                ("default_stage", "entity-default"),
+                ("llm_stage", "entity-llm"),
+            ],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+
+        set_worker_pool_paused_with_connection(
+            &connection,
+            ResourceClass::Default,
+            true,
+            Some("maintenance"),
+        )
+        .expect("pause default");
+        let default_paused_claim = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                worker_id: "default-worker".to_string(),
+                lease_ttl_sec: 1800,
+                now: Utc::now(),
+            },
+        )
+        .expect("paused claim");
+        assert!(default_paused_claim.is_empty());
+
+        let llm_claim = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::LocalLlm,
+                limit: 1,
+                worker_id: "llm-worker".to_string(),
+                lease_ttl_sec: 1800,
+                now: Utc::now(),
+            },
+        )
+        .expect("llm claim");
+        assert_eq!(llm_claim.len(), 1);
+
+        set_worker_pool_paused_with_connection(&connection, ResourceClass::Default, false, None)
+            .expect("resume default");
+        let default_resumed_claim = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                worker_id: "default-worker".to_string(),
+                lease_ttl_sec: 1800,
+                now: Utc::now(),
+            },
+        )
+        .expect("resumed claim");
+        assert_eq!(default_resumed_claim.len(), 1);
+    }
+
+    #[test]
+    fn worker_summary_includes_queue_counts_and_pause_state_by_resource_class() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![
+                stage_with_resource("default_stage", None, ResourceClass::Default),
+                stage_with_resource("llm_stage", None, ResourceClass::LocalLlm),
+            ],
+            &[
+                ("default_stage", "entity-default"),
+                ("llm_stage", "entity-llm"),
+            ],
+        );
+        let connection = open_connection(&database_path).expect("open");
+        set_worker_pool_paused_with_connection(
+            &connection,
+            ResourceClass::LocalLlm,
+            true,
+            Some("gpu maintenance"),
+        )
+        .expect("pause llm");
+        drop(connection);
+
+        let summary = get_worker_summary(
+            &database_path,
+            &test_config(vec![
+                stage_with_resource("default_stage", None, ResourceClass::Default),
+                stage_with_resource("llm_stage", None, ResourceClass::LocalLlm),
+            ]),
+        )
+        .expect("summary");
+        let default_pool = summary
+            .pools
+            .iter()
+            .find(|pool| pool.resource_class == ResourceClass::Default)
+            .expect("default pool");
+        let llm_pool = summary
+            .pools
+            .iter()
+            .find(|pool| pool.resource_class == ResourceClass::LocalLlm)
+            .expect("llm pool");
+
+        assert_eq!(default_pool.pending_count, 1);
+        assert_eq!(default_pool.active_leases, 0);
+        assert!(!default_pool.is_paused);
+        assert_eq!(llm_pool.pending_count, 1);
+        assert!(llm_pool.is_paused);
+        assert_eq!(llm_pool.pause_reason.as_deref(), Some("gpu maintenance"));
     }
 
     #[test]
@@ -6819,6 +7448,116 @@ mod tests {
             .expect("lease status");
 
         assert_eq!(recovered, 0);
+        assert_eq!(lease_status, "active");
+    }
+
+    #[test]
+    fn release_finished_active_worker_lease_succeeds() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )],
+            &[("incoming", "entity-1")],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+        let task = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                worker_id: "worker-one".to_string(),
+                lease_ttl_sec: 1800,
+                now: Utc::now(),
+            },
+        )
+        .expect("claim")
+        .pop()
+        .expect("task");
+        let lease_id = task.lease_id.expect("lease id");
+        let run_id = "finished-run-release";
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                r#"
+                INSERT INTO stage_runs (
+                    run_id, entity_id, entity_file_id, stage_id, attempt_no, workflow_url,
+                    request_json, response_json, http_status, success, started_at, finished_at,
+                    duration_ms
+                )
+                VALUES (?1, 'entity-1', ?2, 'incoming', 1, 'http://localhost', '{}', '{}', 200, 1, ?3, ?3, 1)
+                "#,
+                params![run_id, task.file_instance_id, now],
+            )
+            .expect("stage run");
+        connection
+            .execute(
+                "UPDATE worker_leases SET run_id = ?2 WHERE lease_id = ?1",
+                params![&lease_id, run_id],
+            )
+            .expect("attach run");
+
+        let released = release_worker_lease_with_connection(
+            &connection,
+            &lease_id,
+            "manual_release_after_finished_run",
+            &Utc::now().to_rfc3339(),
+        )
+        .expect("release");
+        let lease_status: String = connection
+            .query_row(
+                "SELECT status FROM worker_leases WHERE lease_id = ?1",
+                params![lease_id],
+                |row| row.get(0),
+            )
+            .expect("lease status");
+
+        assert!(released);
+        assert_eq!(lease_status, "released");
+    }
+
+    #[test]
+    fn release_fresh_active_unfinished_worker_lease_rejects() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )],
+            &[("incoming", "entity-1")],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+        let task = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                worker_id: "worker-one".to_string(),
+                lease_ttl_sec: 1800,
+                now: Utc::now(),
+            },
+        )
+        .expect("claim")
+        .pop()
+        .expect("task");
+        let lease_id = task.lease_id.expect("lease id");
+
+        let result = release_worker_lease_with_connection(
+            &connection,
+            &lease_id,
+            "unsafe release",
+            &Utc::now().to_rfc3339(),
+        );
+        let lease_status: String = connection
+            .query_row(
+                "SELECT status FROM worker_leases WHERE lease_id = ?1",
+                params![lease_id],
+                |row| row.get(0),
+            )
+            .expect("lease status");
+
+        assert!(result.is_err());
         assert_eq!(lease_status, "active");
     }
 

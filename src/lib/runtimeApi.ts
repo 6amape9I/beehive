@@ -39,6 +39,8 @@ import type {
   UpdateS3StageRequest,
   UpdateEntityRequest,
   ValidatePipelineConfigDraftResult,
+  WorkerLeaseReleaseResult,
+  WorkerPoolControlResult,
   WorkerSummaryResult,
   WorkspaceExplorerResult,
 } from "../types/domain";
@@ -273,6 +275,40 @@ export function recoverExpiredWorkerLeases(
   workspaceId: string,
 ): Promise<RecoverExpiredWorkerLeasesResult> {
   return apiClient.recoverExpiredWorkerLeases(workspaceId);
+}
+
+export function pauseWorkers(
+  workspaceId: string,
+  reason?: string | null,
+): Promise<WorkerPoolControlResult> {
+  return apiClient.pauseWorkers(workspaceId, reason);
+}
+
+export function resumeWorkers(workspaceId: string): Promise<WorkerPoolControlResult> {
+  return apiClient.resumeWorkers(workspaceId);
+}
+
+export function pauseWorkerPool(
+  workspaceId: string,
+  resourceClass: string,
+  reason?: string | null,
+): Promise<WorkerPoolControlResult> {
+  return apiClient.pauseWorkerPool(workspaceId, resourceClass, reason);
+}
+
+export function resumeWorkerPool(
+  workspaceId: string,
+  resourceClass: string,
+): Promise<WorkerPoolControlResult> {
+  return apiClient.resumeWorkerPool(workspaceId, resourceClass);
+}
+
+export function releaseWorkerLease(
+  workspaceId: string,
+  leaseId: string,
+  reason: string,
+): Promise<WorkerLeaseReleaseResult> {
+  return apiClient.releaseWorkerLease(workspaceId, leaseId, reason);
 }
 
 export function runEntityStage(

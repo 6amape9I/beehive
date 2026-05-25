@@ -5,6 +5,7 @@ interface DashboardActionsProps {
   onScan: () => void;
   onRunDue: () => void;
   onReconcile: () => void;
+  broadRunsDisabled?: boolean;
 }
 
 export function DashboardActions({
@@ -14,6 +15,7 @@ export function DashboardActions({
   onScan,
   onRunDue,
   onReconcile,
+  broadRunsDisabled = false,
 }: DashboardActionsProps) {
   const disabled = !canRun || activeAction !== null;
 
@@ -25,7 +27,12 @@ export function DashboardActions({
       <button type="button" className="button primary" disabled={disabled} onClick={onScan}>
         {activeAction === "scan" ? "Scanning..." : "Scan workspace"}
       </button>
-      <button type="button" className="button secondary" disabled={disabled} onClick={onRunDue}>
+      <button
+        type="button"
+        className="button secondary"
+        disabled={disabled || broadRunsDisabled}
+        onClick={onRunDue}
+      >
         {activeAction === "run" ? "Running..." : "Run due tasks"}
       </button>
       <button type="button" className="button secondary" disabled={disabled} onClick={onReconcile}>

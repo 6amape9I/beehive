@@ -214,6 +214,12 @@ code {
   gap: 12px;
 }
 
+.worker-pool-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .summary-card {
   min-width: 0;
   padding: 14px;
@@ -923,6 +929,7 @@ th {
   .workspace-card-grid,
   .workspace-stage-content,
   .summary-card-grid,
+  .worker-pool-grid,
   .dashboard-split,
   .stage-editor-form-grid {
     grid-template-columns: 1fr;

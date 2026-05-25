@@ -16,11 +16,12 @@ import { WorkdirSetupPanel } from "../features/workdir/WorkdirSetupPanel";
 import { formatDateTime } from "../lib/formatters";
 import {
   getDashboardOverview,
+  getWorkerSummary,
   reconcileStuckTasks,
   runDueTasks,
   scanWorkspace,
 } from "../lib/runtimeApi";
-import type { CommandErrorInfo, DashboardOverview } from "../types/domain";
+import type { CommandErrorInfo, DashboardOverview, WorkerSummary } from "../types/domain";
 
 type DashboardAction = "refresh" | "scan" | "run" | "reconcile";
 
@@ -39,8 +40,10 @@ export function DashboardPage() {
   const [activeAction, setActiveAction] = useState<DashboardAction | null>(null);
   const [isLoadingOverview, setIsLoadingOverview] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [workerSummary, setWorkerSummary] = useState<WorkerSummary | null>(null);
 
   const workdirPath = state.selected_workdir_path;
+  const workspaceId = state.selected_workspace_id;
   const canQueryDashboard = state.phase === "fully_initialized" && !!workdirPath;
 
   const loadOverview = useCallback(async () => {
@@ -55,6 +58,12 @@ export function DashboardPage() {
       const result = await getDashboardOverview(workdirPath);
       setOverview(result.overview);
       setDashboardErrors(result.errors);
+      if (workspaceId) {
+        const workerResult = await getWorkerSummary(workspaceId);
+        setWorkerSummary(workerResult.summary);
+      } else {
+        setWorkerSummary(null);
+      }
     } catch (error) {
       setOverview(null);
       setDashboardErrors([
@@ -63,7 +72,7 @@ export function DashboardPage() {
     } finally {
       setIsLoadingOverview(false);
     }
-  }, [canQueryDashboard, workdirPath]);
+  }, [canQueryDashboard, workdirPath, workspaceId]);
 
   useEffect(() => {
     void loadOverview();
@@ -139,6 +148,7 @@ export function DashboardPage() {
           onScan={handleScanWorkspace}
           onRunDue={handleRunDueTasks}
           onReconcile={handleReconcileStuck}
+          broadRunsDisabled={workerSummary?.broad_runs_disabled ?? false}
         />
       </div>
 
@@ -148,6 +158,14 @@ export function DashboardPage() {
       {actionMessage ? (
         <section className="panel compact-panel">
           <p className="empty-text">{actionMessage}</p>
+        </section>
+      ) : null}
+
+      {workerSummary?.broad_runs_disabled ? (
+        <section className="panel compact-panel">
+          <p className="empty-text">
+            Broad manual runs are disabled while workers are enabled. Use selected run for debug or let workers process the queue.
+          </p>
         </section>
       ) : null}
 

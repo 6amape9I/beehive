@@ -41,6 +41,8 @@ import type {
   UpdateEntityRequest,
   UpdateWorkspaceRequest,
   ValidatePipelineConfigDraftResult,
+  WorkerLeaseReleaseResult,
+  WorkerPoolControlResult,
   WorkerSummaryResult,
   WorkspaceExplorerResult,
   WorkspaceMutationResult,
@@ -149,6 +151,19 @@ export interface BeehiveApiClient {
   ): Promise<RunSelectedPipelineWavesResult>;
   getWorkerSummary(workspaceId: string): Promise<WorkerSummaryResult>;
   recoverExpiredWorkerLeases(workspaceId: string): Promise<RecoverExpiredWorkerLeasesResult>;
+  pauseWorkers(workspaceId: string, reason?: string | null): Promise<WorkerPoolControlResult>;
+  resumeWorkers(workspaceId: string): Promise<WorkerPoolControlResult>;
+  pauseWorkerPool(
+    workspaceId: string,
+    resourceClass: string,
+    reason?: string | null,
+  ): Promise<WorkerPoolControlResult>;
+  resumeWorkerPool(workspaceId: string, resourceClass: string): Promise<WorkerPoolControlResult>;
+  releaseWorkerLease(
+    workspaceId: string,
+    leaseId: string,
+    reason: string,
+  ): Promise<WorkerLeaseReleaseResult>;
   runEntityStage(path: string, entityId: string, stageId: string): Promise<RunEntityStageResult>;
   retryEntityStageNow(
     path: string,

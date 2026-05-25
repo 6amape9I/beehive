@@ -306,6 +306,16 @@ pub(crate) fn get_workspace(workspace_id: &str) -> Result<RegisteredWorkspace, S
         .ok_or_else(|| format!("Unknown workspace_id '{normalized_id}'."))
 }
 
+pub(crate) fn find_workspace_id_by_workdir_path(path: &Path) -> Result<Option<String>, String> {
+    let target = canonical_or_original(path);
+    for workspace in load_registry()? {
+        if canonical_or_original(&workspace.workdir_path) == target {
+            return Ok(Some(workspace.id));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn registry_path() -> PathBuf {
     if let Some(path) = std::env::var_os("BEEHIVE_WORKSPACES_CONFIG") {
         return PathBuf::from(path);
@@ -323,6 +333,10 @@ pub(crate) fn registry_path() -> PathBuf {
         .parent()
         .map(|path| path.join("config").join("workspaces.yaml"))
         .unwrap_or(cwd_candidate)
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn workspaces_root() -> PathBuf {

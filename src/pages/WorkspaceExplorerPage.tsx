@@ -9,9 +9,14 @@ import {
   listEntities,
   listWorkspaceEntities,
   getWorkerSummary,
+  pauseWorkerPool,
+  pauseWorkers,
+  releaseWorkerLease,
   recoverExpiredWorkerLeases,
   reconcileS3Workspace,
   reconcileS3WorkspaceById,
+  resumeWorkerPool,
+  resumeWorkers,
   runSelectedPipelineWavesById,
   scanWorkspace,
 } from "../lib/runtimeApi";
@@ -22,6 +27,8 @@ import type {
   EntityValidationStatus,
   RunSelectedPipelineWavesSummary,
   SortDirection,
+  WorkerLeaseRecord,
+  WorkerPoolRuntimeSummary,
   WorkerSummary,
 } from "../types/domain";
 
@@ -286,6 +293,82 @@ export function WorkspaceExplorerPage() {
     }
   }
 
+  async function handleWorkerControl(
+    action: string,
+    operation: () => Promise<{ summary: WorkerSummary | null; errors: CommandErrorInfo[] }>,
+    message: (summary: WorkerSummary | null) => string,
+  ) {
+    if (!workspaceId) return;
+    setActiveAction(action);
+    setActionMessage(null);
+    try {
+      const result = await operation();
+      setErrors(result.errors);
+      if (result.summary) {
+        setWorkerSummary(result.summary);
+      }
+      setActionMessage(message(result.summary));
+      await loadEntities();
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
+  async function handlePauseAllWorkers() {
+    await handleWorkerControl(
+      "worker-pause-all",
+      () => pauseWorkers(workspaceId as string, "manual maintenance"),
+      () => "All worker pools paused. Running leases will continue.",
+    );
+  }
+
+  async function handleResumeAllWorkers() {
+    await handleWorkerControl(
+      "worker-resume-all",
+      () => resumeWorkers(workspaceId as string),
+      () => "All worker pools resumed.",
+    );
+  }
+
+  async function handlePausePool(resourceClass: string) {
+    await handleWorkerControl(
+      `worker-pause-${resourceClass}`,
+      () => pauseWorkerPool(workspaceId as string, resourceClass, "manual maintenance"),
+      () => `${workerPoolLabel(resourceClass)} paused. Running leases will continue.`,
+    );
+  }
+
+  async function handleResumePool(resourceClass: string) {
+    await handleWorkerControl(
+      `worker-resume-${resourceClass}`,
+      () => resumeWorkerPool(workspaceId as string, resourceClass),
+      () => `${workerPoolLabel(resourceClass)} resumed.`,
+    );
+  }
+
+  async function handleReleaseWorkerLease(lease: WorkerLeaseRecord) {
+    if (!workspaceId) return;
+    setActiveAction(`worker-release-${lease.lease_id}`);
+    setActionMessage(null);
+    try {
+      const result = await releaseWorkerLease(
+        workspaceId,
+        lease.lease_id,
+        "manual_release_after_finished_run",
+      );
+      setErrors(result.errors);
+      setActionMessage(
+        result.released
+          ? `Worker lease ${shortId(lease.lease_id)} released.`
+          : `Worker lease ${shortId(lease.lease_id)} was not released.`,
+      );
+      await handleLoadWorkerSummary();
+      await loadEntities();
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
   function toggleEntity(entity: EntityTableRow, checked: boolean) {
     if (!entity.latest_file_id || !isSelectableEntity(entity)) return;
     setSelectedEntityIds((current) => {
@@ -302,6 +385,13 @@ export function WorkspaceExplorerPage() {
       ? `/workspaces/${encodeURIComponent(workspaceId)}/entities/${encodeURIComponent(entity.entity_id)}`
       : `/entities/${encodeURIComponent(entity.entity_id)}`;
     navigate(entity.latest_file_id ? `${path}?file_id=${entity.latest_file_id}` : path);
+  }
+
+  function goToEntityById(entityId: string) {
+    const path = workspaceId
+      ? `/workspaces/${encodeURIComponent(workspaceId)}/entities/${encodeURIComponent(entityId)}`
+      : `/entities/${encodeURIComponent(entityId)}`;
+    navigate(path);
   }
 
   return (
@@ -392,6 +482,16 @@ export function WorkspaceExplorerPage() {
                 </button>
               </div>
             </div>
+            {workerSummary?.broad_runs_disabled ? (
+              <p className="empty-text">
+                Broad manual runs are disabled while workers are enabled. Use selected run for debug or let workers process the queue.
+              </p>
+            ) : null}
+            {workerSummary?.workers_enabled ? (
+              <p className="empty-text">
+                Selected runs are for operator debug only while workers are enabled. Roots with active worker leases will be rejected.
+              </p>
+            ) : null}
             {selectedPipelineSummary ? <SelectedPipelineSummary summary={selectedPipelineSummary} /> : null}
           </section>
 
@@ -399,9 +499,9 @@ export function WorkspaceExplorerPage() {
             <section className="panel">
               <div className="panel-heading">
                 <div>
-                  <h2>Worker Pools</h2>
+                  <h2>Workers & Queue</h2>
                   <span className="muted">
-                    DB-backed lease diagnostics for this workspace.
+                    DB-backed pool controls, queue counts, and recent leases.
                   </span>
                 </div>
                 <div className="button-row">
@@ -421,9 +521,34 @@ export function WorkspaceExplorerPage() {
                   >
                     {activeAction === "worker-recovery" ? "Recovering..." : "Recover expired"}
                   </button>
+                  <button
+                    type="button"
+                    className="button secondary"
+                    disabled={activeAction !== null}
+                    onClick={() => void handlePauseAllWorkers()}
+                  >
+                    Pause all
+                  </button>
+                  <button
+                    type="button"
+                    className="button secondary"
+                    disabled={activeAction !== null}
+                    onClick={() => void handleResumeAllWorkers()}
+                  >
+                    Resume all
+                  </button>
                 </div>
               </div>
-              {workerSummary ? <WorkerPoolsSummary summary={workerSummary} /> : null}
+              {workerSummary ? (
+                <WorkerPoolsSummary
+                  summary={workerSummary}
+                  activeAction={activeAction}
+                  onPausePool={handlePausePool}
+                  onResumePool={handleResumePool}
+                  onReleaseLease={handleReleaseWorkerLease}
+                  onOpenEntity={goToEntityById}
+                />
+              ) : null}
             </section>
           ) : null}
 
@@ -658,9 +783,44 @@ function SelectedPipelineSummary({ summary }: { summary: RunSelectedPipelineWave
   );
 }
 
-function WorkerPoolsSummary({ summary }: { summary: WorkerSummary }) {
+function WorkerPoolsSummary({
+  summary,
+  activeAction,
+  onPausePool,
+  onResumePool,
+  onReleaseLease,
+  onOpenEntity,
+}: {
+  summary: WorkerSummary;
+  activeAction: string | null;
+  onPausePool: (resourceClass: string) => void;
+  onResumePool: (resourceClass: string) => void;
+  onReleaseLease: (lease: WorkerLeaseRecord) => void;
+  onOpenEntity: (entityId: string) => void;
+}) {
+  const localLlmPool = summary.pools.find((pool) => pool.resource_class === "local_llm");
+  const localLlmFull =
+    localLlmPool &&
+    localLlmPool.configured_concurrency > 0 &&
+    localLlmPool.active_leases >= localLlmPool.configured_concurrency;
+
   return (
     <div className="workspace-wave-summary">
+      {!summary.workers_enabled ? (
+        <p className="empty-text">
+          Workers are disabled. Set BEEHIVE_WORKERS_ENABLED=1 and BEEHIVE_WORKER_WORKSPACES=&lt;workspace_id&gt; to start background processing.
+        </p>
+      ) : null}
+      {summary.broad_runs_disabled ? (
+        <p className="empty-text">
+          Broad manual runs are disabled while workers are enabled. Use selected run for debug or let workers process the queue.
+        </p>
+      ) : null}
+      {localLlmFull ? (
+        <p className="empty-text">
+          Local LLM pool is full. New local LLM tasks will wait in Beehive.
+        </p>
+      ) : null}
       <div className="summary-card-grid">
         <SummaryCard label="Active leases" value={summary.active_leases_total} />
         <SummaryCard label="Expired leases" value={summary.expired_leases_total} />
@@ -668,12 +828,14 @@ function WorkerPoolsSummary({ summary }: { summary: WorkerSummary }) {
         <SummaryCard label="Heartbeat sec" value={summary.worker_heartbeat_sec} />
         <SummaryCard label="Last recovery" value={summary.last_recovery_at ?? "never"} />
       </div>
-      <div className="summary-card-grid">
+      <div className="worker-pool-grid">
         {summary.pools.map((pool) => (
-          <SummaryCard
+          <WorkerPoolCard
             key={pool.resource_class}
-            label={pool.resource_class === "local_llm" ? "Local LLM pool" : "Default pool"}
-            value={`${pool.active_leases}/${pool.configured_concurrency} active`}
+            pool={pool}
+            activeAction={activeAction}
+            onPausePool={onPausePool}
+            onResumePool={onResumePool}
           />
         ))}
       </div>
@@ -681,7 +843,7 @@ function WorkerPoolsSummary({ summary }: { summary: WorkerSummary }) {
         <details className="diagnostics-block">
           <summary>
             <strong>Recent leases</strong>
-            <span className="muted">Latest worker lease records</span>
+            <span className="muted">Latest worker lease records and safe actions</span>
           </summary>
           <div className="table-wrap">
             <table className="workspace-file-table">
@@ -689,32 +851,135 @@ function WorkerPoolsSummary({ summary }: { summary: WorkerSummary }) {
                 <tr>
                   <th>Lease</th>
                   <th>Worker</th>
+                  <th>Entity</th>
                   <th>Stage</th>
+                  <th>Pool</th>
                   <th>Status</th>
+                  <th>Leased</th>
                   <th>Until</th>
+                  <th>Heartbeat</th>
+                  <th>Run</th>
+                  <th>Release reason</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {summary.recent_leases.map((lease) => (
                   <tr key={lease.lease_id}>
                     <td>
-                      <code>{lease.lease_id}</code>
+                      <code>{shortId(lease.lease_id)}</code>
                     </td>
-                    <td>{lease.worker_id}</td>
+                    <td>{shortId(lease.worker_id)}</td>
+                    <td>{lease.entity_id}</td>
                     <td>{lease.stage_id}</td>
+                    <td>{lease.resource_class}</td>
                     <td>
                       <StatusBadge status={lease.status} />
                     </td>
+                    <td>{lease.leased_at}</td>
                     <td>{lease.lease_until}</td>
+                    <td>{lease.heartbeat_at}</td>
+                    <td>{lease.run_id ? <code>{shortId(lease.run_id)}</code> : "none"}</td>
+                    <td>{lease.release_reason ?? "none"}</td>
+                    <td>
+                      <div className="button-row">
+                        <button
+                          type="button"
+                          className="button secondary"
+                          onClick={() => onOpenEntity(lease.entity_id)}
+                        >
+                          Open entity
+                        </button>
+                        {lease.run_id ? (
+                          <button
+                            type="button"
+                            className="button secondary"
+                            onClick={() => onOpenEntity(lease.entity_id)}
+                          >
+                            Open outputs
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="button secondary"
+                          disabled={lease.status !== "active" || activeAction !== null}
+                          onClick={() => onReleaseLease(lease)}
+                        >
+                          {activeAction === `worker-release-${lease.lease_id}` ? "Releasing..." : "Release"}
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         </details>
-      ) : null}
+      ) : (
+        <p className="empty-text">No worker leases recorded yet.</p>
+      )}
     </div>
   );
+}
+
+function WorkerPoolCard({
+  pool,
+  activeAction,
+  onPausePool,
+  onResumePool,
+}: {
+  pool: WorkerPoolRuntimeSummary;
+  activeAction: string | null;
+  onPausePool: (resourceClass: string) => void;
+  onResumePool: (resourceClass: string) => void;
+}) {
+  const pendingTotal = pool.pending_count + pool.retry_wait_due_count;
+  return (
+    <div className="summary-card">
+      <span>{workerPoolLabel(pool.resource_class)}</span>
+      <strong>
+        {pool.active_leases}/{pool.configured_concurrency} running
+      </strong>
+      <span>{pool.is_paused ? "paused" : "resumed"}</span>
+      <span>{pendingTotal} pending</span>
+      <span>{pool.retry_wait_not_due_count} retry wait</span>
+      <span>{pool.queued_count} queued</span>
+      <span>{pool.in_progress_count} in progress</span>
+      <span>{pool.blocked_count} blocked</span>
+      <span>{pool.failed_count} failed</span>
+      <span>{pool.expired_leases} expired leases</span>
+      <span>{pool.oldest_pending_age_sec !== null ? `${pool.oldest_pending_age_sec}s oldest` : "no pending age"}</span>
+      <span>{pool.average_duration_ms !== null ? `${pool.average_duration_ms}ms avg` : "no duration"}</span>
+      {pool.pause_reason ? <span>{pool.pause_reason}</span> : null}
+      {pool.last_error ? <span>{pool.last_error}</span> : null}
+      <div className="button-row">
+        <button
+          type="button"
+          className="button secondary"
+          disabled={pool.is_paused || activeAction !== null}
+          onClick={() => onPausePool(pool.resource_class)}
+        >
+          Pause
+        </button>
+        <button
+          type="button"
+          className="button secondary"
+          disabled={!pool.is_paused || activeAction !== null}
+          onClick={() => onResumePool(pool.resource_class)}
+        >
+          Resume
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function workerPoolLabel(resourceClass: string) {
+  return resourceClass === "local_llm" ? "Local LLM pool" : "Default pool";
+}
+
+function shortId(value: string) {
+  return value.length > 12 ? `${value.slice(0, 12)}...` : value;
 }
 
 function SummaryCard({ label, value }: { label: string; value: string | number }) {

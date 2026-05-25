@@ -6,10 +6,11 @@ use serde_json::{json, Value};
 use crate::domain::{
     CreateS3StageRequest, CreateWorkspaceRequest, EntityDetailResult, EntityListQuery,
     EntityListResult, EntityMutationResult, ImportJsonBatchRequest, ImportJsonBatchResult,
-    RecoverExpiredWorkerLeasesResult, RegisterS3SourceArtifactRequest, RunDueTasksResult,
-    RunPipelineWavesResult, RunSelectedPipelineWavesRequest, RunSelectedPipelineWavesResult,
-    S3ReconciliationResult, S3StageMutationResult, StageRunOutputsResult, UpdateEntityRequest,
-    UpdateS3StageRequest, UpdateStageNextStageResult, UpdateWorkspaceRequest, WorkerSummaryResult,
+    RecoverExpiredWorkerLeasesResult, RegisterS3SourceArtifactRequest, ResourceClass,
+    RunDueTasksResult, RunPipelineWavesResult, RunSelectedPipelineWavesRequest,
+    RunSelectedPipelineWavesResult, S3ReconciliationResult, S3StageMutationResult,
+    StageRunOutputsResult, UpdateEntityRequest, UpdateS3StageRequest, UpdateStageNextStageResult,
+    UpdateWorkspaceRequest, WorkerLeaseReleaseResult, WorkerPoolControlResult, WorkerSummaryResult,
     WorkspaceMutationResult, WorkspaceRegistryEntryResult, WorkspaceRegistryListResult,
 };
 use crate::services::{
@@ -32,6 +33,16 @@ struct RunPipelineWavesBody {
     max_waves: Option<u64>,
     max_tasks_per_wave: Option<u64>,
     stop_on_first_failure: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkerPauseBody {
+    reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkerLeaseReleaseBody {
+    reason: Option<String>,
 }
 
 pub fn handle_json_request(method: &str, path: &str, body: Option<&str>) -> HttpApiResponse {
@@ -255,7 +266,10 @@ fn route_json_request(
                         },
                         Err(message) => RunDueTasksResult {
                             summary: None,
-                            errors: vec![command_error("run_due_tasks_limited_failed", message)],
+                            errors: vec![command_error(
+                                broad_run_error_code("run_due_tasks_limited_failed", &message),
+                                message,
+                            )],
                         },
                     };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
@@ -274,7 +288,10 @@ fn route_json_request(
                     },
                     Err(message) => RunPipelineWavesResult {
                         summary: None,
-                        errors: vec![command_error("run_pipeline_waves_failed", message)],
+                        errors: vec![command_error(
+                            broad_run_error_code("run_pipeline_waves_failed", &message),
+                            message,
+                        )],
                     },
                 };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
@@ -322,6 +339,79 @@ fn route_json_request(
                             "recover_expired_worker_leases_failed",
                             message,
                         )],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("POST", ["api", "workspaces", _, "workers", "pause"]) => {
+                let input = parse_optional_body::<WorkerPauseBody>(body)?;
+                let result = match workers::pause_all(workspace_id, input.reason.as_deref()) {
+                    Ok(summary) => WorkerPoolControlResult {
+                        summary: Some(summary),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => WorkerPoolControlResult {
+                        summary: None,
+                        errors: vec![command_error("worker_pause_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("POST", ["api", "workspaces", _, "workers", "resume"]) => {
+                let result = match workers::resume_all(workspace_id) {
+                    Ok(summary) => WorkerPoolControlResult {
+                        summary: Some(summary),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => WorkerPoolControlResult {
+                        summary: None,
+                        errors: vec![command_error("worker_resume_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("POST", ["api", "workspaces", _, "workers", "pools", resource_class, "pause"]) => {
+                let input = parse_optional_body::<WorkerPauseBody>(body)?;
+                let result = match parse_resource_class(resource_class).and_then(|resource_class| {
+                    workers::pause_pool(workspace_id, resource_class, input.reason.as_deref())
+                }) {
+                    Ok(summary) => WorkerPoolControlResult {
+                        summary: Some(summary),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => WorkerPoolControlResult {
+                        summary: None,
+                        errors: vec![command_error("worker_pool_pause_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("POST", ["api", "workspaces", _, "workers", "pools", resource_class, "resume"]) => {
+                let result = match parse_resource_class(resource_class)
+                    .and_then(|resource_class| workers::resume_pool(workspace_id, resource_class))
+                {
+                    Ok(summary) => WorkerPoolControlResult {
+                        summary: Some(summary),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => WorkerPoolControlResult {
+                        summary: None,
+                        errors: vec![command_error("worker_pool_resume_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("POST", ["api", "workspaces", _, "workers", "leases", lease_id, "release"]) => {
+                let input = parse_body::<WorkerLeaseReleaseBody>(body)?;
+                let reason = input.reason.unwrap_or_default();
+                let result = match workers::release_lease(workspace_id, lease_id, &reason) {
+                    Ok(released) => WorkerLeaseReleaseResult {
+                        released,
+                        errors: Vec::new(),
+                    },
+                    Err(message) => WorkerLeaseReleaseResult {
+                        released: false,
+                        errors: vec![command_error("worker_lease_release_failed", message)],
                     },
                 };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
@@ -593,6 +683,19 @@ fn command_error(code: &str, message: impl Into<String>) -> crate::domain::Comma
     }
 }
 
+fn broad_run_error_code(default_code: &'static str, message: &str) -> &'static str {
+    if workers::is_broad_run_disabled_error(message) {
+        workers::BROAD_RUN_DISABLED_CODE
+    } else {
+        default_code
+    }
+}
+
+fn parse_resource_class(value: &str) -> Result<ResourceClass, String> {
+    ResourceClass::from_str(value)
+        .ok_or_else(|| format!("Unsupported worker resource_class '{value}'."))
+}
+
 impl Default for RunSmallBatchBody {
     fn default() -> Self {
         Self { max_tasks: Some(3) }
@@ -606,6 +709,12 @@ impl Default for RunPipelineWavesBody {
             max_tasks_per_wave: Some(3),
             stop_on_first_failure: Some(true),
         }
+    }
+}
+
+impl Default for WorkerPauseBody {
+    fn default() -> Self {
+        Self { reason: None }
     }
 }
 
@@ -861,6 +970,46 @@ mod tests {
         assert_eq!(
             recovery.body["errors"][0]["code"].as_str(),
             Some("recover_expired_worker_leases_failed")
+        );
+
+        let pause = handle_json_request(
+            "POST",
+            "/api/workspaces/missing/workers/pause",
+            Some(r#"{"reason":"maintenance"}"#),
+        );
+        assert_eq!(pause.status_code, 200);
+        assert_eq!(
+            pause.body["errors"][0]["code"].as_str(),
+            Some("worker_pause_failed")
+        );
+
+        let resume = handle_json_request("POST", "/api/workspaces/missing/workers/resume", None);
+        assert_eq!(resume.status_code, 200);
+        assert_eq!(
+            resume.body["errors"][0]["code"].as_str(),
+            Some("worker_resume_failed")
+        );
+
+        let pool_pause = handle_json_request(
+            "POST",
+            "/api/workspaces/missing/workers/pools/default/pause",
+            Some(r#"{"reason":"maintenance"}"#),
+        );
+        assert_eq!(pool_pause.status_code, 200);
+        assert_eq!(
+            pool_pause.body["errors"][0]["code"].as_str(),
+            Some("worker_pool_pause_failed")
+        );
+
+        let release = handle_json_request(
+            "POST",
+            "/api/workspaces/missing/workers/leases/lease-1/release",
+            Some(r#"{"reason":"manual_release_after_finished_run"}"#),
+        );
+        assert_eq!(release.status_code, 200);
+        assert_eq!(
+            release.body["errors"][0]["code"].as_str(),
+            Some("worker_lease_release_failed")
         );
     }
 }

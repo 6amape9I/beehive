@@ -13,7 +13,7 @@ No worker startup path targets every workspace implicitly.
 
 ## Schema
 
-Schema v10 adds `worker_leases`.
+Schema v10 added `worker_leases`. Schema v11 adds `worker_pool_controls`.
 
 Required lease fields:
 
@@ -52,6 +52,13 @@ WHERE status = 'active';
 
 This is the DB-level double-claim guard.
 
+`worker_pool_controls` stores pause/resume state inside each workspace DB:
+
+- `resource_class`
+- `is_paused`
+- `pause_reason`
+- `updated_at`
+
 ## Claim
 
 Worker claim is resource-class aware. A default worker only claims `stage.resource_class = default`. A local LLM worker only claims `stage.resource_class = local_llm`.
@@ -78,6 +85,8 @@ The claim transaction:
 4. Commits before execution starts.
 
 Existing manual/selected claim paths refuse active worker leases.
+
+If a worker pool is paused, worker lease claim returns no tasks for that pool.
 
 ## Execution
 
@@ -126,6 +135,12 @@ Wrong-worker or non-active heartbeat fails safely.
 
 Recovery is not broad cleanup. It only touches expired active leases and their still-active states.
 
+## Manual Release
+
+Manual release is exposed only for anomalous active leases whose attached `stage_run` already finished, or expired leases that no longer own running state. Fresh active unfinished leases are rejected. B13 does not expose force release.
+
+Manual release marks the lease `released` and records `release_reason`; it does not mark stage state successful or failed.
+
 ## Worker Manager Env
 
 ```bash
@@ -151,6 +166,21 @@ BEEHIVE_WORKER_RECOVERY_INTERVAL_SEC=30
 ```text
 GET  /api/workspaces/{workspace_id}/workers/summary
 POST /api/workspaces/{workspace_id}/workers/recover-expired-leases
+POST /api/workspaces/{workspace_id}/workers/pause
+POST /api/workspaces/{workspace_id}/workers/resume
+POST /api/workspaces/{workspace_id}/workers/pools/{resource_class}/pause
+POST /api/workspaces/{workspace_id}/workers/pools/{resource_class}/resume
+POST /api/workspaces/{workspace_id}/workers/leases/{lease_id}/release
 ```
 
-The summary reports configured pool concurrency, active leases, expired leases, lease timing defaults, last recovery event time, and recent leases.
+The summary reports configured pool concurrency, active leases, expired leases, queue counts, pause state, lease timing defaults, last recovery event time, and recent leases.
+
+## Broad Manual Runs
+
+When workers are enabled for a workspace, broad manual run endpoints return:
+
+```text
+workers_enabled_broad_run_disabled
+```
+
+The operator should use selected pipeline waves for targeted debugging, or let worker pools process the queue.

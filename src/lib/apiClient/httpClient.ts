@@ -41,6 +41,8 @@ import type {
   UpdateStageNextStageResult,
   UpdateWorkspaceRequest,
   ValidatePipelineConfigDraftResult,
+  WorkerLeaseReleaseResult,
+  WorkerPoolControlResult,
   WorkerSummaryResult,
   WorkspaceExplorerResult,
   WorkspaceMutationResult,
@@ -319,6 +321,40 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
       workspaceId: string,
     ): Promise<RecoverExpiredWorkerLeasesResult> =>
       postJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/workers/recover-expired-leases`),
+    pauseWorkers: (
+      workspaceId: string,
+      reason?: string | null,
+    ): Promise<WorkerPoolControlResult> =>
+      postJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/workers/pause`, {
+        reason: reason ?? null,
+      }),
+    resumeWorkers: (workspaceId: string): Promise<WorkerPoolControlResult> =>
+      postJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/workers/resume`),
+    pauseWorkerPool: (
+      workspaceId: string,
+      resourceClass: string,
+      reason?: string | null,
+    ): Promise<WorkerPoolControlResult> =>
+      postJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/workers/pools/${encodeURIComponent(resourceClass)}/pause`,
+        { reason: reason ?? null },
+      ),
+    resumeWorkerPool: (
+      workspaceId: string,
+      resourceClass: string,
+    ): Promise<WorkerPoolControlResult> =>
+      postJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/workers/pools/${encodeURIComponent(resourceClass)}/resume`,
+      ),
+    releaseWorkerLease: (
+      workspaceId: string,
+      leaseId: string,
+      reason: string,
+    ): Promise<WorkerLeaseReleaseResult> =>
+      postJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/workers/leases/${encodeURIComponent(leaseId)}/release`,
+        { reason },
+      ),
     runEntityStage: (
       path: string,
       _entityId: string,

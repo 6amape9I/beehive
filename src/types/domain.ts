@@ -501,6 +501,18 @@ export interface WorkerPoolRuntimeSummary {
   configured_concurrency: number;
   active_leases: number;
   expired_leases: number;
+  pending_count: number;
+  retry_wait_due_count: number;
+  retry_wait_not_due_count: number;
+  queued_count: number;
+  in_progress_count: number;
+  blocked_count: number;
+  failed_count: number;
+  is_paused: boolean;
+  pause_reason: string | null;
+  oldest_pending_age_sec: number | null;
+  average_duration_ms: number | null;
+  last_error: string | null;
 }
 
 export interface WorkerLeaseRecord {
@@ -524,6 +536,9 @@ export interface WorkerLeaseRecord {
 export interface WorkerSummary {
   worker_lease_sec: number;
   worker_heartbeat_sec: number;
+  workers_enabled: boolean;
+  broad_runs_disabled: boolean;
+  paused_all: boolean;
   pools: WorkerPoolRuntimeSummary[];
   active_leases_total: number;
   expired_leases_total: number;
@@ -538,6 +553,16 @@ export interface WorkerSummaryResult {
 
 export interface RecoverExpiredWorkerLeasesResult {
   recovered: number;
+  errors: CommandErrorInfo[];
+}
+
+export interface WorkerPoolControlResult {
+  summary: WorkerSummary | null;
+  errors: CommandErrorInfo[];
+}
+
+export interface WorkerLeaseReleaseResult {
+  released: boolean;
   errors: CommandErrorInfo[];
 }
 

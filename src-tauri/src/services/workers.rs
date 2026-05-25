@@ -10,6 +10,9 @@ use crate::services::{runtime, workspaces};
 
 const DEFAULT_IDLE_SLEEP_MS: u64 = 1000;
 const DEFAULT_RECOVERY_INTERVAL_SEC: u64 = 30;
+pub(crate) const BROAD_RUN_DISABLED_CODE: &str = "workers_enabled_broad_run_disabled";
+pub(crate) const BROAD_RUN_DISABLED_MESSAGE: &str =
+    "Workers are enabled for this workspace. Use selected run or worker pools instead.";
 
 #[derive(Debug, Clone)]
 struct WorkerEnvConfig {
@@ -23,12 +26,65 @@ struct WorkerEnvConfig {
 
 pub(crate) fn worker_summary(workspace_id: &str) -> Result<WorkerSummary, String> {
     let context = runtime::load_workspace_context(workspace_id)?;
-    database::get_worker_summary(&context.database_path, &context.config)
+    let mut summary = database::get_worker_summary(&context.database_path, &context.config)?;
+    summary.workers_enabled = workspace_workers_enabled(workspace_id);
+    summary.broad_runs_disabled = summary.workers_enabled;
+    Ok(summary)
 }
 
 pub(crate) fn recover_expired_leases(workspace_id: &str) -> Result<u64, String> {
     let context = runtime::load_workspace_context(workspace_id)?;
     database::recover_expired_worker_leases(&context.database_path)
+}
+
+pub(crate) fn pause_all(workspace_id: &str, reason: Option<&str>) -> Result<WorkerSummary, String> {
+    let context = runtime::load_workspace_context(workspace_id)?;
+    database::set_all_worker_pools_paused(&context.database_path, true, reason)?;
+    worker_summary(workspace_id)
+}
+
+pub(crate) fn resume_all(workspace_id: &str) -> Result<WorkerSummary, String> {
+    let context = runtime::load_workspace_context(workspace_id)?;
+    database::set_all_worker_pools_paused(&context.database_path, false, None)?;
+    worker_summary(workspace_id)
+}
+
+pub(crate) fn pause_pool(
+    workspace_id: &str,
+    resource_class: ResourceClass,
+    reason: Option<&str>,
+) -> Result<WorkerSummary, String> {
+    let context = runtime::load_workspace_context(workspace_id)?;
+    database::set_worker_pool_paused(&context.database_path, resource_class, true, reason)?;
+    worker_summary(workspace_id)
+}
+
+pub(crate) fn resume_pool(
+    workspace_id: &str,
+    resource_class: ResourceClass,
+) -> Result<WorkerSummary, String> {
+    let context = runtime::load_workspace_context(workspace_id)?;
+    database::set_worker_pool_paused(&context.database_path, resource_class, false, None)?;
+    worker_summary(workspace_id)
+}
+
+pub(crate) fn release_lease(
+    workspace_id: &str,
+    lease_id: &str,
+    reason: &str,
+) -> Result<bool, String> {
+    let context = runtime::load_workspace_context(workspace_id)?;
+    database::release_worker_lease(&context.database_path, lease_id, reason)
+}
+
+pub(crate) fn workspace_workers_enabled(workspace_id: &str) -> bool {
+    let enabled = env_flag("BEEHIVE_WORKERS_ENABLED");
+    let scope = parse_workspace_scope(std::env::var("BEEHIVE_WORKER_WORKSPACES").ok());
+    workers_enabled_for_scope(enabled, scope.as_deref(), workspace_id)
+}
+
+pub(crate) fn is_broad_run_disabled_error(message: &str) -> bool {
+    message == BROAD_RUN_DISABLED_MESSAGE
 }
 
 pub fn start_from_env() -> Result<(), String> {
@@ -131,6 +187,18 @@ fn worker_loop(
             }
             last_recovery = Instant::now();
         }
+        match database::worker_pool_is_paused(&context.database_path, resource_class) {
+            Ok(true) => {
+                thread::sleep(idle_sleep);
+                continue;
+            }
+            Ok(false) => {}
+            Err(message) => {
+                log_worker_error(&worker_id, &message);
+                thread::sleep(idle_sleep);
+                continue;
+            }
+        }
 
         let summary = executor::run_worker_task(
             &context.workdir_path,
@@ -172,6 +240,17 @@ fn resolve_workspace_scope(scope: &[String]) -> Result<Vec<String>, String> {
             .collect());
     }
     Ok(scope.to_vec())
+}
+
+fn workers_enabled_for_scope(enabled: bool, scope: Option<&[String]>, workspace_id: &str) -> bool {
+    enabled
+        && scope
+            .map(|items| {
+                items
+                    .iter()
+                    .any(|item| item == "all" || item == workspace_id)
+            })
+            .unwrap_or(false)
 }
 
 fn worker_id(workspace_id: &str, resource_class: ResourceClass, index: u32) -> String {
@@ -255,4 +334,34 @@ fn log_worker_manager(code: &str, message: &str) {
 
 fn log_worker_error(worker_id: &str, message: &str) {
     eprintln!(r#"{{"event":"worker_error","worker_id":"{worker_id}","message":"{message}"}}"#);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workers_disabled_by_default_and_require_scope() {
+        assert!(!workers_enabled_for_scope(false, None, "workspace-a"));
+        assert!(!workers_enabled_for_scope(true, None, "workspace-a"));
+        assert!(!workers_enabled_for_scope(true, Some(&[]), "workspace-a"));
+    }
+
+    #[test]
+    fn workers_scope_matches_explicit_workspace_or_all() {
+        let explicit = vec!["workspace-a".to_string(), "workspace-b".to_string()];
+        assert!(workers_enabled_for_scope(
+            true,
+            Some(&explicit),
+            "workspace-a"
+        ));
+        assert!(!workers_enabled_for_scope(
+            true,
+            Some(&explicit),
+            "workspace-c"
+        ));
+
+        let all = vec!["all".to_string()];
+        assert!(workers_enabled_for_scope(true, Some(&all), "workspace-c"));
+    }
 }

@@ -43,6 +43,8 @@ import type {
   UpdateStageNextStageResult,
   UpdateWorkspaceRequest,
   ValidatePipelineConfigDraftResult,
+  WorkerLeaseReleaseResult,
+  WorkerPoolControlResult,
   WorkerSummaryResult,
   WorkspaceExplorerResult,
   WorkspaceMutationResult,
@@ -300,6 +302,77 @@ export const tauriClient: BeehiveApiClient = {
         {
           code: "worker_recovery_http_only",
           message: `Worker lease recovery for '${workspaceId}' is available through the HTTP API.`,
+          path: null,
+        },
+      ],
+    });
+  },
+  pauseWorkers(workspaceId: string, _reason?: string | null): Promise<WorkerPoolControlResult> {
+    return Promise.resolve({
+      summary: null,
+      errors: [
+        {
+          code: "worker_pause_http_only",
+          message: `Worker pause for '${workspaceId}' is available through the HTTP API.`,
+          path: null,
+        },
+      ],
+    });
+  },
+  resumeWorkers(workspaceId: string): Promise<WorkerPoolControlResult> {
+    return Promise.resolve({
+      summary: null,
+      errors: [
+        {
+          code: "worker_resume_http_only",
+          message: `Worker resume for '${workspaceId}' is available through the HTTP API.`,
+          path: null,
+        },
+      ],
+    });
+  },
+  pauseWorkerPool(
+    workspaceId: string,
+    resourceClass: string,
+    _reason?: string | null,
+  ): Promise<WorkerPoolControlResult> {
+    return Promise.resolve({
+      summary: null,
+      errors: [
+        {
+          code: "worker_pool_pause_http_only",
+          message: `Worker pool pause for '${workspaceId}/${resourceClass}' is available through the HTTP API.`,
+          path: null,
+        },
+      ],
+    });
+  },
+  resumeWorkerPool(
+    workspaceId: string,
+    resourceClass: string,
+  ): Promise<WorkerPoolControlResult> {
+    return Promise.resolve({
+      summary: null,
+      errors: [
+        {
+          code: "worker_pool_resume_http_only",
+          message: `Worker pool resume for '${workspaceId}/${resourceClass}' is available through the HTTP API.`,
+          path: null,
+        },
+      ],
+    });
+  },
+  releaseWorkerLease(
+    workspaceId: string,
+    leaseId: string,
+    _reason: string,
+  ): Promise<WorkerLeaseReleaseResult> {
+    return Promise.resolve({
+      released: false,
+      errors: [
+        {
+          code: "worker_lease_release_http_only",
+          message: `Worker lease release for '${workspaceId}/${leaseId}' is available through the HTTP API.`,
           path: null,
         },
       ],

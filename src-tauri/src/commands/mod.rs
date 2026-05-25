@@ -620,23 +620,31 @@ pub fn create_next_stage_copy(
 #[tauri::command]
 pub fn run_due_tasks(path: String) -> RunDueTasksResult {
     match load_runtime_context(&path) {
-        Ok(context) => match executor::run_due_tasks(
-            &context.workdir_path,
-            &context.database_path,
-            context.config.runtime.max_parallel_tasks,
-            context.config.runtime.request_timeout_sec,
-            context.config.runtime.stuck_task_timeout_sec,
-            context.config.runtime.file_stability_delay_ms,
-        ) {
-            Ok(summary) => RunDueTasksResult {
-                summary: Some(summary),
-                errors: Vec::new(),
-            },
-            Err(message) => RunDueTasksResult {
-                summary: None,
-                errors: vec![command_error("run_due_tasks_failed", message, None)],
-            },
-        },
+        Ok(context) => {
+            if let Some(error) = broad_run_disabled_for_context(&context) {
+                return RunDueTasksResult {
+                    summary: None,
+                    errors: vec![error],
+                };
+            }
+            match executor::run_due_tasks(
+                &context.workdir_path,
+                &context.database_path,
+                context.config.runtime.max_parallel_tasks,
+                context.config.runtime.request_timeout_sec,
+                context.config.runtime.stuck_task_timeout_sec,
+                context.config.runtime.file_stability_delay_ms,
+            ) {
+                Ok(summary) => RunDueTasksResult {
+                    summary: Some(summary),
+                    errors: Vec::new(),
+                },
+                Err(message) => RunDueTasksResult {
+                    summary: None,
+                    errors: vec![command_error("run_due_tasks_failed", message, None)],
+                },
+            }
+        }
         Err(error) => RunDueTasksResult {
             summary: None,
             errors: vec![error],
@@ -648,23 +656,31 @@ pub fn run_due_tasks(path: String) -> RunDueTasksResult {
 pub fn run_due_tasks_limited(path: String, max_tasks: u64) -> RunDueTasksResult {
     let limited_max_tasks = max_tasks.clamp(1, 5);
     match load_runtime_context(&path) {
-        Ok(context) => match executor::run_due_tasks(
-            &context.workdir_path,
-            &context.database_path,
-            limited_max_tasks,
-            context.config.runtime.request_timeout_sec,
-            context.config.runtime.stuck_task_timeout_sec,
-            context.config.runtime.file_stability_delay_ms,
-        ) {
-            Ok(summary) => RunDueTasksResult {
-                summary: Some(summary),
-                errors: Vec::new(),
-            },
-            Err(message) => RunDueTasksResult {
-                summary: None,
-                errors: vec![command_error("run_due_tasks_limited_failed", message, None)],
-            },
-        },
+        Ok(context) => {
+            if let Some(error) = broad_run_disabled_for_context(&context) {
+                return RunDueTasksResult {
+                    summary: None,
+                    errors: vec![error],
+                };
+            }
+            match executor::run_due_tasks(
+                &context.workdir_path,
+                &context.database_path,
+                limited_max_tasks,
+                context.config.runtime.request_timeout_sec,
+                context.config.runtime.stuck_task_timeout_sec,
+                context.config.runtime.file_stability_delay_ms,
+            ) {
+                Ok(summary) => RunDueTasksResult {
+                    summary: Some(summary),
+                    errors: Vec::new(),
+                },
+                Err(message) => RunDueTasksResult {
+                    summary: None,
+                    errors: vec![command_error("run_due_tasks_limited_failed", message, None)],
+                },
+            }
+        }
         Err(error) => RunDueTasksResult {
             summary: None,
             errors: vec![error],
@@ -680,25 +696,33 @@ pub fn run_pipeline_waves(
     stop_on_first_failure: bool,
 ) -> RunPipelineWavesResult {
     match load_runtime_context(&path) {
-        Ok(context) => match executor::run_pipeline_waves(
-            &context.workdir_path,
-            &context.database_path,
-            max_waves,
-            max_tasks_per_wave,
-            stop_on_first_failure,
-            context.config.runtime.request_timeout_sec,
-            context.config.runtime.stuck_task_timeout_sec,
-            context.config.runtime.file_stability_delay_ms,
-        ) {
-            Ok(summary) => RunPipelineWavesResult {
-                summary: Some(summary),
-                errors: Vec::new(),
-            },
-            Err(message) => RunPipelineWavesResult {
-                summary: None,
-                errors: vec![command_error("run_pipeline_waves_failed", message, None)],
-            },
-        },
+        Ok(context) => {
+            if let Some(error) = broad_run_disabled_for_context(&context) {
+                return RunPipelineWavesResult {
+                    summary: None,
+                    errors: vec![error],
+                };
+            }
+            match executor::run_pipeline_waves(
+                &context.workdir_path,
+                &context.database_path,
+                max_waves,
+                max_tasks_per_wave,
+                stop_on_first_failure,
+                context.config.runtime.request_timeout_sec,
+                context.config.runtime.stuck_task_timeout_sec,
+                context.config.runtime.file_stability_delay_ms,
+            ) {
+                Ok(summary) => RunPipelineWavesResult {
+                    summary: Some(summary),
+                    errors: Vec::new(),
+                },
+                Err(message) => RunPipelineWavesResult {
+                    summary: None,
+                    errors: vec![command_error("run_pipeline_waves_failed", message, None)],
+                },
+            }
+        }
         Err(error) => RunPipelineWavesResult {
             summary: None,
             errors: vec![error],
@@ -1026,7 +1050,11 @@ pub fn run_due_tasks_limited_by_id(workspace_id: String, max_tasks: u64) -> RunD
         },
         Err(message) => RunDueTasksResult {
             summary: None,
-            errors: vec![command_error("run_due_tasks_limited_failed", message, None)],
+            errors: vec![command_error(
+                broad_run_error_code("run_due_tasks_limited_failed", &message),
+                message,
+                None,
+            )],
         },
     }
 }
@@ -1050,7 +1078,11 @@ pub fn run_pipeline_waves_by_id(
         },
         Err(message) => RunPipelineWavesResult {
             summary: None,
-            errors: vec![command_error("run_pipeline_waves_failed", message, None)],
+            errors: vec![command_error(
+                broad_run_error_code("run_pipeline_waves_failed", &message),
+                message,
+                None,
+            )],
         },
     }
 }
@@ -1180,6 +1212,7 @@ struct RuntimeContext {
     workdir_path: PathBuf,
     database_path: PathBuf,
     config: crate::domain::PipelineConfig,
+    workspace_id: Option<String>,
 }
 
 struct ReadonlyRuntimeContext {
@@ -1242,10 +1275,33 @@ fn load_runtime_context(path: &str) -> Result<RuntimeContext, CommandErrorInfo> 
     })?;
 
     Ok(RuntimeContext {
+        workspace_id: services::workspaces::find_workspace_id_by_workdir_path(&workdir_path)
+            .ok()
+            .flatten(),
         workdir_path,
         database_path,
         config,
     })
+}
+
+fn broad_run_disabled_for_context(context: &RuntimeContext) -> Option<CommandErrorInfo> {
+    let workspace_id = context.workspace_id.as_deref()?;
+    if !services::workers::workspace_workers_enabled(workspace_id) {
+        return None;
+    }
+    Some(command_error(
+        services::workers::BROAD_RUN_DISABLED_CODE,
+        services::workers::BROAD_RUN_DISABLED_MESSAGE,
+        None,
+    ))
+}
+
+fn broad_run_error_code(default_code: &'static str, message: &str) -> &'static str {
+    if services::workers::is_broad_run_disabled_error(message) {
+        services::workers::BROAD_RUN_DISABLED_CODE
+    } else {
+        default_code
+    }
 }
 
 fn load_readonly_runtime_context(path: &str) -> Result<ReadonlyRuntimeContext, CommandErrorInfo> {

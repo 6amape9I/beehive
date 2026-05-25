@@ -749,6 +749,18 @@ pub struct WorkerPoolRuntimeSummary {
     pub configured_concurrency: u32,
     pub active_leases: u64,
     pub expired_leases: u64,
+    pub pending_count: u64,
+    pub retry_wait_due_count: u64,
+    pub retry_wait_not_due_count: u64,
+    pub queued_count: u64,
+    pub in_progress_count: u64,
+    pub blocked_count: u64,
+    pub failed_count: u64,
+    pub is_paused: bool,
+    pub pause_reason: Option<String>,
+    pub oldest_pending_age_sec: Option<u64>,
+    pub average_duration_ms: Option<u64>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -774,6 +786,9 @@ pub struct WorkerLeaseRecord {
 pub struct WorkerSummary {
     pub worker_lease_sec: u64,
     pub worker_heartbeat_sec: u64,
+    pub workers_enabled: bool,
+    pub broad_runs_disabled: bool,
+    pub paused_all: bool,
     pub pools: Vec<WorkerPoolRuntimeSummary>,
     pub active_leases_total: u64,
     pub expired_leases_total: u64,
@@ -790,6 +805,18 @@ pub struct WorkerSummaryResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecoverExpiredWorkerLeasesResult {
     pub recovered: u64,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerPoolControlResult {
+    pub summary: Option<WorkerSummary>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerLeaseReleaseResult {
+    pub released: bool,
     pub errors: Vec<CommandErrorInfo>,
 }
 
