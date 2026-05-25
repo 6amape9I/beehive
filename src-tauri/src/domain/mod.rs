@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const DEFAULT_REQUEST_TIMEOUT_SEC: u64 = 300;
+pub const MAX_WORKER_POOL_CONCURRENCY: u32 = 128;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,6 +62,62 @@ pub struct ProjectConfig {
     pub workdir: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceClass {
+    Default,
+    LocalLlm,
+}
+
+impl ResourceClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::LocalLlm => "local_llm",
+        }
+    }
+
+    pub fn uses_local_llm(&self) -> bool {
+        matches!(self, Self::LocalLlm)
+    }
+}
+
+impl Default for ResourceClass {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+fn is_default_resource_class(value: &ResourceClass) -> bool {
+    *value == ResourceClass::Default
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerPoolConfig {
+    pub concurrency: u32,
+}
+
+impl Default for WorkerPoolConfig {
+    fn default() -> Self {
+        Self { concurrency: 1 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerPoolsConfig {
+    pub default: WorkerPoolConfig,
+    pub local_llm: WorkerPoolConfig,
+}
+
+impl Default for WorkerPoolsConfig {
+    fn default() -> Self {
+        Self {
+            default: WorkerPoolConfig::default(),
+            local_llm: WorkerPoolConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub scan_interval_sec: u64,
@@ -68,6 +125,8 @@ pub struct RuntimeConfig {
     pub stuck_task_timeout_sec: u64,
     pub request_timeout_sec: u64,
     pub file_stability_delay_ms: u64,
+    #[serde(default)]
+    pub worker_pools: WorkerPoolsConfig,
 }
 
 impl Default for RuntimeConfig {
@@ -78,6 +137,7 @@ impl Default for RuntimeConfig {
             stuck_task_timeout_sec: 900,
             request_timeout_sec: DEFAULT_REQUEST_TIMEOUT_SEC,
             file_stability_delay_ms: 1000,
+            worker_pools: WorkerPoolsConfig::default(),
         }
     }
 }
@@ -148,6 +208,8 @@ pub struct StageStorageConfig {
     pub input_uri: Option<String>,
     pub input_folder: Option<String>,
     pub save_path_aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_default_resource_class")]
+    pub resource_class: ResourceClass,
     #[serde(rename = "allow_zero_outputs", alias = "allow_empty_outputs")]
     pub allow_empty_outputs: bool,
     #[serde(default)]
@@ -167,6 +229,8 @@ pub struct StageDefinition {
     pub next_stage: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub save_path_aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_default_resource_class")]
+    pub resource_class: ResourceClass,
     #[serde(
         default,
         rename = "allow_zero_outputs",
@@ -200,6 +264,8 @@ pub struct RuntimeConfigDraft {
     pub stuck_task_timeout_sec: i64,
     pub request_timeout_sec: i64,
     pub file_stability_delay_ms: i64,
+    #[serde(default)]
+    pub worker_pools: WorkerPoolsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -215,6 +281,8 @@ pub struct StageDefinitionDraft {
     pub next_stage: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub save_path_aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_default_resource_class")]
+    pub resource_class: ResourceClass,
     #[serde(
         default,
         rename = "allow_zero_outputs",
@@ -444,6 +512,7 @@ pub struct StageRecord {
     pub retry_delay_sec: u64,
     pub next_stage: Option<String>,
     pub save_path_aliases: Vec<String>,
+    pub resource_class: ResourceClass,
     #[serde(rename = "allow_zero_outputs", alias = "allow_empty_outputs")]
     pub allow_empty_outputs: bool,
     pub allow_multiple_outputs: bool,
@@ -942,6 +1011,8 @@ pub struct CreateS3StageRequest {
     pub next_stage: Option<String>,
     pub max_attempts: Option<u64>,
     pub retry_delay_sec: Option<u64>,
+    pub uses_local_llm: Option<bool>,
+    pub resource_class: Option<ResourceClass>,
     pub allow_zero_outputs: Option<bool>,
     pub allow_empty_outputs: Option<bool>,
     pub allow_multiple_outputs: Option<bool>,
@@ -973,6 +1044,8 @@ pub struct UpdateS3StageRequest {
     pub next_stage: Option<Option<String>>,
     pub max_attempts: Option<u64>,
     pub retry_delay_sec: Option<u64>,
+    pub uses_local_llm: Option<bool>,
+    pub resource_class: Option<ResourceClass>,
     pub allow_zero_outputs: Option<bool>,
     pub allow_empty_outputs: Option<bool>,
     pub allow_multiple_outputs: Option<bool>,
@@ -1179,6 +1252,8 @@ pub struct WorkspaceStageTree {
     pub retry_delay_sec: u64,
     pub next_stage: Option<String>,
     pub save_path_aliases: Vec<String>,
+    pub resource_class: ResourceClass,
+    pub uses_local_llm: bool,
     #[serde(rename = "allow_zero_outputs", alias = "allow_empty_outputs")]
     pub allow_empty_outputs: bool,
     pub allow_multiple_outputs: bool,

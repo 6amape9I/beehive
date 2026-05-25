@@ -99,6 +99,7 @@ mod tests {
                 retry_delay_sec: 10,
                 next_stage: None,
                 save_path_aliases: Vec::new(),
+                resource_class: Default::default(),
                 allow_empty_outputs: false,
                 allow_multiple_outputs: false,
             }],

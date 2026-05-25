@@ -37,6 +37,10 @@ function cardinalityLabel(stage: StageDefinitionDraft) {
   return "Exactly 1 output";
 }
 
+function resourceClassLabel(stage: StageDefinitionDraft) {
+  return stage.resource_class === "local_llm" ? "Local LLM" : "Default";
+}
+
 export function StageDraftList({
   stages,
   usages,
@@ -61,6 +65,7 @@ export function StageDraftList({
                 <th>ID</th>
                 <th>Input</th>
                 <th>Output</th>
+                <th>Resource</th>
                 <th>Mode</th>
                 <th>Retry</th>
                 <th>Usage</th>
@@ -88,6 +93,7 @@ export function StageDraftList({
                     </td>
                     <td><code>{stage.input_uri ?? stage.input_folder}</code></td>
                     <td><code>{stage.output_folder}</code></td>
+                    <td><span className="status-badge neutral">{resourceClassLabel(stage)}</span></td>
                     <td>{cardinalityLabel(stage)}</td>
                     <td>{stage.max_attempts} / {stage.retry_delay_sec}s</td>
                     <td>

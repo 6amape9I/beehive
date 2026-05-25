@@ -576,6 +576,7 @@ mod tests {
                 stuck_task_timeout_sec: 1,
                 request_timeout_sec: 5,
                 file_stability_delay_ms: 0,
+                worker_pools: Default::default(),
             },
             stages: vec![
                 StageDefinition {
@@ -588,6 +589,7 @@ mod tests {
                     retry_delay_sec: 0,
                     next_stage: Some("processed".to_string()),
                     save_path_aliases: vec!["prefix/raw".to_string()],
+                    resource_class: Default::default(),
                     allow_empty_outputs: false,
                     allow_multiple_outputs: true,
                 },
@@ -605,6 +607,7 @@ mod tests {
                         "/prefix/processed".to_string(),
                         "s3://bucket/prefix/processed".to_string(),
                     ],
+                    resource_class: Default::default(),
                     allow_empty_outputs: true,
                     allow_multiple_outputs: false,
                 },

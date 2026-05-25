@@ -107,6 +107,7 @@ mod tests {
                 retry_delay_sec: 30,
                 next_stage: None,
                 save_path_aliases: vec!["prefix/processed".to_string()],
+                resource_class: Default::default(),
                 allow_empty_outputs: false,
                 allow_multiple_outputs: false,
             }],

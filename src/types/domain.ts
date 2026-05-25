@@ -13,6 +13,7 @@ export type WorkdirHealthSeverity = "info" | "warning" | "error";
 export type EntityValidationStatus = "valid" | "warning" | "invalid";
 export type AppEventLevel = "info" | "warning" | "error";
 export type FileCopyStatus = "created" | "already_exists" | "blocked" | "failed";
+export type ResourceClass = "default" | "local_llm";
 
 export interface ConfigValidationIssue {
   severity: ValidationSeverity;
@@ -31,12 +32,22 @@ export interface ProjectConfig {
   workdir: string;
 }
 
+export interface WorkerPoolConfig {
+  concurrency: number;
+}
+
+export interface WorkerPoolsConfig {
+  default: WorkerPoolConfig;
+  local_llm: WorkerPoolConfig;
+}
+
 export interface RuntimeConfig {
   scan_interval_sec: number;
   max_parallel_tasks: number;
   stuck_task_timeout_sec: number;
   request_timeout_sec: number;
   file_stability_delay_ms: number;
+  worker_pools: WorkerPoolsConfig;
 }
 
 export type StorageProvider = "local" | "s3";
@@ -59,6 +70,8 @@ export interface StageDefinition {
   retry_delay_sec: number;
   next_stage: string | null;
   save_path_aliases?: string[];
+  resource_class?: ResourceClass;
+  uses_local_llm?: boolean;
   allow_zero_outputs?: boolean;
   allow_empty_outputs?: boolean;
   allow_multiple_outputs?: boolean;
@@ -82,6 +95,7 @@ export interface RuntimeConfigDraft {
   stuck_task_timeout_sec: number;
   request_timeout_sec: number;
   file_stability_delay_ms: number;
+  worker_pools: WorkerPoolsConfig;
 }
 
 export interface StageDefinitionDraft {
@@ -94,6 +108,7 @@ export interface StageDefinitionDraft {
   retry_delay_sec: number;
   next_stage: string | null;
   save_path_aliases?: string[];
+  resource_class: ResourceClass;
   allow_zero_outputs?: boolean;
   allow_empty_outputs?: boolean;
   allow_multiple_outputs?: boolean;
@@ -282,6 +297,7 @@ export interface StageRecord {
   retry_delay_sec: number;
   next_stage: string | null;
   save_path_aliases: string[];
+  resource_class: ResourceClass;
   allow_zero_outputs?: boolean;
   allow_empty_outputs: boolean;
   allow_multiple_outputs: boolean;
@@ -716,6 +732,8 @@ export interface CreateS3StageRequest {
   next_stage?: string | null;
   max_attempts?: number | null;
   retry_delay_sec?: number | null;
+  uses_local_llm?: boolean | null;
+  resource_class?: ResourceClass | null;
   allow_zero_outputs?: boolean | null;
   allow_empty_outputs?: boolean | null;
   allow_multiple_outputs?: boolean | null;
@@ -742,6 +760,8 @@ export interface UpdateS3StageRequest {
   next_stage?: string | null;
   max_attempts?: number | null;
   retry_delay_sec?: number | null;
+  uses_local_llm?: boolean | null;
+  resource_class?: ResourceClass | null;
   allow_zero_outputs?: boolean | null;
   allow_empty_outputs?: boolean | null;
   allow_multiple_outputs?: boolean | null;
@@ -938,6 +958,8 @@ export interface WorkspaceStageTree {
   retry_delay_sec: number;
   next_stage: string | null;
   save_path_aliases: string[];
+  resource_class: ResourceClass;
+  uses_local_llm: boolean;
   allow_zero_outputs?: boolean;
   allow_empty_outputs: boolean;
   allow_multiple_outputs: boolean;

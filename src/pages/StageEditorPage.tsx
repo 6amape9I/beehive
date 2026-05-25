@@ -39,6 +39,7 @@ interface S3StageCreationForm {
   workflow_url: string;
   max_attempts: number;
   retry_delay_sec: number;
+  uses_local_llm: boolean;
   allow_zero_outputs: boolean;
   allow_multiple_outputs: boolean;
 }
@@ -48,18 +49,25 @@ const defaultS3StageCreationForm: S3StageCreationForm = {
   workflow_url: "",
   max_attempts: 3,
   retry_delay_sec: 30,
+  uses_local_llm: false,
   allow_zero_outputs: false,
   allow_multiple_outputs: false,
 };
 
 const OUTPUT_CARDINALITY_HELP =
   'По умолчанию stage ожидает ровно 1 output. Если workflow может отфильтровать вход и ничего не вернуть - включите "Разрешено 0 выходов". Если workflow может породить несколько новых сущностей - включите "Разрешено несколько выходов".';
+const LOCAL_LLM_HELP =
+  "Если включено, этот stage будет выполняться отдельным пулом local_llm с ограниченным параллелизмом.";
 
 function allowsZeroOutputs(stage: {
   allow_zero_outputs?: boolean | null;
   allow_empty_outputs?: boolean | null;
 }) {
   return !!(stage.allow_zero_outputs ?? stage.allow_empty_outputs ?? false);
+}
+
+function resourceClassLabel(resourceClass?: string | null) {
+  return resourceClass === "local_llm" ? "Local LLM" : "Default";
 }
 
 function makeNewStage(existingIds: string[]): StageDefinitionDraft {
@@ -79,6 +87,7 @@ function makeNewStage(existingIds: string[]): StageDefinitionDraft {
     retry_delay_sec: 10,
     next_stage: null,
     save_path_aliases: [],
+    resource_class: "default",
     allow_zero_outputs: false,
     allow_multiple_outputs: false,
     original_stage_id: null,
@@ -288,6 +297,7 @@ export function StageEditorPage() {
       workflow_url: s3StageForm.workflow_url.trim(),
       max_attempts: s3StageForm.max_attempts,
       retry_delay_sec: s3StageForm.retry_delay_sec,
+      uses_local_llm: s3StageForm.uses_local_llm,
       allow_zero_outputs: s3StageForm.allow_zero_outputs,
       allow_multiple_outputs: s3StageForm.allow_multiple_outputs,
     };
@@ -602,6 +612,16 @@ function S3StageCreationPanel({
         <label className="checkbox-row">
           <input
             type="checkbox"
+            checked={form.uses_local_llm}
+            disabled={disabled}
+            onChange={(event) => update("uses_local_llm", event.target.checked)}
+          />
+          Использует локальную LLM
+        </label>
+        <p className="field-hint">{LOCAL_LLM_HELP}</p>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
             checked={form.allow_zero_outputs}
             disabled={disabled}
             onChange={(event) => update("allow_zero_outputs", event.target.checked)}
@@ -656,6 +676,7 @@ interface StageCrudForm {
   workflow_url: string;
   max_attempts: number;
   retry_delay_sec: number;
+  uses_local_llm: boolean;
   allow_zero_outputs: boolean;
   allow_multiple_outputs: boolean;
 }
@@ -684,6 +705,7 @@ function StageCrudPanel({
     workflow_url: "",
     max_attempts: 3,
     retry_delay_sec: 30,
+    uses_local_llm: false,
     allow_zero_outputs: false,
     allow_multiple_outputs: false,
   });
@@ -695,6 +717,7 @@ function StageCrudPanel({
       workflow_url: selectedStage.workflow_url ?? "",
       max_attempts: selectedStage.max_attempts,
       retry_delay_sec: selectedStage.retry_delay_sec,
+      uses_local_llm: selectedStage.uses_local_llm ?? selectedStage.resource_class === "local_llm",
       allow_zero_outputs: allowsZeroOutputs(selectedStage),
       allow_multiple_outputs: !!selectedStage.allow_multiple_outputs,
     });
@@ -720,6 +743,11 @@ function StageCrudPanel({
           <span className="muted">Edit runtime fields, archive/delete, restore, and copy save_path aliases.</span>
         </div>
       </div>
+      {selectedStage ? (
+        <div className="inline-meta">
+          <span className="status-badge neutral">{resourceClassLabel(selectedStage.resource_class)}</span>
+        </div>
+      ) : null}
       <div className="stage-editor-form-grid">
         <div className="form-row">
           <label htmlFor="crud-stage-select">Stage</label>
@@ -777,6 +805,16 @@ function StageCrudPanel({
         <label className="checkbox-row">
           <input
             type="checkbox"
+            checked={form.uses_local_llm}
+            disabled={disabled || !selectedStage?.is_active}
+            onChange={(event) => update("uses_local_llm", event.target.checked)}
+          />
+          Использует локальную LLM
+        </label>
+        <p className="field-hint">{LOCAL_LLM_HELP}</p>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
             checked={form.allow_zero_outputs}
             disabled={disabled || !selectedStage?.is_active}
             onChange={(event) => update("allow_zero_outputs", event.target.checked)}
@@ -804,6 +842,7 @@ function StageCrudPanel({
               workflow_url: form.workflow_url.trim(),
               max_attempts: form.max_attempts,
               retry_delay_sec: form.retry_delay_sec,
+              uses_local_llm: form.uses_local_llm,
               allow_zero_outputs: form.allow_zero_outputs,
               allow_multiple_outputs: form.allow_multiple_outputs,
             })

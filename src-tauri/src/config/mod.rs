@@ -1,13 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
 
 use crate::domain::{
-    ConfigValidationIssue, ConfigValidationResult, PipelineConfig, ProjectConfig, RuntimeConfig,
-    StageDefinition, StorageConfig, StorageProvider, ValidationSeverity,
-    DEFAULT_REQUEST_TIMEOUT_SEC,
+    ConfigValidationIssue, ConfigValidationResult, PipelineConfig, ProjectConfig, ResourceClass,
+    RuntimeConfig, StageDefinition, StorageConfig, StorageProvider, ValidationSeverity,
+    WorkerPoolConfig, WorkerPoolsConfig, DEFAULT_REQUEST_TIMEOUT_SEC, MAX_WORKER_POOL_CONCURRENCY,
 };
 
 #[derive(Debug, Deserialize)]
@@ -31,6 +31,12 @@ struct RawRuntimeConfig {
     stuck_task_timeout_sec: Option<u64>,
     request_timeout_sec: Option<u64>,
     file_stability_delay_ms: Option<u64>,
+    worker_pools: Option<BTreeMap<String, RawWorkerPoolConfig>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawWorkerPoolConfig {
+    concurrency: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +59,7 @@ struct RawStageDefinition {
     retry_delay_sec: Option<i64>,
     next_stage: Option<String>,
     save_path_aliases: Option<Vec<String>>,
+    resource_class: Option<String>,
     allow_zero_outputs: Option<bool>,
     allow_empty_outputs: Option<bool>,
     allow_multiple_outputs: Option<bool>,
@@ -76,6 +83,11 @@ runtime:
   stuck_task_timeout_sec: 900
   request_timeout_sec: 300
   file_stability_delay_ms: 1000
+  worker_pools:
+    default:
+      concurrency: 1
+    local_llm:
+      concurrency: 1
 
 stages:
   - id: ingest
@@ -186,37 +198,7 @@ fn validate_and_build(raw: RawPipelineConfig) -> (Option<PipelineConfig>, Config
         .as_ref()
         .and_then(|storage| storage.workspace_prefix.as_deref());
 
-    let runtime = match raw.runtime {
-        Some(runtime) => {
-            let request_timeout_sec = runtime
-                .request_timeout_sec
-                .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SEC);
-            if request_timeout_sec == 0 {
-                issues.push(issue(
-                    ValidationSeverity::Error,
-                    "invalid_runtime_request_timeout_sec",
-                    "runtime.request_timeout_sec",
-                    "request_timeout_sec must be greater than 0.",
-                ));
-            }
-            RuntimeConfig {
-                scan_interval_sec: runtime.scan_interval_sec.unwrap_or(5),
-                max_parallel_tasks: runtime.max_parallel_tasks.unwrap_or(3),
-                stuck_task_timeout_sec: runtime.stuck_task_timeout_sec.unwrap_or(900),
-                request_timeout_sec: request_timeout_sec.max(DEFAULT_REQUEST_TIMEOUT_SEC),
-                file_stability_delay_ms: runtime.file_stability_delay_ms.unwrap_or(1000),
-            }
-        }
-        None => {
-            issues.push(issue(
-                ValidationSeverity::Warning,
-                "runtime_defaults_applied",
-                "runtime",
-                "The runtime section is missing; safe defaults were applied.",
-            ));
-            RuntimeConfig::default()
-        }
-    };
+    let runtime = build_runtime_config(raw.runtime, &mut issues);
 
     let stages = match raw.stages {
         Some(stages) => build_stages(
@@ -456,6 +438,8 @@ fn build_stages(
             .allow_zero_outputs
             .or(raw_stage.allow_empty_outputs)
             .unwrap_or(false);
+        let resource_class =
+            build_resource_class(raw_stage.resource_class, id.as_deref(), &prefix, issues);
 
         if let (Some(id), Some(workflow_url)) = (id, workflow_url) {
             stages.push(StageDefinition {
@@ -468,6 +452,7 @@ fn build_stages(
                 retry_delay_sec: retry_delay_sec.max(0) as u64,
                 next_stage,
                 save_path_aliases,
+                resource_class,
                 allow_empty_outputs: allow_zero_outputs,
                 allow_multiple_outputs: raw_stage.allow_multiple_outputs.unwrap_or(false),
             });
@@ -475,6 +460,123 @@ fn build_stages(
     }
 
     stages
+}
+
+fn build_runtime_config(
+    raw_runtime: Option<RawRuntimeConfig>,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> RuntimeConfig {
+    match raw_runtime {
+        Some(runtime) => {
+            let request_timeout_sec = runtime
+                .request_timeout_sec
+                .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SEC);
+            if request_timeout_sec == 0 {
+                issues.push(issue(
+                    ValidationSeverity::Error,
+                    "invalid_runtime_request_timeout_sec",
+                    "runtime.request_timeout_sec",
+                    "request_timeout_sec must be greater than 0.",
+                ));
+            }
+            RuntimeConfig {
+                scan_interval_sec: runtime.scan_interval_sec.unwrap_or(5),
+                max_parallel_tasks: runtime.max_parallel_tasks.unwrap_or(3),
+                stuck_task_timeout_sec: runtime.stuck_task_timeout_sec.unwrap_or(900),
+                request_timeout_sec: request_timeout_sec.max(DEFAULT_REQUEST_TIMEOUT_SEC),
+                file_stability_delay_ms: runtime.file_stability_delay_ms.unwrap_or(1000),
+                worker_pools: build_worker_pools_config(runtime.worker_pools, issues),
+            }
+        }
+        None => {
+            issues.push(issue(
+                ValidationSeverity::Warning,
+                "runtime_defaults_applied",
+                "runtime",
+                "The runtime section is missing; safe defaults were applied.",
+            ));
+            RuntimeConfig::default()
+        }
+    }
+}
+
+fn build_worker_pools_config(
+    raw_worker_pools: Option<BTreeMap<String, RawWorkerPoolConfig>>,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> WorkerPoolsConfig {
+    let mut worker_pools = WorkerPoolsConfig::default();
+    let Some(raw_worker_pools) = raw_worker_pools else {
+        return worker_pools;
+    };
+
+    for (pool_name, pool) in raw_worker_pools {
+        let normalized_name = pool_name.trim();
+        let Some(concurrency) = build_worker_pool_concurrency(
+            pool.concurrency,
+            &format!("runtime.worker_pools.{normalized_name}.concurrency"),
+            issues,
+        ) else {
+            continue;
+        };
+        match normalized_name {
+            "default" => worker_pools.default = WorkerPoolConfig { concurrency },
+            "local_llm" => worker_pools.local_llm = WorkerPoolConfig { concurrency },
+            _ => issues.push(issue(
+                ValidationSeverity::Error,
+                "unknown_worker_pool",
+                format!("runtime.worker_pools.{normalized_name}"),
+                format!("unknown worker pool '{normalized_name}'; expected default or local_llm."),
+            )),
+        }
+    }
+
+    worker_pools
+}
+
+fn build_worker_pool_concurrency(
+    value: Option<i64>,
+    path: &str,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> Option<u32> {
+    let value = value.unwrap_or(1);
+    if value < 0 || value > MAX_WORKER_POOL_CONCURRENCY as i64 {
+        issues.push(issue(
+            ValidationSeverity::Error,
+            "invalid_worker_pool_concurrency",
+            path,
+            format!("worker pool concurrency must be between 0 and {MAX_WORKER_POOL_CONCURRENCY}."),
+        ));
+        return None;
+    }
+    Some(value as u32)
+}
+
+fn build_resource_class(
+    raw_resource_class: Option<String>,
+    stage_id: Option<&str>,
+    prefix: &str,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> ResourceClass {
+    let Some(raw_resource_class) = raw_resource_class else {
+        return ResourceClass::Default;
+    };
+    let trimmed = raw_resource_class.trim();
+    match trimmed {
+        "default" => ResourceClass::Default,
+        "local_llm" => ResourceClass::LocalLlm,
+        _ => {
+            let stage_label = stage_id.unwrap_or("<unknown>");
+            issues.push(issue(
+                ValidationSeverity::Error,
+                "invalid_stage_resource_class",
+                format!("{prefix}.resource_class"),
+                format!(
+                    "invalid resource_class '{trimmed}' for stage '{stage_label}'; expected default or local_llm."
+                ),
+            ));
+            ResourceClass::Default
+        }
+    }
 }
 
 fn validate_stage_links(stages: &[StageDefinition], issues: &mut Vec<ConfigValidationIssue>) {
@@ -867,6 +969,167 @@ stages:
         assert!(loaded.validation.is_valid, "{:?}", loaded.validation.issues);
         assert!(config.stages[0].allow_multiple_outputs);
         assert!(!config.stages[0].allow_empty_outputs);
+    }
+
+    #[test]
+    fn missing_resource_class_defaults_to_default() {
+        let yaml = r#"
+project:
+  name: beehive-s3-dev
+  workdir: .
+storage:
+  provider: s3
+  bucket: steos-s3-data
+  workspace_prefix: main_dir
+stages:
+  - id: raw
+    input_uri: s3://steos-s3-data/main_dir/raw
+    workflow_url: http://localhost:5678/webhook/raw
+"#;
+
+        let loaded = parse_pipeline_config(yaml, "now".to_string());
+        let config = loaded.config.expect("s3 config");
+
+        assert!(loaded.validation.is_valid, "{:?}", loaded.validation.issues);
+        assert_eq!(config.stages[0].resource_class, ResourceClass::Default);
+    }
+
+    #[test]
+    fn local_llm_resource_class_parses() {
+        let yaml = r#"
+project:
+  name: beehive-s3-dev
+  workdir: .
+storage:
+  provider: s3
+  bucket: steos-s3-data
+  workspace_prefix: main_dir
+stages:
+  - id: raw
+    input_uri: s3://steos-s3-data/main_dir/raw
+    workflow_url: http://localhost:5678/webhook/raw
+    resource_class: local_llm
+"#;
+
+        let loaded = parse_pipeline_config(yaml, "now".to_string());
+        let config = loaded.config.expect("s3 config");
+
+        assert!(loaded.validation.is_valid, "{:?}", loaded.validation.issues);
+        assert_eq!(config.stages[0].resource_class, ResourceClass::LocalLlm);
+    }
+
+    #[test]
+    fn unknown_resource_class_is_rejected() {
+        let yaml = r#"
+project:
+  name: beehive-s3-dev
+  workdir: .
+storage:
+  provider: s3
+  bucket: steos-s3-data
+  workspace_prefix: main_dir
+stages:
+  - id: raw
+    input_uri: s3://steos-s3-data/main_dir/raw
+    workflow_url: http://localhost:5678/webhook/raw
+    resource_class: gpu
+"#;
+
+        let loaded = parse_pipeline_config(yaml, "now".to_string());
+
+        assert!(!loaded.validation.is_valid);
+        assert!(loaded.validation.issues.iter().any(|issue| {
+            issue.code == "invalid_stage_resource_class"
+                && issue
+                    .message
+                    .contains("invalid resource_class 'gpu' for stage 'raw'")
+        }));
+    }
+
+    #[test]
+    fn missing_worker_pools_get_defaults() {
+        let yaml = r#"
+project:
+  name: beehive
+  workdir: .
+runtime:
+  request_timeout_sec: 300
+stages:
+  - id: terminal
+    input_folder: stages/terminal
+    workflow_url: http://localhost:5678/webhook/terminal
+"#;
+
+        let loaded = parse_pipeline_config(yaml, "now".to_string());
+        let config = loaded.config.expect("config");
+
+        assert!(loaded.validation.is_valid, "{:?}", loaded.validation.issues);
+        assert_eq!(config.runtime.worker_pools.default.concurrency, 1);
+        assert_eq!(config.runtime.worker_pools.local_llm.concurrency, 1);
+    }
+
+    #[test]
+    fn worker_pools_parse_known_pool_concurrency() {
+        let yaml = r#"
+project:
+  name: beehive
+  workdir: .
+runtime:
+  request_timeout_sec: 300
+  worker_pools:
+    default:
+      concurrency: 10
+    local_llm:
+      concurrency: 1
+stages:
+  - id: terminal
+    input_folder: stages/terminal
+    workflow_url: http://localhost:5678/webhook/terminal
+"#;
+
+        let loaded = parse_pipeline_config(yaml, "now".to_string());
+        let config = loaded.config.expect("config");
+
+        assert!(loaded.validation.is_valid, "{:?}", loaded.validation.issues);
+        assert_eq!(config.runtime.worker_pools.default.concurrency, 10);
+        assert_eq!(config.runtime.worker_pools.local_llm.concurrency, 1);
+    }
+
+    #[test]
+    fn invalid_worker_pool_config_is_rejected() {
+        let invalid_concurrency = r#"
+project:
+  name: beehive
+  workdir: .
+runtime:
+  request_timeout_sec: 300
+  worker_pools:
+    default:
+      concurrency: 129
+stages:
+  - id: terminal
+    input_folder: stages/terminal
+    workflow_url: http://localhost:5678/webhook/terminal
+"#;
+        let unknown_pool = invalid_concurrency
+            .replace("default:", "gpu:")
+            .replace("concurrency: 129", "concurrency: 1");
+
+        for (yaml, code) in [
+            (
+                invalid_concurrency.to_string(),
+                "invalid_worker_pool_concurrency",
+            ),
+            (unknown_pool, "unknown_worker_pool"),
+        ] {
+            let loaded = parse_pipeline_config(&yaml, "now".to_string());
+            assert!(!loaded.validation.is_valid);
+            assert!(loaded
+                .validation
+                .issues
+                .iter()
+                .any(|issue| issue.code == code));
+        }
     }
 
     #[test]

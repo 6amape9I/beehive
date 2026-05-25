@@ -688,6 +688,7 @@ mod tests {
             retry_delay_sec: 10,
             next_stage: None,
             save_path_aliases: Vec::new(),
+            resource_class: Default::default(),
             allow_empty_outputs: false,
             allow_multiple_outputs: false,
         }
@@ -1441,6 +1442,7 @@ mod tests {
                 stuck_task_timeout_sec: 300,
                 request_timeout_sec: 300,
                 file_stability_delay_ms: 0,
+                worker_pools: Default::default(),
             },
             stages: vec![
                 StageDefinition {
@@ -1456,6 +1458,7 @@ mod tests {
                         format!("{}/raw", prefix.trim_matches('/')),
                         format!("/{}/raw", prefix.trim_matches('/')),
                     ],
+                    resource_class: Default::default(),
                     allow_empty_outputs: false,
                     allow_multiple_outputs: false,
                 },
@@ -1478,6 +1481,7 @@ mod tests {
                         format!("/{}/processed", prefix.trim_matches('/')),
                         format!("s3://{}/{}/processed", bucket, prefix.trim_matches('/')),
                     ],
+                    resource_class: Default::default(),
                     allow_empty_outputs: true,
                     allow_multiple_outputs: false,
                 },
@@ -1512,6 +1516,7 @@ mod tests {
                 stuck_task_timeout_sec: 300,
                 request_timeout_sec: 300,
                 file_stability_delay_ms: 0,
+                worker_pools: Default::default(),
             },
             stages: vec![
                 StageDefinition {
@@ -1524,6 +1529,7 @@ mod tests {
                     retry_delay_sec: 10,
                     next_stage: Some("smoke_processed".to_string()),
                     save_path_aliases: vec![format!("{prefix}/raw"), format!("/{prefix}/raw")],
+                    resource_class: Default::default(),
                     allow_empty_outputs: false,
                     allow_multiple_outputs: false,
                 },
@@ -1541,6 +1547,7 @@ mod tests {
                         format!("/{prefix}/processed"),
                         format!("s3://{bucket}/{prefix}/processed"),
                     ],
+                    resource_class: Default::default(),
                     allow_empty_outputs: false,
                     allow_multiple_outputs: false,
                 },
@@ -1559,6 +1566,7 @@ mod tests {
                         format!("/{prefix}/final"),
                         format!("s3://{bucket}/{prefix}/final"),
                     ],
+                    resource_class: Default::default(),
                     allow_empty_outputs: true,
                     allow_multiple_outputs: false,
                 },

@@ -7,9 +7,10 @@ interface ProjectRuntimeFormProps {
 }
 
 type RuntimeField = keyof RuntimeConfigDraft;
+type RuntimeNumberField = Exclude<RuntimeField, "worker_pools">;
 type StorageField = "bucket" | "workspace_prefix" | "region" | "endpoint";
 
-const runtimeFields: Array<{ key: RuntimeField; label: string; min: number }> = [
+const runtimeFields: Array<{ key: RuntimeNumberField; label: string; min: number }> = [
   { key: "scan_interval_sec", label: "Scan interval seconds", min: 1 },
   { key: "max_parallel_tasks", label: "Max tasks per run", min: 1 },
   { key: "stuck_task_timeout_sec", label: "Stuck task timeout seconds", min: 1 },
@@ -95,6 +96,15 @@ export function ProjectRuntimeForm({ draft, disabled, onChange }: ProjectRuntime
             />
           </div>
         ))}
+      </div>
+      <h3>Worker pools</h3>
+      <div className="inline-meta">
+        <span className="status-badge neutral">
+          Default: {draft.runtime.worker_pools.default.concurrency}
+        </span>
+        <span className="status-badge neutral">
+          Local LLM: {draft.runtime.worker_pools.local_llm.concurrency}
+        </span>
       </div>
       <h3>Storage</h3>
       <div className="stage-editor-form-grid">

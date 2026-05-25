@@ -8,9 +8,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::config;
 use crate::database;
 use crate::domain::{
-    CreateS3StagePayload, CreateS3StageRequest, PipelineConfig, ProjectConfig, RuntimeConfig,
-    S3StageMutationPayload, S3StageRouteHints, StageDefinition, StorageConfig, StorageProvider,
-    UpdateS3StageRequest, UpdateStageNextStagePayload, UpdateStageNextStageRequest,
+    CreateS3StagePayload, CreateS3StageRequest, PipelineConfig, ProjectConfig, ResourceClass,
+    RuntimeConfig, S3StageMutationPayload, S3StageRouteHints, StageDefinition, StorageConfig,
+    StorageProvider, UpdateS3StageRequest, UpdateStageNextStagePayload,
+    UpdateStageNextStageRequest,
 };
 use crate::services::workspaces::{get_workspace, RegisteredWorkspace};
 use crate::workdir::path_string;
@@ -190,6 +191,7 @@ fn restore_stage(
         retry_delay_sec: record.retry_delay_sec,
         next_stage: record.next_stage,
         save_path_aliases: record.save_path_aliases,
+        resource_class: record.resource_class,
         allow_empty_outputs: record.allow_empty_outputs,
         allow_multiple_outputs: record.allow_multiple_outputs,
     };
@@ -240,6 +242,10 @@ fn apply_stage_update(
     }
     if let Some(allow_multiple_outputs) = input.allow_multiple_outputs {
         config.stages[stage_index].allow_multiple_outputs = allow_multiple_outputs;
+    }
+    if input.uses_local_llm.is_some() || input.resource_class.is_some() {
+        config.stages[stage_index].resource_class =
+            resolve_resource_class(input.uses_local_llm, input.resource_class)?;
     }
     let _ = input.next_stage.as_ref();
 
@@ -482,12 +488,39 @@ fn build_s3_stage(
         retry_delay_sec: input.retry_delay_sec.unwrap_or(30),
         next_stage: None,
         save_path_aliases,
+        resource_class: resolve_resource_class(input.uses_local_llm, input.resource_class)?,
         allow_empty_outputs: input
             .allow_zero_outputs
             .or(input.allow_empty_outputs)
             .unwrap_or(false),
         allow_multiple_outputs: input.allow_multiple_outputs.unwrap_or(false),
     })
+}
+
+fn resolve_resource_class(
+    uses_local_llm: Option<bool>,
+    resource_class: Option<ResourceClass>,
+) -> Result<ResourceClass, String> {
+    match (uses_local_llm, resource_class) {
+        (Some(uses_local_llm), Some(resource_class)) => {
+            let expected = if uses_local_llm {
+                ResourceClass::LocalLlm
+            } else {
+                ResourceClass::Default
+            };
+            if resource_class != expected {
+                return Err(format!(
+                    "uses_local_llm conflicts with resource_class '{}'.",
+                    resource_class.as_str()
+                ));
+            }
+            Ok(resource_class)
+        }
+        (Some(true), None) => Ok(ResourceClass::LocalLlm),
+        (Some(false), None) => Ok(ResourceClass::Default),
+        (None, Some(resource_class)) => Ok(resource_class),
+        (None, None) => Ok(ResourceClass::Default),
+    }
 }
 
 fn reject_duplicate_active_stage(
@@ -700,6 +733,8 @@ mod tests {
                 next_stage: None,
                 max_attempts: None,
                 retry_delay_sec: None,
+                uses_local_llm: None,
+                resource_class: None,
                 allow_zero_outputs: None,
                 allow_empty_outputs: None,
                 allow_multiple_outputs: None,
@@ -723,6 +758,40 @@ mod tests {
     }
 
     #[test]
+    fn stage_creation_with_uses_local_llm_stores_local_llm_resource_class() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workspace = workspace(&tempdir);
+        let config = PipelineConfig {
+            project: ProjectConfig {
+                name: "Smoke".to_string(),
+                workdir: ".".to_string(),
+            },
+            storage: Some(workspace_storage_config(&workspace).expect("storage")),
+            runtime: RuntimeConfig::default(),
+            stages: Vec::new(),
+        };
+        let stage = build_s3_stage(
+            &workspace,
+            &config,
+            &CreateS3StageRequest {
+                stage_id: "semantic_rich".to_string(),
+                workflow_url: "https://n8n.example/webhook/semantic".to_string(),
+                next_stage: None,
+                max_attempts: None,
+                retry_delay_sec: None,
+                uses_local_llm: Some(true),
+                resource_class: None,
+                allow_zero_outputs: None,
+                allow_empty_outputs: None,
+                allow_multiple_outputs: None,
+            },
+        )
+        .expect("stage");
+
+        assert_eq!(stage.resource_class, ResourceClass::LocalLlm);
+    }
+
+    #[test]
     fn stage_creation_ignores_next_stage_for_save_path_only_model() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let workspace = workspace(&tempdir);
@@ -736,6 +805,7 @@ mod tests {
             retry_delay_sec: 30,
             next_stage: None,
             save_path_aliases: Vec::new(),
+            resource_class: Default::default(),
             allow_empty_outputs: false,
             allow_multiple_outputs: false,
         };
@@ -757,6 +827,8 @@ mod tests {
                 next_stage: Some("stage_b".to_string()),
                 max_attempts: None,
                 retry_delay_sec: None,
+                uses_local_llm: None,
+                resource_class: None,
                 allow_zero_outputs: None,
                 allow_empty_outputs: None,
                 allow_multiple_outputs: None,
@@ -789,6 +861,8 @@ mod tests {
                 next_stage: None,
                 max_attempts: None,
                 retry_delay_sec: None,
+                uses_local_llm: None,
+                resource_class: None,
                 allow_zero_outputs: None,
                 allow_empty_outputs: None,
                 allow_multiple_outputs: None,
@@ -813,6 +887,7 @@ mod tests {
             retry_delay_sec: 30,
             next_stage: None,
             save_path_aliases: Vec::new(),
+            resource_class: Default::default(),
             allow_empty_outputs: false,
             allow_multiple_outputs: false,
         };
@@ -834,6 +909,8 @@ mod tests {
                 next_stage: None,
                 max_attempts: None,
                 retry_delay_sec: None,
+                uses_local_llm: None,
+                resource_class: None,
                 allow_zero_outputs: None,
                 allow_empty_outputs: None,
                 allow_multiple_outputs: None,
@@ -867,6 +944,8 @@ mod tests {
                     next_stage: None,
                     max_attempts: None,
                     retry_delay_sec: None,
+                    uses_local_llm: None,
+                    resource_class: None,
                     allow_zero_outputs: None,
                     allow_empty_outputs: None,
                     allow_multiple_outputs: None,
@@ -917,6 +996,8 @@ mod tests {
                 next_stage: None,
                 max_attempts: None,
                 retry_delay_sec: None,
+                uses_local_llm: None,
+                resource_class: None,
                 allow_zero_outputs: None,
                 allow_empty_outputs: None,
                 allow_multiple_outputs: None,
@@ -934,6 +1015,8 @@ mod tests {
                 next_stage: Some(None),
                 max_attempts: Some(5),
                 retry_delay_sec: Some(90),
+                uses_local_llm: None,
+                resource_class: None,
                 allow_zero_outputs: None,
                 allow_empty_outputs: Some(true),
                 allow_multiple_outputs: None,
@@ -948,6 +1031,60 @@ mod tests {
         assert_eq!(updated.next_stage, None);
         assert_eq!(updated.input_uri, stage.input_uri);
         assert_eq!(updated.save_path_aliases, stage.save_path_aliases);
+    }
+
+    #[test]
+    fn stage_update_can_change_resource_class() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workspace = workspace(&tempdir);
+        let mut config = PipelineConfig {
+            project: ProjectConfig {
+                name: "Smoke".to_string(),
+                workdir: ".".to_string(),
+            },
+            storage: Some(workspace_storage_config(&workspace).expect("storage")),
+            runtime: RuntimeConfig::default(),
+            stages: Vec::new(),
+        };
+        let stage = build_s3_stage(
+            &workspace,
+            &config,
+            &CreateS3StageRequest {
+                stage_id: "stage_a".to_string(),
+                workflow_url: "https://n8n.example/webhook/a".to_string(),
+                next_stage: None,
+                max_attempts: None,
+                retry_delay_sec: None,
+                uses_local_llm: None,
+                resource_class: None,
+                allow_zero_outputs: None,
+                allow_empty_outputs: None,
+                allow_multiple_outputs: None,
+            },
+        )
+        .expect("stage");
+        config.stages.push(stage);
+        persist_pipeline_config(&workspace, &config, "test setup").expect("persist");
+
+        let payload = update_s3_stage(
+            &workspace,
+            "stage_a",
+            &UpdateS3StageRequest {
+                workflow_url: None,
+                next_stage: None,
+                max_attempts: None,
+                retry_delay_sec: None,
+                uses_local_llm: Some(true),
+                resource_class: None,
+                allow_zero_outputs: None,
+                allow_empty_outputs: None,
+                allow_multiple_outputs: None,
+            },
+        )
+        .expect("update");
+        let updated = payload.stage.expect("stage");
+
+        assert_eq!(updated.resource_class, ResourceClass::LocalLlm);
     }
 
     #[test]
@@ -990,6 +1127,8 @@ mod tests {
                     next_stage: None,
                     max_attempts: None,
                     retry_delay_sec: None,
+                    uses_local_llm: None,
+                    resource_class: None,
                     allow_zero_outputs: None,
                     allow_empty_outputs: None,
                     allow_multiple_outputs: None,
@@ -1029,6 +1168,8 @@ mod tests {
                 next_stage: None,
                 max_attempts: None,
                 retry_delay_sec: None,
+                uses_local_llm: None,
+                resource_class: None,
                 allow_zero_outputs: None,
                 allow_empty_outputs: None,
                 allow_multiple_outputs: None,
@@ -1068,6 +1209,8 @@ mod tests {
                 next_stage: None,
                 max_attempts: None,
                 retry_delay_sec: None,
+                uses_local_llm: None,
+                resource_class: None,
                 allow_zero_outputs: None,
                 allow_empty_outputs: None,
                 allow_multiple_outputs: None,

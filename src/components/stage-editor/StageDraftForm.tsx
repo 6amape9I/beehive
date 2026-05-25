@@ -12,6 +12,8 @@ interface StageDraftFormProps {
 
 const OUTPUT_CARDINALITY_HELP =
   'По умолчанию stage ожидает ровно 1 output. Если workflow может отфильтровать вход и ничего не вернуть - включите "Разрешено 0 выходов". Если workflow может породить несколько новых сущностей - включите "Разрешено несколько выходов".';
+const LOCAL_LLM_HELP =
+  "Если включено, этот stage будет выполняться отдельным пулом local_llm с ограниченным параллелизмом.";
 
 function allowsZeroOutputs(stage: StageDefinitionDraft) {
   return !!(stage.allow_zero_outputs ?? stage.allow_empty_outputs ?? false);
@@ -149,6 +151,22 @@ export function StageDraftForm({
             rows={3}
             onChange={(event) => updateAliases(event.target.value)}
           />
+        </div>
+        <div className="form-row">
+          <label htmlFor="stage-uses-local-llm">Resource usage</label>
+          <label className="checkbox-row">
+            <input
+              id="stage-uses-local-llm"
+              type="checkbox"
+              checked={currentStage.resource_class === "local_llm"}
+              disabled={disabled}
+              onChange={(event) =>
+                update({ resource_class: event.target.checked ? "local_llm" : "default" })
+              }
+            />
+            <span>Использует локальную LLM</span>
+          </label>
+          <p className="field-hint">{LOCAL_LLM_HELP}</p>
         </div>
         <div className="form-row">
           <label htmlFor="stage-allow-zero-outputs">Output cardinality</label>

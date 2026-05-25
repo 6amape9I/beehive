@@ -266,6 +266,7 @@ fn validate_draft(
             stuck_task_timeout_sec: draft.runtime.stuck_task_timeout_sec as u64,
             request_timeout_sec: draft.runtime.request_timeout_sec as u64,
             file_stability_delay_ms: draft.runtime.file_stability_delay_ms as u64,
+            worker_pools: draft.runtime.worker_pools.clone(),
         },
         stages: draft
             .stages
@@ -284,6 +285,7 @@ fn validate_draft(
                 retry_delay_sec: stage.retry_delay_sec as u64,
                 next_stage: normalize_optional(&stage.next_stage),
                 save_path_aliases: stage.save_path_aliases.clone(),
+                resource_class: stage.resource_class,
                 allow_empty_outputs: stage.allow_empty_outputs,
                 allow_multiple_outputs: stage.allow_multiple_outputs,
             })
@@ -714,6 +716,7 @@ fn draft_from_config(config: &PipelineConfig) -> PipelineConfigDraft {
             stuck_task_timeout_sec: config.runtime.stuck_task_timeout_sec as i64,
             request_timeout_sec: config.runtime.request_timeout_sec as i64,
             file_stability_delay_ms: config.runtime.file_stability_delay_ms as i64,
+            worker_pools: config.runtime.worker_pools.clone(),
         },
         stages: config
             .stages
@@ -728,6 +731,7 @@ fn draft_from_config(config: &PipelineConfig) -> PipelineConfigDraft {
                 retry_delay_sec: stage.retry_delay_sec as i64,
                 next_stage: stage.next_stage.clone(),
                 save_path_aliases: stage.save_path_aliases.clone(),
+                resource_class: stage.resource_class,
                 allow_empty_outputs: stage.allow_empty_outputs,
                 allow_multiple_outputs: stage.allow_multiple_outputs,
                 original_stage_id: Some(stage.id.clone()),
@@ -888,6 +892,7 @@ mod tests {
             retry_delay_sec: 10,
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
+            resource_class: Default::default(),
             allow_empty_outputs: false,
             allow_multiple_outputs: false,
         }
@@ -918,6 +923,7 @@ mod tests {
                 stuck_task_timeout_sec: 900,
                 request_timeout_sec: 300,
                 file_stability_delay_ms: 1000,
+                worker_pools: Default::default(),
             },
             stages,
         }
@@ -936,6 +942,7 @@ mod tests {
             retry_delay_sec: 10,
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
+            resource_class: Default::default(),
             allow_empty_outputs: false,
             allow_multiple_outputs: false,
             original_stage_id: None,

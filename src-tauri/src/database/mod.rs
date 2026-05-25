@@ -11,11 +11,11 @@ use crate::domain::{
     AppEventLevel, AppEventRecord, ConfigValidationIssue, DatabaseState, EntityDetailPayload,
     EntityFileRecord, EntityFilters, EntityListQuery, EntityRecord, EntityStageStateRecord,
     EntityTableRow, EntityTimelineItem, EntityValidationStatus, InvalidDiscoveryRecord,
-    OutputRegistrationReport, OutputRegistrationReportItem, PipelineConfig, RuntimeSummary,
-    StageDefinition, StageRecord, StageRunRecord, StageStatus, StatusCount, StorageProvider,
-    UpdateEntityRequest, WorkspaceEntityTrail, WorkspaceEntityTrailEdge, WorkspaceEntityTrailNode,
-    WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceFileNode, WorkspaceStageTree,
-    WorkspaceStageTreeCounters,
+    OutputRegistrationReport, OutputRegistrationReportItem, PipelineConfig, ResourceClass,
+    RuntimeSummary, StageDefinition, StageRecord, StageRunRecord, StageStatus, StatusCount,
+    StorageProvider, UpdateEntityRequest, WorkspaceEntityTrail, WorkspaceEntityTrailEdge,
+    WorkspaceEntityTrailNode, WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceFileNode,
+    WorkspaceStageTree, WorkspaceStageTreeCounters,
 };
 use crate::state_machine::{
     parse_status as parse_runtime_status, status_value as runtime_status_value,
@@ -28,7 +28,7 @@ pub(crate) use entities::{
     evaluate_entity_file_allowed_actions, record_entity_file_json_edit_rejected,
 };
 
-const SCHEMA_VERSION: u32 = 8;
+const SCHEMA_VERSION: u32 = 9;
 
 pub(crate) struct PersistEntityFileInput {
     pub entity_id: String,
@@ -912,6 +912,7 @@ pub fn get_workspace_explorer(
                 .input_uri
                 .as_deref()
                 .is_some_and(|uri| uri.starts_with("s3://"));
+            let uses_local_llm = stage.resource_class.uses_local_llm();
             let folder_path = workdir_path.join(&stage.input_folder);
             WorkspaceStageTree {
                 stage_id: stage.id,
@@ -928,6 +929,8 @@ pub fn get_workspace_explorer(
                 retry_delay_sec: stage.retry_delay_sec,
                 next_stage: stage.next_stage,
                 save_path_aliases: stage.save_path_aliases,
+                resource_class: stage.resource_class,
+                uses_local_llm,
                 allow_empty_outputs: stage.allow_empty_outputs,
                 allow_multiple_outputs: stage.allow_multiple_outputs,
                 is_active: stage.is_active,
@@ -3082,7 +3085,7 @@ pub(crate) fn load_setting(connection: &Connection, key: &str) -> Result<Option<
 
 fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
     match current_schema_version(connection)? {
-        0 => create_schema_v8(connection)?,
+        0 => create_schema_v9(connection)?,
         1 => {
             migrate_v1_to_v2(connection)?;
             migrate_v2_to_v3(connection)?;
@@ -3091,6 +3094,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
+            migrate_v8_to_v9(connection)?;
         }
         2 => {
             migrate_v2_to_v3(connection)?;
@@ -3099,6 +3103,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
+            migrate_v8_to_v9(connection)?;
         }
         3 => {
             migrate_v3_to_v4(connection)?;
@@ -3106,27 +3111,35 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
+            migrate_v8_to_v9(connection)?;
         }
         4 => {
             migrate_v4_to_v5(connection)?;
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
+            migrate_v8_to_v9(connection)?;
         }
         5 => {
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
+            migrate_v8_to_v9(connection)?;
         }
         6 => {
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
+            migrate_v8_to_v9(connection)?;
         }
-        7 => migrate_v7_to_v8(connection)?,
-        8 => {}
+        7 => {
+            migrate_v7_to_v8(connection)?;
+            migrate_v8_to_v9(connection)?;
+        }
+        8 => migrate_v8_to_v9(connection)?,
+        9 => {}
         version => {
             return Err(format!(
-            "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, 4, 5, 6, 7, or 8."
+            "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, 4, 5, 6, 7, 8, or 9."
         ))
         }
     }
@@ -3170,7 +3183,7 @@ fn current_schema_version(connection: &Connection) -> Result<u32, String> {
         .map_err(|error| format!("Failed to read PRAGMA user_version: {error}"))
 }
 
-fn create_schema_v8(connection: &Connection) -> Result<(), String> {
+fn create_schema_v9(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
             r#"
@@ -3192,6 +3205,7 @@ fn create_schema_v8(connection: &Connection) -> Result<(), String> {
                 retry_delay_sec INTEGER NOT NULL CHECK (retry_delay_sec >= 0),
                 next_stage TEXT,
                 save_path_aliases_json TEXT NOT NULL DEFAULT '[]',
+                resource_class TEXT NOT NULL DEFAULT 'default' CHECK (resource_class IN ('default', 'local_llm')),
                 allow_empty_outputs INTEGER NOT NULL DEFAULT 0,
                 allow_multiple_outputs INTEGER NOT NULL DEFAULT 0,
                 is_active INTEGER NOT NULL DEFAULT 1,
@@ -3321,10 +3335,10 @@ fn create_schema_v8(connection: &Connection) -> Result<(), String> {
             CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_files_s3_producer_artifact ON entity_files(producer_run_id, artifact_id)
                 WHERE storage_provider = 's3' AND producer_run_id IS NOT NULL AND artifact_id IS NOT NULL;
 
-            PRAGMA user_version = 8;
+            PRAGMA user_version = 9;
             "#,
         )
-        .map_err(|error| format!("Failed to create SQLite schema v8: {error}"))?;
+        .map_err(|error| format!("Failed to create SQLite schema v9: {error}"))?;
     Ok(())
 }
 
@@ -3945,6 +3959,30 @@ fn migrate_v7_to_v8(connection: &mut Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_v8_to_v9(connection: &mut Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            r#"
+            ALTER TABLE stages ADD COLUMN resource_class TEXT NOT NULL DEFAULT 'default' CHECK (resource_class IN ('default', 'local_llm'));
+
+            PRAGMA user_version = 9;
+            "#,
+        )
+        .map_err(|error| format!("Failed to migrate schema from v8 to v9: {error}"))?;
+
+    let now = Utc::now().to_rfc3339();
+    insert_app_event(
+        connection,
+        AppEventLevel::Info,
+        "schema_migrated_to_v9",
+        "SQLite schema migrated from version 8 to version 9.",
+        None,
+        &now,
+    )?;
+    set_setting(connection, "schema_version", "9", &now)?;
+    Ok(())
+}
+
 fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Result<(), String> {
     let now = Utc::now().to_rfc3339();
     let transaction = connection
@@ -3973,6 +4011,7 @@ fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Resul
                     retry_delay_sec,
                     next_stage,
                     save_path_aliases_json,
+                    resource_class,
                     allow_empty_outputs,
                     allow_multiple_outputs,
                     is_active,
@@ -3981,7 +4020,7 @@ fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Resul
                     created_at,
                     updated_at
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, NULL, ?12, ?12, ?12)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, NULL, ?13, ?13, ?13)
                 ON CONFLICT(stage_id) DO UPDATE SET
                     input_folder = excluded.input_folder,
                     input_uri = excluded.input_uri,
@@ -3991,6 +4030,7 @@ fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Resul
                     retry_delay_sec = excluded.retry_delay_sec,
                     next_stage = excluded.next_stage,
                     save_path_aliases_json = excluded.save_path_aliases_json,
+                    resource_class = excluded.resource_class,
                     allow_empty_outputs = excluded.allow_empty_outputs,
                     allow_multiple_outputs = excluded.allow_multiple_outputs,
                     is_active = 1,
@@ -4008,6 +4048,7 @@ fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Resul
                     stage.retry_delay_sec as i64,
                     stage.next_stage,
                     save_path_aliases_json,
+                    stage.resource_class.as_str(),
                     bool_to_i64(stage.allow_empty_outputs),
                     bool_to_i64(stage.allow_multiple_outputs),
                     now,
@@ -4098,6 +4139,7 @@ fn load_stage_records_from_connection(connection: &Connection) -> Result<Vec<Sta
                 stage.retry_delay_sec,
                 stage.next_stage,
                 stage.save_path_aliases_json,
+                stage.resource_class,
                 stage.allow_empty_outputs,
                 stage.allow_multiple_outputs,
                 stage.is_active,
@@ -4118,6 +4160,7 @@ fn load_stage_records_from_connection(connection: &Connection) -> Result<Vec<Sta
                 stage.retry_delay_sec,
                 stage.next_stage,
                 stage.save_path_aliases_json,
+                stage.resource_class,
                 stage.allow_empty_outputs,
                 stage.allow_multiple_outputs,
                 stage.is_active,
@@ -4140,6 +4183,12 @@ fn load_stage_records_from_connection(connection: &Connection) -> Result<Vec<Sta
                         Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
                     )
                 })?;
+            let resource_class_text: String = row.get(9)?;
+            let resource_class = match resource_class_text.as_str() {
+                "default" => ResourceClass::Default,
+                "local_llm" => ResourceClass::LocalLlm,
+                _ => ResourceClass::Default,
+            };
             Ok(StageRecord {
                 id: row.get(0)?,
                 input_folder: row.get(1)?,
@@ -4150,14 +4199,15 @@ fn load_stage_records_from_connection(connection: &Connection) -> Result<Vec<Sta
                 retry_delay_sec: row.get::<_, i64>(6)? as u64,
                 next_stage: row.get(7)?,
                 save_path_aliases,
-                allow_empty_outputs: row.get::<_, i64>(9)? == 1,
-                allow_multiple_outputs: row.get::<_, i64>(10)? == 1,
-                is_active: row.get::<_, i64>(11)? == 1,
-                archived_at: row.get(12)?,
-                last_seen_in_config_at: row.get(13)?,
-                created_at: row.get(14)?,
-                updated_at: row.get(15)?,
-                entity_count: row.get::<_, i64>(16)? as u64,
+                resource_class,
+                allow_empty_outputs: row.get::<_, i64>(10)? == 1,
+                allow_multiple_outputs: row.get::<_, i64>(11)? == 1,
+                is_active: row.get::<_, i64>(12)? == 1,
+                archived_at: row.get(13)?,
+                last_seen_in_config_at: row.get(14)?,
+                created_at: row.get(15)?,
+                updated_at: row.get(16)?,
+                entity_count: row.get::<_, i64>(17)? as u64,
             })
         })
         .map_err(|error| format!("Failed to query stages: {error}"))?;
@@ -5391,6 +5441,7 @@ mod tests {
             retry_delay_sec: 10,
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
+            resource_class: Default::default(),
             allow_empty_outputs: false,
             allow_multiple_outputs: false,
         }
@@ -5431,6 +5482,7 @@ mod tests {
             retry_delay_sec: 10,
             next_stage: None,
             save_path_aliases: Vec::new(),
+            resource_class: Default::default(),
             allow_empty_outputs: false,
             allow_multiple_outputs: false,
         }
@@ -5602,7 +5654,7 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_creates_database_file_and_required_tables_at_v4() {
+    fn bootstrap_creates_database_file_and_required_tables_at_current_version() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let database_path = tempdir.path().join("app.db");
         let config = test_config(vec![stage("ingest", Some("normalize"))]);
@@ -5612,14 +5664,16 @@ mod tests {
         let table_names = load_table_names(&connection).expect("table names");
 
         assert!(database_path.exists());
-        assert_eq!(result.schema_version, 8);
+        assert_eq!(result.schema_version, 9);
         assert!(table_names.contains(&"entity_files".to_string()));
         assert!(table_names.contains(&"entities".to_string()));
         assert!(table_names.contains(&"entity_stage_states".to_string()));
+        let stages = list_stages(&database_path).expect("stages");
+        assert_eq!(stages[0].resource_class, ResourceClass::Default);
     }
 
     #[test]
-    fn existing_v2_database_is_migrated_to_v4() {
+    fn existing_v2_database_is_migrated_to_current_version() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let database_path = tempdir.path().join("app.db");
         let connection = Connection::open(&database_path).expect("open db");
@@ -5678,7 +5732,7 @@ mod tests {
             load_entity_files_from_connection(&connection, Some("entity-1")).expect("load files");
         let events = load_app_events_from_connection(&connection, 20).expect("events");
 
-        assert_eq!(result.schema_version, 8);
+        assert_eq!(result.schema_version, 9);
         assert_eq!(entity.file_count, 1);
         assert_eq!(files.len(), 1);
         assert!(events
@@ -5687,10 +5741,13 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.code == "schema_migrated_to_v4"));
+        assert!(events
+            .iter()
+            .any(|event| event.code == "schema_migrated_to_v9"));
     }
 
     #[test]
-    fn v1_database_can_bootstrap_through_v4() {
+    fn v1_database_can_bootstrap_through_current_version() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let database_path = tempdir.path().join("app.db");
         let connection = Connection::open(&database_path).expect("open db");
@@ -5700,7 +5757,7 @@ mod tests {
         let result = bootstrap_database(&database_path, &test_config(vec![stage("ingest", None)]))
             .expect("bootstrap");
 
-        assert_eq!(result.schema_version, 8);
+        assert_eq!(result.schema_version, 9);
     }
 
     #[test]

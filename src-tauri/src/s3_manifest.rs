@@ -345,6 +345,7 @@ mod tests {
             retry_delay_sec: 0,
             next_stage: next_stage.map(ToOwned::to_owned),
             save_path_aliases: Vec::new(),
+            resource_class: Default::default(),
             allow_empty_outputs: false,
             allow_multiple_outputs: false,
             is_active: true,
