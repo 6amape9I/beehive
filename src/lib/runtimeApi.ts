@@ -16,6 +16,7 @@ import type {
   OpenEntityPathResult,
   PipelineConfigDraft,
   PipelineEditorStateResult,
+  RecoverExpiredWorkerLeasesResult,
   ReconcileStuckTasksResult,
   RegisterS3SourceArtifactRequest,
   RegisterS3SourceArtifactResult,
@@ -38,6 +39,7 @@ import type {
   UpdateS3StageRequest,
   UpdateEntityRequest,
   ValidatePipelineConfigDraftResult,
+  WorkerSummaryResult,
   WorkspaceExplorerResult,
 } from "../types/domain";
 
@@ -261,6 +263,16 @@ export function runSelectedPipelineWavesById(
     maxTasksPerWave,
     stopOnFirstFailure,
   );
+}
+
+export function getWorkerSummary(workspaceId: string): Promise<WorkerSummaryResult> {
+  return apiClient.getWorkerSummary(workspaceId);
+}
+
+export function recoverExpiredWorkerLeases(
+  workspaceId: string,
+): Promise<RecoverExpiredWorkerLeasesResult> {
+  return apiClient.recoverExpiredWorkerLeases(workspaceId);
 }
 
 export function runEntityStage(

@@ -1,5 +1,7 @@
 use std::path::Path;
-use std::time::Instant;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{DateTime, Duration, Utc};
 use reqwest::blocking::Client;
@@ -9,18 +11,19 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::database::{
-    block_stage_state, claim_eligible_runtime_tasks, claim_specific_runtime_task,
-    find_latest_entity_file_for_stage, find_stage_by_id, finish_stage_run, insert_app_event,
-    load_active_stages_from_connection, load_setting, open_connection,
+    attach_worker_lease_run, block_stage_state, claim_eligible_runtime_tasks,
+    claim_specific_runtime_task, claim_worker_runtime_tasks, find_latest_entity_file_for_stage,
+    find_stage_by_id, finish_stage_run, finish_worker_lease, heartbeat_worker_lease,
+    insert_app_event, load_active_stages_from_connection, load_setting, open_connection,
     reconcile_orphan_stage_runs_for_queued_state, register_s3_artifact_pointers_best_effort,
     release_queued_claim, start_claimed_stage_run, update_stage_state_failure,
     update_stage_state_failure_with_reason, update_stage_state_success, FinishStageRunInput,
-    NewStageRunInput, RegisterS3ArtifactPointerInput, RuntimeTaskRecord,
+    NewStageRunInput, RegisterS3ArtifactPointerInput, RuntimeTaskRecord, WorkerLeaseClaimInput,
 };
 use crate::domain::{
     AppEventLevel, ArtifactLocation, CommandErrorInfo, EntityFileRecord, PipelineWaveSummary,
-    RunDueTasksSummary, RunPipelineWavesSummary, S3StorageConfig, StageRecord, StageStatus,
-    StorageProvider, DEFAULT_REQUEST_TIMEOUT_SEC,
+    ResourceClass, RunDueTasksSummary, RunPipelineWavesSummary, S3StorageConfig, StageRecord,
+    StageStatus, StorageProvider, DEFAULT_REQUEST_TIMEOUT_SEC,
 };
 use crate::file_ops;
 use crate::file_safety::read_stable_file;
@@ -225,6 +228,76 @@ pub fn run_entity_stage(
     Ok(summary)
 }
 
+pub fn run_worker_task(
+    workdir_path: &Path,
+    database_path: &Path,
+    resource_class: ResourceClass,
+    worker_id: &str,
+    request_timeout_sec: u64,
+    lease_ttl_sec: u64,
+    heartbeat_interval_sec: u64,
+    file_stability_delay_ms: u64,
+) -> Result<RunDueTasksSummary, String> {
+    let mut connection = open_connection(database_path)?;
+    let tasks = claim_worker_runtime_tasks(
+        &mut connection,
+        &WorkerLeaseClaimInput {
+            resource_class,
+            limit: 1,
+            worker_id: worker_id.to_string(),
+            lease_ttl_sec,
+            now: Utc::now(),
+        },
+    )?;
+    drop(connection);
+
+    let Some(task) = tasks.into_iter().next() else {
+        return Ok(RunDueTasksSummary::default());
+    };
+
+    let (heartbeat_stop_tx, heartbeat_stop_rx) = mpsc::channel();
+    let heartbeat_handle = task.lease_id.clone().map(|lease_id| {
+        start_lease_heartbeat(
+            database_path.to_path_buf(),
+            lease_id,
+            worker_id.to_string(),
+            lease_ttl_sec,
+            heartbeat_interval_sec,
+            heartbeat_stop_rx,
+        )
+    });
+
+    let outcome = execute_task(
+        workdir_path,
+        database_path,
+        task,
+        request_timeout_sec,
+        file_stability_delay_ms,
+    );
+    let _ = heartbeat_stop_tx.send(());
+    if let Some(handle) = heartbeat_handle {
+        let _ = handle.join();
+    }
+
+    let mut summary = RunDueTasksSummary {
+        claimed: 1,
+        ..RunDueTasksSummary::default()
+    };
+    match outcome {
+        Ok(TaskOutcome::Succeeded) => summary.succeeded = 1,
+        Ok(TaskOutcome::RetryScheduled) => summary.retry_scheduled = 1,
+        Ok(TaskOutcome::Failed) => summary.failed = 1,
+        Ok(TaskOutcome::Blocked) => summary.blocked = 1,
+        Ok(TaskOutcome::Skipped) => summary.skipped = 1,
+        Err(message) => summary.errors.push(CommandErrorInfo {
+            code: "worker_task_execution_failed".to_string(),
+            message,
+            path: None,
+        }),
+    }
+    Ok(summary)
+}
+
 pub fn reconcile_stuck_tasks(
     database_path: &Path,
     stuck_task_timeout_sec: u64,
@@ -282,7 +355,11 @@ fn execute_task(
             "Queued entity '{}' on stage '{}'.",
             task.entity_id, task.stage_id
         ),
-        Some(json!({"entity_id": task.entity_id, "stage_id": task.stage_id})),
+        Some(json!({
+            "entity_id": task.entity_id,
+            "stage_id": task.stage_id,
+            "resource_class": task.resource_class.as_str(),
+        })),
         &Utc::now().to_rfc3339(),
     )?;
 
@@ -303,6 +380,13 @@ fn execute_task(
     {
         let now = Utc::now().to_rfc3339();
         release_queued_claim(&connection, task.state_id, &now)?;
+        finish_task_lease(
+            &connection,
+            &task,
+            "released",
+            "source_preflight_skipped",
+            &now,
+        )?;
         insert_app_event(
             &connection,
             AppEventLevel::Warning,
@@ -339,6 +423,7 @@ fn execute_task(
         started_at: started_at_text.clone(),
     };
     start_claimed_stage_run(&mut connection, task.state_id, &stage_run_input)?;
+    attach_task_run_if_leased(&connection, &task, &run_id, &started_at_text)?;
     insert_app_event(
         &connection,
         AppEventLevel::Info,
@@ -453,6 +538,13 @@ fn execute_task(
                 Some(success.http_status),
                 &finished_at.to_rfc3339(),
                 created_child_path.as_deref(),
+            )?;
+            finish_task_lease(
+                &connection,
+                &task,
+                "done",
+                "task_succeeded",
+                &finished_at.to_rfc3339(),
             )?;
             insert_app_event(
                 &connection,
@@ -578,6 +670,7 @@ fn execute_s3_task(
         started_at: started_at_text.clone(),
     };
     start_claimed_stage_run(&mut connection, task.state_id, &stage_run_input)?;
+    attach_task_run_if_leased(&connection, &task, &run_id, &started_at_text)?;
     insert_app_event(
         &connection,
         AppEventLevel::Info,
@@ -817,6 +910,13 @@ fn execute_s3_task(
         &finished_at.to_rfc3339(),
         created_child_paths.first().map(String::as_str),
     )?;
+    finish_task_lease(
+        &connection,
+        &task,
+        "done",
+        "task_succeeded",
+        &finished_at.to_rfc3339(),
+    )?;
     insert_app_event(
         &connection,
         AppEventLevel::Info,
@@ -867,6 +967,13 @@ fn finish_copy_blocked(
         &message,
         &finished_at.to_rfc3339(),
     )?;
+    finish_task_lease(
+        connection,
+        task,
+        "failed",
+        "copy_blocked",
+        &finished_at.to_rfc3339(),
+    )?;
     insert_app_event(
         connection,
         AppEventLevel::Error,
@@ -913,6 +1020,13 @@ fn finish_manifest_blocked(
         connection,
         task.state_id,
         &message,
+        &finished_at.to_rfc3339(),
+    )?;
+    finish_task_lease(
+        connection,
+        task,
+        "failed",
+        "manifest_blocked",
         &finished_at.to_rfc3339(),
     )?;
     insert_app_event(
@@ -975,6 +1089,17 @@ fn finish_failure(
         next_retry_at.as_deref(),
         &finished_at.to_rfc3339(),
     )?;
+    finish_task_lease(
+        connection,
+        task,
+        "failed",
+        if matches!(next_status, StageStatus::RetryWait) {
+            "task_retry_scheduled"
+        } else {
+            "task_failed"
+        },
+        &finished_at.to_rfc3339(),
+    )?;
     let event_code = if matches!(next_status, StageStatus::RetryWait) {
         "task_retry_scheduled"
     } else {
@@ -1012,6 +1137,7 @@ fn block_task(
     let connection = open_connection(database_path)?;
     let now = Utc::now().to_rfc3339();
     block_stage_state(&connection, task.state_id, message, &now)?;
+    finish_task_lease(&connection, task, "failed", "task_blocked", &now)?;
     insert_app_event(
         &connection,
         AppEventLevel::Error,
@@ -1021,6 +1147,47 @@ fn block_task(
         &now,
     )?;
     Ok(TaskOutcome::Blocked)
+}
+
+fn attach_task_run_if_leased(
+    connection: &rusqlite::Connection,
+    task: &RuntimeTaskRecord,
+    run_id: &str,
+    updated_at: &str,
+) -> Result<(), String> {
+    if let Some(lease_id) = task.lease_id.as_deref() {
+        attach_worker_lease_run(connection, lease_id, run_id, updated_at)?;
+    }
+    Ok(())
+}
+
+fn finish_task_lease(
+    connection: &rusqlite::Connection,
+    task: &RuntimeTaskRecord,
+    status: &str,
+    release_reason: &str,
+    released_at: &str,
+) -> Result<(), String> {
+    if let Some(lease_id) = task.lease_id.as_deref() {
+        finish_worker_lease(connection, lease_id, status, release_reason, released_at)?;
+    }
+    Ok(())
+}
+
+fn start_lease_heartbeat(
+    database_path: std::path::PathBuf,
+    lease_id: String,
+    worker_id: String,
+    lease_ttl_sec: u64,
+    heartbeat_interval_sec: u64,
+    stop: mpsc::Receiver<()>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let interval = heartbeat_interval_sec.max(1);
+        while stop.recv_timeout(StdDuration::from_secs(interval)).is_err() {
+            let _ = heartbeat_worker_lease(&database_path, &lease_id, &worker_id, lease_ttl_sec);
+        }
+    })
 }
 
 fn call_webhook(
@@ -1362,6 +1529,10 @@ fn reconcile_stuck_tasks_with_connection(
             WHERE status = 'in_progress'
               AND last_started_at IS NOT NULL
               AND last_started_at < ?1
+              AND NOT EXISTS (
+                    SELECT 1 FROM worker_leases lease
+                    WHERE lease.state_id = entity_stage_states.id AND lease.status = 'active'
+              )
             "#,
         )
         .map_err(|error| format!("Failed to prepare stuck task query: {error}"))?;
@@ -1425,6 +1596,10 @@ fn load_stale_queued_state_ids(
             FROM entity_stage_states
             WHERE status = 'queued'
               AND updated_at < ?1
+              AND NOT EXISTS (
+                    SELECT 1 FROM worker_leases lease
+                    WHERE lease.state_id = entity_stage_states.id AND lease.status = 'active'
+              )
             ORDER BY updated_at ASC, id ASC
             "#,
         )
@@ -1584,6 +1759,8 @@ mod tests {
                 stuck_task_timeout_sec: 1,
                 request_timeout_sec: 5,
                 file_stability_delay_ms: 0,
+                worker_lease_sec: 1800,
+                worker_heartbeat_sec: 30,
                 worker_pools: Default::default(),
             },
             stages: vec![

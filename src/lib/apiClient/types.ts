@@ -17,6 +17,7 @@ import type {
   OpenEntityPathResult,
   PipelineConfigDraft,
   PipelineEditorStateResult,
+  RecoverExpiredWorkerLeasesResult,
   ReconcileStuckTasksResult,
   RegisterS3SourceArtifactRequest,
   RegisterS3SourceArtifactResult,
@@ -40,6 +41,7 @@ import type {
   UpdateEntityRequest,
   UpdateWorkspaceRequest,
   ValidatePipelineConfigDraftResult,
+  WorkerSummaryResult,
   WorkspaceExplorerResult,
   WorkspaceMutationResult,
   WorkspaceRegistryEntryResult,
@@ -145,6 +147,8 @@ export interface BeehiveApiClient {
     maxTasksPerWave: number,
     stopOnFirstFailure: boolean,
   ): Promise<RunSelectedPipelineWavesResult>;
+  getWorkerSummary(workspaceId: string): Promise<WorkerSummaryResult>;
+  recoverExpiredWorkerLeases(workspaceId: string): Promise<RecoverExpiredWorkerLeasesResult>;
   runEntityStage(path: string, entityId: string, stageId: string): Promise<RunEntityStageResult>;
   retryEntityStageNow(
     path: string,

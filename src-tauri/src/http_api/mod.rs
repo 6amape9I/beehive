@@ -6,13 +6,15 @@ use serde_json::{json, Value};
 use crate::domain::{
     CreateS3StageRequest, CreateWorkspaceRequest, EntityDetailResult, EntityListQuery,
     EntityListResult, EntityMutationResult, ImportJsonBatchRequest, ImportJsonBatchResult,
-    RegisterS3SourceArtifactRequest, RunDueTasksResult, RunPipelineWavesResult,
-    RunSelectedPipelineWavesRequest, RunSelectedPipelineWavesResult, S3ReconciliationResult,
-    S3StageMutationResult, StageRunOutputsResult, UpdateEntityRequest, UpdateS3StageRequest,
-    UpdateStageNextStageResult, UpdateWorkspaceRequest, WorkspaceMutationResult,
-    WorkspaceRegistryEntryResult, WorkspaceRegistryListResult,
+    RecoverExpiredWorkerLeasesResult, RegisterS3SourceArtifactRequest, RunDueTasksResult,
+    RunPipelineWavesResult, RunSelectedPipelineWavesRequest, RunSelectedPipelineWavesResult,
+    S3ReconciliationResult, S3StageMutationResult, StageRunOutputsResult, UpdateEntityRequest,
+    UpdateS3StageRequest, UpdateStageNextStageResult, UpdateWorkspaceRequest, WorkerSummaryResult,
+    WorkspaceMutationResult, WorkspaceRegistryEntryResult, WorkspaceRegistryListResult,
 };
-use crate::services::{artifacts, entities, pipeline, runtime, selected_runner, workspaces};
+use crate::services::{
+    artifacts, entities, pipeline, runtime, selected_runner, workers, workspaces,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HttpApiResponse {
@@ -293,6 +295,35 @@ fn route_json_request(
                             )],
                         },
                     };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("GET", ["api", "workspaces", _, "workers", "summary"]) => {
+                let result = match workers::worker_summary(workspace_id) {
+                    Ok(summary) => WorkerSummaryResult {
+                        summary: Some(summary),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => WorkerSummaryResult {
+                        summary: None,
+                        errors: vec![command_error("worker_summary_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("POST", ["api", "workspaces", _, "workers", "recover-expired-leases"]) => {
+                let result = match workers::recover_expired_leases(workspace_id) {
+                    Ok(recovered) => RecoverExpiredWorkerLeasesResult {
+                        recovered,
+                        errors: Vec::new(),
+                    },
+                    Err(message) => RecoverExpiredWorkerLeasesResult {
+                        recovered: 0,
+                        errors: vec![command_error(
+                            "recover_expired_worker_leases_failed",
+                            message,
+                        )],
+                    },
+                };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
             }
             ("POST", ["api", "workspaces", _, "stages"]) => {
@@ -810,5 +841,26 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("missing"));
+    }
+
+    #[test]
+    fn worker_routes_return_json_errors_for_missing_workspace() {
+        let summary = handle_json_request("GET", "/api/workspaces/missing/workers/summary", None);
+        assert_eq!(summary.status_code, 200);
+        assert_eq!(
+            summary.body["errors"][0]["code"].as_str(),
+            Some("worker_summary_failed")
+        );
+
+        let recovery = handle_json_request(
+            "POST",
+            "/api/workspaces/missing/workers/recover-expired-leases",
+            None,
+        );
+        assert_eq!(recovery.status_code, 200);
+        assert_eq!(
+            recovery.body["errors"][0]["code"].as_str(),
+            Some("recover_expired_worker_leases_failed")
+        );
     }
 }

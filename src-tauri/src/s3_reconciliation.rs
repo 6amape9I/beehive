@@ -1442,6 +1442,8 @@ mod tests {
                 stuck_task_timeout_sec: 300,
                 request_timeout_sec: 300,
                 file_stability_delay_ms: 0,
+                worker_lease_sec: 1800,
+                worker_heartbeat_sec: 30,
                 worker_pools: Default::default(),
             },
             stages: vec![
@@ -1516,6 +1518,8 @@ mod tests {
                 stuck_task_timeout_sec: 300,
                 request_timeout_sec: 300,
                 file_stability_delay_ms: 0,
+                worker_lease_sec: 1800,
+                worker_heartbeat_sec: 30,
                 worker_pools: Default::default(),
             },
             stages: vec![

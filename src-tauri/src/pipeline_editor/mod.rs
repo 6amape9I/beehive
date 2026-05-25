@@ -231,6 +231,22 @@ fn validate_draft(
         "file_stability_delay_ms must be greater than or equal to 0.",
         &mut issues,
     );
+    validate_min_i64(
+        draft.runtime.worker_lease_sec,
+        1,
+        "invalid_runtime_worker_lease_sec",
+        "runtime.worker_lease_sec",
+        "worker_lease_sec must be greater than or equal to 1.",
+        &mut issues,
+    );
+    validate_min_i64(
+        draft.runtime.worker_heartbeat_sec,
+        1,
+        "invalid_runtime_worker_heartbeat_sec",
+        "runtime.worker_heartbeat_sec",
+        "worker_heartbeat_sec must be greater than or equal to 1.",
+        &mut issues,
+    );
 
     if draft.stages.is_empty() {
         issues.push(issue(
@@ -266,6 +282,8 @@ fn validate_draft(
             stuck_task_timeout_sec: draft.runtime.stuck_task_timeout_sec as u64,
             request_timeout_sec: draft.runtime.request_timeout_sec as u64,
             file_stability_delay_ms: draft.runtime.file_stability_delay_ms as u64,
+            worker_lease_sec: draft.runtime.worker_lease_sec as u64,
+            worker_heartbeat_sec: draft.runtime.worker_heartbeat_sec as u64,
             worker_pools: draft.runtime.worker_pools.clone(),
         },
         stages: draft
@@ -716,6 +734,8 @@ fn draft_from_config(config: &PipelineConfig) -> PipelineConfigDraft {
             stuck_task_timeout_sec: config.runtime.stuck_task_timeout_sec as i64,
             request_timeout_sec: config.runtime.request_timeout_sec as i64,
             file_stability_delay_ms: config.runtime.file_stability_delay_ms as i64,
+            worker_lease_sec: config.runtime.worker_lease_sec as i64,
+            worker_heartbeat_sec: config.runtime.worker_heartbeat_sec as i64,
             worker_pools: config.runtime.worker_pools.clone(),
         },
         stages: config
@@ -923,6 +943,8 @@ mod tests {
                 stuck_task_timeout_sec: 900,
                 request_timeout_sec: 300,
                 file_stability_delay_ms: 1000,
+                worker_lease_sec: 1800,
+                worker_heartbeat_sec: 30,
                 worker_pools: Default::default(),
             },
             stages,

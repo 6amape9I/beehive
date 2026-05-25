@@ -2,10 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use crate::domain::{
     AppEventLevel, AppEventRecord, ConfigValidationIssue, DatabaseState, EntityDetailPayload,
@@ -13,9 +14,10 @@ use crate::domain::{
     EntityTableRow, EntityTimelineItem, EntityValidationStatus, InvalidDiscoveryRecord,
     OutputRegistrationReport, OutputRegistrationReportItem, PipelineConfig, ResourceClass,
     RuntimeSummary, StageDefinition, StageRecord, StageRunRecord, StageStatus, StatusCount,
-    StorageProvider, UpdateEntityRequest, WorkspaceEntityTrail, WorkspaceEntityTrailEdge,
-    WorkspaceEntityTrailNode, WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceFileNode,
-    WorkspaceStageTree, WorkspaceStageTreeCounters,
+    StorageProvider, UpdateEntityRequest, WorkerLeaseRecord, WorkerPoolRuntimeSummary,
+    WorkerSummary, WorkspaceEntityTrail, WorkspaceEntityTrailEdge, WorkspaceEntityTrailNode,
+    WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceFileNode, WorkspaceStageTree,
+    WorkspaceStageTreeCounters,
 };
 use crate::state_machine::{
     parse_status as parse_runtime_status, status_value as runtime_status_value,
@@ -28,7 +30,7 @@ pub(crate) use entities::{
     evaluate_entity_file_allowed_actions, record_entity_file_json_edit_rejected,
 };
 
-const SCHEMA_VERSION: u32 = 9;
+const SCHEMA_VERSION: u32 = 10;
 
 pub(crate) struct PersistEntityFileInput {
     pub entity_id: String,
@@ -97,6 +99,17 @@ pub(crate) struct RuntimeTaskRecord {
     pub workflow_url: String,
     pub retry_delay_sec: u64,
     pub next_stage: Option<String>,
+    pub resource_class: ResourceClass,
+    pub lease_id: Option<String>,
+    pub worker_id: Option<String>,
+}
+
+pub(crate) struct WorkerLeaseClaimInput {
+    pub resource_class: ResourceClass,
+    pub limit: u64,
+    pub worker_id: String,
+    pub lease_ttl_sec: u64,
+    pub now: chrono::DateTime<Utc>,
 }
 
 pub struct EntityTablePage {
@@ -661,6 +674,11 @@ pub fn reset_entity_stage_to_pending(
     let state = find_stage_state_identity(&connection, entity_id, stage_id)?.ok_or_else(|| {
         format!("No stage state exists for entity '{entity_id}' on stage '{stage_id}'.")
     })?;
+    if active_worker_lease_exists(&connection, state.id)? {
+        return Err(format!(
+            "Cannot reset entity '{entity_id}' on stage '{stage_id}' while an active worker lease exists."
+        ));
+    }
 
     if state.status == "pending" {
         insert_app_event(
@@ -1452,15 +1470,22 @@ pub(crate) fn list_eligible_runtime_tasks(
                 state.file_exists,
                 stage.workflow_url,
                 stage.retry_delay_sec,
-                stage.next_stage
+                stage.next_stage,
+                stage.resource_class
             FROM entity_stage_states state
             JOIN stages stage ON stage.stage_id = state.stage_id
             JOIN entity_files file ON file.id = state.file_instance_id
+            JOIN entities entity ON entity.entity_id = state.entity_id
             WHERE stage.is_active = 1
+              AND entity.is_archived = 0
               AND state.file_exists = 1
               AND file.file_exists = 1
               AND TRIM(stage.workflow_url) <> ''
               AND state.attempts < state.max_attempts
+              AND NOT EXISTS (
+                    SELECT 1 FROM worker_leases lease
+                    WHERE lease.state_id = state.id AND lease.status = 'active'
+              )
               AND (
                     state.status = 'pending'
                     OR (state.status = 'retry_wait' AND state.next_retry_at IS NOT NULL AND state.next_retry_at <= ?1)
@@ -1501,7 +1526,8 @@ pub(crate) fn find_runtime_task(
                 state.file_exists,
                 stage.workflow_url,
                 stage.retry_delay_sec,
-                stage.next_stage
+                stage.next_stage,
+                stage.resource_class
             FROM entity_stage_states state
             JOIN stages stage ON stage.stage_id = state.stage_id
             LEFT JOIN entity_files file ON file.id = state.file_instance_id
@@ -1535,7 +1561,8 @@ fn find_runtime_task_by_state_id(
                 state.file_exists,
                 stage.workflow_url,
                 stage.retry_delay_sec,
-                stage.next_stage
+                stage.next_stage,
+                stage.resource_class
             FROM entity_stage_states state
             JOIN stages stage ON stage.stage_id = state.stage_id
             LEFT JOIN entity_files file ON file.id = state.file_instance_id
@@ -1581,6 +1608,10 @@ pub(crate) fn claim_eligible_runtime_tasks(
                         status = 'pending'
                         OR (status = 'retry_wait' AND next_retry_at IS NOT NULL AND next_retry_at <= ?2)
                       )
+                  AND NOT EXISTS (
+                        SELECT 1 FROM worker_leases lease
+                        WHERE lease.state_id = entity_stage_states.id AND lease.status = 'active'
+                  )
                   AND EXISTS (
                         SELECT 1 FROM stages
                         WHERE stages.stage_id = entity_stage_states.stage_id
@@ -1591,6 +1622,11 @@ pub(crate) fn claim_eligible_runtime_tasks(
                         SELECT 1 FROM entity_files
                         WHERE entity_files.id = entity_stage_states.file_instance_id
                           AND entity_files.file_exists = 1
+                  )
+                  AND EXISTS (
+                        SELECT 1 FROM entities
+                        WHERE entities.entity_id = entity_stage_states.entity_id
+                          AND entities.is_archived = 0
                   )
                 "#,
                 params![candidate.state_id, now],
@@ -1631,6 +1667,12 @@ pub(crate) fn claim_specific_runtime_task(
         return Ok(None);
     };
 
+    if active_worker_lease_exists(&transaction, candidate.state_id)? {
+        return Err(format!(
+            "Cannot manually claim entity '{}' on stage '{}': active worker lease exists.",
+            entity_id, stage_id
+        ));
+    }
     if !matches!(candidate.status.as_str(), "pending" | "retry_wait") {
         transaction
             .commit()
@@ -1659,6 +1701,10 @@ pub(crate) fn claim_specific_runtime_task(
               AND file_exists = 1
               AND attempts < max_attempts
               AND status IN ('pending', 'retry_wait')
+              AND NOT EXISTS (
+                    SELECT 1 FROM worker_leases lease
+                    WHERE lease.state_id = entity_stage_states.id AND lease.status = 'active'
+              )
               AND EXISTS (
                     SELECT 1 FROM stages
                     WHERE stages.stage_id = entity_stage_states.stage_id
@@ -1689,6 +1735,590 @@ pub(crate) fn claim_specific_runtime_task(
         .commit()
         .map_err(|error| format!("Failed to commit runtime claim transaction: {error}"))?;
     Ok(task)
+}
+
+pub(crate) fn claim_worker_runtime_tasks(
+    connection: &mut Connection,
+    input: &WorkerLeaseClaimInput,
+) -> Result<Vec<RuntimeTaskRecord>, String> {
+    if input.limit == 0 {
+        return Ok(Vec::new());
+    }
+    let now = input.now.to_rfc3339();
+    let lease_until = (input.now + Duration::seconds(input.lease_ttl_sec as i64)).to_rfc3339();
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("Failed to start worker lease claim transaction: {error}"))?;
+    let candidates =
+        list_eligible_worker_runtime_tasks(&transaction, &now, input.resource_class, input.limit)?;
+    let mut claimed = Vec::new();
+
+    for candidate in candidates {
+        ensure_runtime_transition(
+            &candidate.status,
+            &StageStatus::Queued,
+            RuntimeTransitionReason::RuntimeClaim,
+            Some(candidate.state_id),
+            Some(&candidate.entity_id),
+            Some(&candidate.stage_id),
+        )?;
+        let affected = transaction
+            .execute(
+                r#"
+                UPDATE entity_stage_states
+                SET status = 'queued',
+                    updated_at = ?3
+                WHERE id = ?1
+                  AND file_exists = 1
+                  AND attempts < max_attempts
+                  AND (
+                        status = 'pending'
+                        OR (status = 'retry_wait' AND next_retry_at IS NOT NULL AND next_retry_at <= ?3)
+                      )
+                  AND NOT EXISTS (
+                        SELECT 1 FROM worker_leases lease
+                        WHERE lease.state_id = entity_stage_states.id AND lease.status = 'active'
+                  )
+                  AND EXISTS (
+                        SELECT 1 FROM stages
+                        WHERE stages.stage_id = entity_stage_states.stage_id
+                          AND stages.is_active = 1
+                          AND stages.resource_class = ?2
+                          AND TRIM(stages.workflow_url) <> ''
+                  )
+                  AND EXISTS (
+                        SELECT 1 FROM entity_files
+                        WHERE entity_files.id = entity_stage_states.file_instance_id
+                          AND entity_files.file_exists = 1
+                  )
+                  AND EXISTS (
+                        SELECT 1 FROM entities
+                        WHERE entities.entity_id = entity_stage_states.entity_id
+                          AND entities.is_archived = 0
+                  )
+                "#,
+                params![candidate.state_id, input.resource_class.as_str(), now],
+            )
+            .map_err(|error| {
+                format!(
+                    "Failed to claim worker lease state '{}' for entity '{}' on stage '{}': {error}",
+                    candidate.state_id, candidate.entity_id, candidate.stage_id
+                )
+            })?;
+
+        if affected == 1 {
+            let lease_id = Uuid::new_v4().to_string();
+            transaction
+                .execute(
+                    r#"
+                    INSERT INTO worker_leases (
+                        lease_id,
+                        state_id,
+                        entity_id,
+                        entity_file_id,
+                        stage_id,
+                        resource_class,
+                        worker_id,
+                        status,
+                        leased_at,
+                        lease_until,
+                        heartbeat_at,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?9, ?8, ?8, ?8)
+                    "#,
+                    params![
+                        lease_id,
+                        candidate.state_id,
+                        candidate.entity_id,
+                        candidate.file_instance_id,
+                        candidate.stage_id,
+                        input.resource_class.as_str(),
+                        input.worker_id,
+                        now,
+                        lease_until
+                    ],
+                )
+                .map_err(|error| {
+                    format!(
+                        "Failed to insert worker lease for state '{}' on stage '{}': {error}",
+                        candidate.state_id, candidate.stage_id
+                    )
+                })?;
+            if let Some(mut task) = find_runtime_task_by_state_id(&transaction, candidate.state_id)?
+            {
+                task.lease_id = Some(lease_id);
+                task.worker_id = Some(input.worker_id.clone());
+                claimed.push(task);
+            }
+        }
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| format!("Failed to commit worker lease claim transaction: {error}"))?;
+    Ok(claimed)
+}
+
+fn list_eligible_worker_runtime_tasks(
+    connection: &Connection,
+    now: &str,
+    resource_class: ResourceClass,
+    limit: u64,
+) -> Result<Vec<RuntimeTaskRecord>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT
+                state.id,
+                state.entity_id,
+                state.stage_id,
+                state.status,
+                state.attempts,
+                state.max_attempts,
+                state.file_path,
+                state.file_instance_id,
+                state.file_exists,
+                stage.workflow_url,
+                stage.retry_delay_sec,
+                stage.next_stage,
+                stage.resource_class
+            FROM entity_stage_states state
+            JOIN stages stage ON stage.stage_id = state.stage_id
+            JOIN entity_files file ON file.id = state.file_instance_id
+            JOIN entities entity ON entity.entity_id = state.entity_id
+            WHERE stage.is_active = 1
+              AND stage.resource_class = ?2
+              AND entity.is_archived = 0
+              AND state.file_exists = 1
+              AND file.file_exists = 1
+              AND TRIM(stage.workflow_url) <> ''
+              AND state.attempts < state.max_attempts
+              AND NOT EXISTS (
+                    SELECT 1 FROM worker_leases lease
+                    WHERE lease.state_id = state.id AND lease.status = 'active'
+              )
+              AND (
+                    state.status = 'pending'
+                    OR (state.status = 'retry_wait' AND state.next_retry_at IS NOT NULL AND state.next_retry_at <= ?1)
+                  )
+            ORDER BY state.updated_at ASC, state.id ASC
+            LIMIT ?3
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare eligible worker task query: {error}"))?;
+    let rows = statement
+        .query_map(
+            params![now, resource_class.as_str(), limit as i64],
+            runtime_task_from_row,
+        )
+        .map_err(|error| format!("Failed to query eligible worker tasks: {error}"))?;
+
+    let mut tasks = Vec::new();
+    for row in rows {
+        tasks.push(
+            row.map_err(|error| format!("Failed to read eligible worker task row: {error}"))?,
+        );
+    }
+    Ok(tasks)
+}
+
+pub(crate) fn active_worker_lease_exists(
+    connection: &Connection,
+    state_id: i64,
+) -> Result<bool, String> {
+    query_count(
+        connection,
+        "SELECT COUNT(*) FROM worker_leases WHERE state_id = ?1 AND status = 'active'",
+        params![state_id],
+    )
+    .map(|count| count > 0)
+}
+
+pub(crate) fn attach_worker_lease_run(
+    connection: &Connection,
+    lease_id: &str,
+    run_id: &str,
+    updated_at: &str,
+) -> Result<(), String> {
+    let affected = connection
+        .execute(
+            r#"
+            UPDATE worker_leases
+            SET run_id = ?2,
+                updated_at = ?3
+            WHERE lease_id = ?1 AND status = 'active'
+            "#,
+            params![lease_id, run_id, updated_at],
+        )
+        .map_err(|error| {
+            format!("Failed to attach run '{run_id}' to worker lease '{lease_id}': {error}")
+        })?;
+    if affected != 1 {
+        return Err(format!(
+            "Active worker lease '{lease_id}' was not found while attaching run '{run_id}'."
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn heartbeat_worker_lease(
+    path: &Path,
+    lease_id: &str,
+    worker_id: &str,
+    lease_ttl_sec: u64,
+) -> Result<(), String> {
+    let connection = open_connection(path)?;
+    let now = Utc::now();
+    heartbeat_worker_lease_with_connection(&connection, lease_id, worker_id, lease_ttl_sec, &now)
+}
+
+pub(crate) fn heartbeat_worker_lease_with_connection(
+    connection: &Connection,
+    lease_id: &str,
+    worker_id: &str,
+    lease_ttl_sec: u64,
+    now: &DateTime<Utc>,
+) -> Result<(), String> {
+    let now_text = now.to_rfc3339();
+    let lease_until = (*now + Duration::seconds(lease_ttl_sec as i64)).to_rfc3339();
+    let affected = connection
+        .execute(
+            r#"
+            UPDATE worker_leases
+            SET heartbeat_at = ?3,
+                lease_until = ?4,
+                updated_at = ?3
+            WHERE lease_id = ?1
+              AND worker_id = ?2
+              AND status = 'active'
+            "#,
+            params![lease_id, worker_id, now_text, lease_until],
+        )
+        .map_err(|error| format!("Failed to heartbeat worker lease '{lease_id}': {error}"))?;
+    if affected != 1 {
+        return Err(format!(
+            "Active worker lease '{lease_id}' owned by worker '{worker_id}' was not found."
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn finish_worker_lease(
+    connection: &Connection,
+    lease_id: &str,
+    status: &str,
+    release_reason: &str,
+    released_at: &str,
+) -> Result<(), String> {
+    if !matches!(status, "done" | "failed" | "released") {
+        return Err(format!(
+            "Unsupported worker lease finish status '{status}'."
+        ));
+    }
+    let affected = connection
+        .execute(
+            r#"
+            UPDATE worker_leases
+            SET status = ?2,
+                released_at = ?3,
+                release_reason = ?4,
+                updated_at = ?3
+            WHERE lease_id = ?1 AND status = 'active'
+            "#,
+            params![lease_id, status, released_at, release_reason],
+        )
+        .map_err(|error| format!("Failed to finish worker lease '{lease_id}': {error}"))?;
+    if affected != 1 {
+        return Err(format!("Active worker lease '{lease_id}' was not found."));
+    }
+    Ok(())
+}
+
+pub fn recover_expired_worker_leases(path: &Path) -> Result<u64, String> {
+    let connection = open_connection(path)?;
+    let now = Utc::now().to_rfc3339();
+    recover_expired_worker_leases_with_connection(&connection, &now)
+}
+
+pub(crate) fn recover_expired_worker_leases_with_connection(
+    connection: &Connection,
+    now: &str,
+) -> Result<u64, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT
+                lease_id,
+                state_id,
+                entity_id,
+                entity_file_id,
+                stage_id,
+                resource_class,
+                worker_id,
+                status,
+                run_id,
+                leased_at,
+                lease_until,
+                heartbeat_at,
+                released_at,
+                release_reason,
+                updated_at
+            FROM worker_leases
+            WHERE status = 'active' AND lease_until < ?1
+            ORDER BY lease_until ASC, id ASC
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare expired worker lease query: {error}"))?;
+    let rows = statement
+        .query_map(params![now], worker_lease_from_row)
+        .map_err(|error| format!("Failed to query expired worker leases: {error}"))?;
+    let mut leases = Vec::new();
+    for row in rows {
+        leases.push(
+            row.map_err(|error| format!("Failed to read expired worker lease row: {error}"))?,
+        );
+    }
+    drop(statement);
+
+    let mut recovered = 0_u64;
+    for lease in leases {
+        if lease_run_finished(connection, lease.run_id.as_deref())? {
+            continue;
+        }
+        let affected = connection
+            .execute(
+                r#"
+                UPDATE worker_leases
+                SET status = 'expired',
+                    released_at = ?2,
+                    release_reason = 'lease_expired',
+                    updated_at = ?2
+                WHERE lease_id = ?1 AND status = 'active'
+                "#,
+                params![lease.lease_id, now],
+            )
+            .map_err(|error| {
+                format!(
+                    "Failed to mark worker lease '{}' expired: {error}",
+                    lease.lease_id
+                )
+            })?;
+        if affected != 1 {
+            continue;
+        }
+
+        let state = find_stage_state_by_id(connection, lease.state_id)?;
+        if let Some(state) = state {
+            match state.status.as_str() {
+                "queued" => {
+                    release_queued_claim(connection, lease.state_id, now)?;
+                }
+                "in_progress" => {
+                    let next_status = if state.attempts < state.max_attempts {
+                        StageStatus::RetryWait
+                    } else {
+                        StageStatus::Failed
+                    };
+                    let next_retry_at = if matches!(next_status, StageStatus::RetryWait) {
+                        Some(now)
+                    } else {
+                        None
+                    };
+                    update_stage_state_failure_with_reason(
+                        connection,
+                        lease.state_id,
+                        next_status,
+                        "Worker lease expired before task completion.",
+                        None,
+                        next_retry_at,
+                        now,
+                        RuntimeTransitionReason::StuckReconciliation,
+                    )?;
+                }
+                _ => {}
+            }
+        }
+        insert_app_event(
+            connection,
+            AppEventLevel::Warning,
+            "worker_lease_expired",
+            &format!(
+                "Worker lease '{}' expired for entity '{}' on stage '{}'.",
+                lease.lease_id, lease.entity_id, lease.stage_id
+            ),
+            Some(json!({
+                "lease_id": lease.lease_id,
+                "state_id": lease.state_id,
+                "entity_id": lease.entity_id,
+                "stage_id": lease.stage_id,
+                "resource_class": lease.resource_class.as_str(),
+                "worker_id": lease.worker_id,
+            })),
+            now,
+        )?;
+        recovered += 1;
+    }
+    Ok(recovered)
+}
+
+pub fn get_worker_summary(path: &Path, config: &PipelineConfig) -> Result<WorkerSummary, String> {
+    let connection = open_connection(path)?;
+    let default_active = lease_count(&connection, ResourceClass::Default, "active")?;
+    let local_active = lease_count(&connection, ResourceClass::LocalLlm, "active")?;
+    let default_expired = lease_count(&connection, ResourceClass::Default, "expired")?;
+    let local_expired = lease_count(&connection, ResourceClass::LocalLlm, "expired")?;
+    let recent_leases = list_recent_worker_leases(&connection, 20)?;
+    let last_recovery_at = connection
+        .query_row(
+            "SELECT MAX(created_at) FROM app_events WHERE code = 'worker_lease_expired'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(|error| format!("Failed to query last worker lease recovery time: {error}"))?;
+    Ok(WorkerSummary {
+        worker_lease_sec: config.runtime.worker_lease_sec,
+        worker_heartbeat_sec: config.runtime.worker_heartbeat_sec,
+        pools: vec![
+            WorkerPoolRuntimeSummary {
+                resource_class: ResourceClass::Default,
+                configured_concurrency: config.runtime.worker_pools.default.concurrency,
+                active_leases: default_active,
+                expired_leases: default_expired,
+            },
+            WorkerPoolRuntimeSummary {
+                resource_class: ResourceClass::LocalLlm,
+                configured_concurrency: config.runtime.worker_pools.local_llm.concurrency,
+                active_leases: local_active,
+                expired_leases: local_expired,
+            },
+        ],
+        active_leases_total: default_active + local_active,
+        expired_leases_total: default_expired + local_expired,
+        last_recovery_at,
+        recent_leases,
+    })
+}
+
+fn find_stage_state_by_id(
+    connection: &Connection,
+    state_id: i64,
+) -> Result<Option<EntityStageStateRecord>, String> {
+    connection
+        .query_row(
+            r#"
+            SELECT
+                id,
+                entity_id,
+                stage_id,
+                file_path,
+                file_instance_id,
+                file_exists,
+                status,
+                attempts,
+                max_attempts,
+                last_error,
+                last_http_status,
+                next_retry_at,
+                last_started_at,
+                last_finished_at,
+                created_child_path,
+                discovered_at,
+                last_seen_at,
+                updated_at
+            FROM entity_stage_states
+            WHERE id = ?1
+            "#,
+            params![state_id],
+            stage_state_from_row,
+        )
+        .optional()
+        .map_err(|error| format!("Failed to load stage state id '{state_id}': {error}"))
+}
+
+fn lease_run_finished(connection: &Connection, run_id: Option<&str>) -> Result<bool, String> {
+    let Some(run_id) = run_id else {
+        return Ok(false);
+    };
+    query_count(
+        connection,
+        "SELECT COUNT(*) FROM stage_runs WHERE run_id = ?1 AND finished_at IS NOT NULL",
+        params![run_id],
+    )
+    .map(|count| count > 0)
+}
+
+fn lease_count(
+    connection: &Connection,
+    resource_class: ResourceClass,
+    status: &str,
+) -> Result<u64, String> {
+    query_count(
+        connection,
+        "SELECT COUNT(*) FROM worker_leases WHERE resource_class = ?1 AND status = ?2",
+        params![resource_class.as_str(), status],
+    )
+}
+
+fn list_recent_worker_leases(
+    connection: &Connection,
+    limit: u64,
+) -> Result<Vec<WorkerLeaseRecord>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT
+                lease_id,
+                state_id,
+                entity_id,
+                entity_file_id,
+                stage_id,
+                resource_class,
+                worker_id,
+                status,
+                run_id,
+                leased_at,
+                lease_until,
+                heartbeat_at,
+                released_at,
+                release_reason,
+                updated_at
+            FROM worker_leases
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?1
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare recent worker leases query: {error}"))?;
+    let rows = statement
+        .query_map(params![limit as i64], worker_lease_from_row)
+        .map_err(|error| format!("Failed to query recent worker leases: {error}"))?;
+    let mut leases = Vec::new();
+    for row in rows {
+        leases.push(row.map_err(|error| format!("Failed to read worker lease row: {error}"))?);
+    }
+    Ok(leases)
+}
+
+fn worker_lease_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkerLeaseRecord> {
+    let resource_class_text: String = row.get(5)?;
+    Ok(WorkerLeaseRecord {
+        lease_id: row.get(0)?,
+        state_id: row.get(1)?,
+        entity_id: row.get(2)?,
+        entity_file_id: row.get(3)?,
+        stage_id: row.get(4)?,
+        resource_class: ResourceClass::from_str(&resource_class_text).unwrap_or_default(),
+        worker_id: row.get(6)?,
+        status: row.get(7)?,
+        run_id: row.get(8)?,
+        leased_at: row.get(9)?,
+        lease_until: row.get(10)?,
+        heartbeat_at: row.get(11)?,
+        released_at: row.get(12)?,
+        release_reason: row.get(13)?,
+        updated_at: row.get(14)?,
+    })
 }
 
 pub(crate) fn release_queued_claim(
@@ -3085,7 +3715,7 @@ pub(crate) fn load_setting(connection: &Connection, key: &str) -> Result<Option<
 
 fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
     match current_schema_version(connection)? {
-        0 => create_schema_v9(connection)?,
+        0 => create_schema_v10(connection)?,
         1 => {
             migrate_v1_to_v2(connection)?;
             migrate_v2_to_v3(connection)?;
@@ -3095,6 +3725,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)?;
         }
         2 => {
             migrate_v2_to_v3(connection)?;
@@ -3104,6 +3735,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)?;
         }
         3 => {
             migrate_v3_to_v4(connection)?;
@@ -3112,6 +3744,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)?;
         }
         4 => {
             migrate_v4_to_v5(connection)?;
@@ -3119,27 +3752,35 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)?;
         }
         5 => {
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)?;
         }
         6 => {
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)?;
         }
         7 => {
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)?;
         }
-        8 => migrate_v8_to_v9(connection)?,
-        9 => {}
+        8 => {
+            migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)?;
+        }
+        9 => migrate_v9_to_v10(connection)?,
+        10 => {}
         version => {
             return Err(format!(
-            "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, 4, 5, 6, 7, 8, or 9."
+            "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, or 10."
         ))
         }
     }
@@ -3169,6 +3810,10 @@ fn ensure_query_indexes(connection: &Connection) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS idx_stage_runs_entity_stage ON stage_runs(entity_id, stage_id);
             CREATE INDEX IF NOT EXISTS idx_app_events_level_created_at ON app_events(level, created_at);
             CREATE INDEX IF NOT EXISTS idx_entity_files_storage_key ON entity_files(storage_provider, bucket, object_key);
+            CREATE INDEX IF NOT EXISTS idx_worker_leases_status_until ON worker_leases(status, lease_until);
+            CREATE INDEX IF NOT EXISTS idx_worker_leases_resource_status ON worker_leases(resource_class, status);
+            CREATE INDEX IF NOT EXISTS idx_worker_leases_state_status ON worker_leases(state_id, status);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_leases_one_active_state ON worker_leases(state_id) WHERE status = 'active';
             CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_files_s3_producer_artifact ON entity_files(producer_run_id, artifact_id)
                 WHERE storage_provider = 's3' AND producer_run_id IS NOT NULL AND artifact_id IS NOT NULL;
             "#,
@@ -3183,7 +3828,7 @@ fn current_schema_version(connection: &Connection) -> Result<u32, String> {
         .map_err(|error| format!("Failed to read PRAGMA user_version: {error}"))
 }
 
-fn create_schema_v9(connection: &Connection) -> Result<(), String> {
+fn create_schema_v10(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
             r#"
@@ -3319,6 +3964,29 @@ fn create_schema_v9(connection: &Connection) -> Result<(), String> {
                 FOREIGN KEY (stage_id) REFERENCES stages(stage_id)
             );
 
+            CREATE TABLE IF NOT EXISTS worker_leases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lease_id TEXT NOT NULL UNIQUE,
+                state_id INTEGER NOT NULL,
+                entity_id TEXT NOT NULL,
+                entity_file_id INTEGER NOT NULL,
+                stage_id TEXT NOT NULL,
+                resource_class TEXT NOT NULL CHECK (resource_class IN ('default', 'local_llm')),
+                worker_id TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('active', 'done', 'failed', 'expired', 'released')),
+                run_id TEXT,
+                leased_at TEXT NOT NULL,
+                lease_until TEXT NOT NULL,
+                heartbeat_at TEXT NOT NULL,
+                released_at TEXT,
+                release_reason TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (state_id) REFERENCES entity_stage_states(id),
+                FOREIGN KEY (entity_file_id) REFERENCES entity_files(id),
+                FOREIGN KEY (stage_id) REFERENCES stages(stage_id)
+            );
+
             CREATE TABLE IF NOT EXISTS app_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 level TEXT NOT NULL,
@@ -3331,14 +3999,18 @@ fn create_schema_v9(connection: &Connection) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS idx_stage_runs_entity_id ON stage_runs(entity_id);
             CREATE INDEX IF NOT EXISTS idx_stage_runs_run_id ON stage_runs(run_id);
             CREATE INDEX IF NOT EXISTS idx_entity_stage_states_status_retry ON entity_stage_states(status, next_retry_at);
+            CREATE INDEX IF NOT EXISTS idx_worker_leases_status_until ON worker_leases(status, lease_until);
+            CREATE INDEX IF NOT EXISTS idx_worker_leases_resource_status ON worker_leases(resource_class, status);
+            CREATE INDEX IF NOT EXISTS idx_worker_leases_state_status ON worker_leases(state_id, status);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_leases_one_active_state ON worker_leases(state_id) WHERE status = 'active';
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_files_s3_producer_artifact ON entity_files(producer_run_id, artifact_id)
                 WHERE storage_provider = 's3' AND producer_run_id IS NOT NULL AND artifact_id IS NOT NULL;
 
-            PRAGMA user_version = 9;
+            PRAGMA user_version = 10;
             "#,
         )
-        .map_err(|error| format!("Failed to create SQLite schema v9: {error}"))?;
+        .map_err(|error| format!("Failed to create SQLite schema v10: {error}"))?;
     Ok(())
 }
 
@@ -3980,6 +4652,56 @@ fn migrate_v8_to_v9(connection: &mut Connection) -> Result<(), String> {
         &now,
     )?;
     set_setting(connection, "schema_version", "9", &now)?;
+    Ok(())
+}
+
+fn migrate_v9_to_v10(connection: &mut Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS worker_leases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lease_id TEXT NOT NULL UNIQUE,
+                state_id INTEGER NOT NULL,
+                entity_id TEXT NOT NULL,
+                entity_file_id INTEGER NOT NULL,
+                stage_id TEXT NOT NULL,
+                resource_class TEXT NOT NULL CHECK (resource_class IN ('default', 'local_llm')),
+                worker_id TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('active', 'done', 'failed', 'expired', 'released')),
+                run_id TEXT,
+                leased_at TEXT NOT NULL,
+                lease_until TEXT NOT NULL,
+                heartbeat_at TEXT NOT NULL,
+                released_at TEXT,
+                release_reason TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (state_id) REFERENCES entity_stage_states(id),
+                FOREIGN KEY (entity_file_id) REFERENCES entity_files(id),
+                FOREIGN KEY (stage_id) REFERENCES stages(stage_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_worker_leases_status_until ON worker_leases(status, lease_until);
+            CREATE INDEX IF NOT EXISTS idx_worker_leases_resource_status ON worker_leases(resource_class, status);
+            CREATE INDEX IF NOT EXISTS idx_worker_leases_state_status ON worker_leases(state_id, status);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_leases_one_active_state ON worker_leases(state_id) WHERE status = 'active';
+
+            PRAGMA user_version = 10;
+            "#,
+        )
+        .map_err(|error| format!("Failed to migrate schema from v9 to v10: {error}"))?;
+
+    let now = Utc::now().to_rfc3339();
+    insert_app_event(
+        connection,
+        AppEventLevel::Info,
+        "schema_migrated_to_v10",
+        "SQLite schema migrated from version 9 to version 10.",
+        None,
+        &now,
+    )?;
+    set_setting(connection, "schema_version", "10", &now)?;
     Ok(())
 }
 
@@ -5020,6 +5742,7 @@ fn update_entity_summary_from_state(
 }
 
 fn runtime_task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeTaskRecord> {
+    let resource_class_text: String = row.get(12)?;
     Ok(RuntimeTaskRecord {
         state_id: row.get(0)?,
         entity_id: row.get(1)?,
@@ -5033,6 +5756,9 @@ fn runtime_task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeTas
         workflow_url: row.get(9)?,
         retry_delay_sec: row.get::<_, i64>(10)? as u64,
         next_stage: row.get(11)?,
+        resource_class: ResourceClass::from_str(&resource_class_text).unwrap_or_default(),
+        lease_id: None,
+        worker_id: None,
     })
 }
 
@@ -5447,6 +6173,41 @@ mod tests {
         }
     }
 
+    fn stage_with_resource(
+        id: &str,
+        next_stage: Option<&str>,
+        resource_class: ResourceClass,
+    ) -> StageDefinition {
+        StageDefinition {
+            resource_class,
+            ..stage(id, next_stage)
+        }
+    }
+
+    fn setup_scanned_workdir(
+        stages: Vec<StageDefinition>,
+        files: &[(&str, &str)],
+    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        bootstrap_database(&database_path, &test_config(stages)).expect("bootstrap");
+        for (stage_id, entity_id) in files {
+            let source_path = workdir
+                .join("stages")
+                .join(stage_id)
+                .join(format!("{entity_id}.json"));
+            fs::create_dir_all(source_path.parent().expect("source parent")).expect("parent");
+            fs::write(
+                &source_path,
+                format!(r#"{{"id":"{entity_id}","payload":{{"stage":"{stage_id}"}}}}"#),
+            )
+            .expect("source");
+        }
+        scan_workspace(&workdir, &database_path).expect("scan");
+        (tempdir, workdir, database_path)
+    }
+
     fn s3_pointer_input(
         entity_id: &str,
         artifact_id: &str,
@@ -5664,10 +6425,11 @@ mod tests {
         let table_names = load_table_names(&connection).expect("table names");
 
         assert!(database_path.exists());
-        assert_eq!(result.schema_version, 9);
+        assert_eq!(result.schema_version, 10);
         assert!(table_names.contains(&"entity_files".to_string()));
         assert!(table_names.contains(&"entities".to_string()));
         assert!(table_names.contains(&"entity_stage_states".to_string()));
+        assert!(table_names.contains(&"worker_leases".to_string()));
         let stages = list_stages(&database_path).expect("stages");
         assert_eq!(stages[0].resource_class, ResourceClass::Default);
     }
@@ -5732,7 +6494,7 @@ mod tests {
             load_entity_files_from_connection(&connection, Some("entity-1")).expect("load files");
         let events = load_app_events_from_connection(&connection, 20).expect("events");
 
-        assert_eq!(result.schema_version, 9);
+        assert_eq!(result.schema_version, 10);
         assert_eq!(entity.file_count, 1);
         assert_eq!(files.len(), 1);
         assert!(events
@@ -5744,6 +6506,9 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.code == "schema_migrated_to_v9"));
+        assert!(events
+            .iter()
+            .any(|event| event.code == "schema_migrated_to_v10"));
     }
 
     #[test]
@@ -5757,7 +6522,304 @@ mod tests {
         let result = bootstrap_database(&database_path, &test_config(vec![stage("ingest", None)]))
             .expect("bootstrap");
 
-        assert_eq!(result.schema_version, 9);
+        assert_eq!(result.schema_version, 10);
+    }
+
+    #[test]
+    fn worker_claim_filters_by_resource_class_and_limit_zero_disables_claim() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![
+                stage_with_resource("default_stage", None, ResourceClass::Default),
+                stage_with_resource("llm_stage", None, ResourceClass::LocalLlm),
+            ],
+            &[
+                ("default_stage", "entity-default"),
+                ("llm_stage", "entity-llm"),
+            ],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+
+        let disabled = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 0,
+                worker_id: "default-worker-disabled".to_string(),
+                lease_ttl_sec: 1800,
+                now: Utc::now(),
+            },
+        )
+        .expect("disabled claim");
+        assert!(disabled.is_empty());
+
+        let default_tasks = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 10,
+                worker_id: "default-worker".to_string(),
+                lease_ttl_sec: 1800,
+                now: Utc::now(),
+            },
+        )
+        .expect("default claim");
+        assert_eq!(default_tasks.len(), 1);
+        assert_eq!(default_tasks[0].stage_id, "default_stage");
+        assert_eq!(default_tasks[0].resource_class, ResourceClass::Default);
+        assert!(default_tasks[0].lease_id.is_some());
+
+        let llm_tasks = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::LocalLlm,
+                limit: 10,
+                worker_id: "llm-worker".to_string(),
+                lease_ttl_sec: 1800,
+                now: Utc::now(),
+            },
+        )
+        .expect("llm claim");
+        assert_eq!(llm_tasks.len(), 1);
+        assert_eq!(llm_tasks[0].stage_id, "llm_stage");
+        assert_eq!(llm_tasks[0].resource_class, ResourceClass::LocalLlm);
+    }
+
+    #[test]
+    fn worker_double_claim_and_manual_claim_refuse_active_lease() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )],
+            &[("incoming", "entity-1")],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+        let first = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                worker_id: "worker-one".to_string(),
+                lease_ttl_sec: 1800,
+                now: Utc::now(),
+            },
+        )
+        .expect("first claim");
+        assert_eq!(first.len(), 1);
+
+        let second = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                worker_id: "worker-two".to_string(),
+                lease_ttl_sec: 1800,
+                now: Utc::now(),
+            },
+        )
+        .expect("second claim");
+        assert!(second.is_empty());
+        assert_eq!(
+            query_count(
+                &connection,
+                "SELECT COUNT(*) FROM worker_leases WHERE state_id = ?1 AND status = 'active'",
+                params![first[0].state_id],
+            )
+            .expect("active count"),
+            1,
+        );
+
+        let manual = claim_specific_runtime_task(
+            &mut connection,
+            "entity-1",
+            "incoming",
+            &Utc::now().to_rfc3339(),
+        );
+        assert!(manual.is_err());
+    }
+
+    #[test]
+    fn worker_heartbeat_extends_active_lease_and_rejects_wrong_worker() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )],
+            &[("incoming", "entity-1")],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+        let task = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                worker_id: "worker-one".to_string(),
+                lease_ttl_sec: 10,
+                now: Utc::now(),
+            },
+        )
+        .expect("claim")
+        .pop()
+        .expect("task");
+        let lease_id = task.lease_id.expect("lease id");
+        let before_until: String = connection
+            .query_row(
+                "SELECT lease_until FROM worker_leases WHERE lease_id = ?1",
+                params![lease_id],
+                |row| row.get(0),
+            )
+            .expect("before");
+        let heartbeat_at = Utc::now() + Duration::seconds(60);
+        heartbeat_worker_lease_with_connection(
+            &connection,
+            &lease_id,
+            "worker-one",
+            1800,
+            &heartbeat_at,
+        )
+        .expect("heartbeat");
+        let (after_heartbeat, after_until): (String, String) = connection
+            .query_row(
+                "SELECT heartbeat_at, lease_until FROM worker_leases WHERE lease_id = ?1",
+                params![lease_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("after");
+
+        assert_eq!(after_heartbeat, heartbeat_at.to_rfc3339());
+        assert!(after_until > before_until);
+        let wrong_worker = heartbeat_worker_lease_with_connection(
+            &connection,
+            &lease_id,
+            "worker-two",
+            1800,
+            &Utc::now(),
+        );
+        assert!(wrong_worker.is_err());
+    }
+
+    #[test]
+    fn worker_recovery_expires_queued_lease_and_restores_pending_state() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )],
+            &[("incoming", "entity-1")],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+        let task = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                worker_id: "worker-one".to_string(),
+                lease_ttl_sec: 1800,
+                now: Utc::now(),
+            },
+        )
+        .expect("claim")
+        .pop()
+        .expect("task");
+        let lease_id = task.lease_id.expect("lease id");
+        let not_recovered =
+            recover_expired_worker_leases_with_connection(&connection, &Utc::now().to_rfc3339())
+                .expect("recover current");
+        assert_eq!(not_recovered, 0);
+
+        let old = (Utc::now() - Duration::seconds(60)).to_rfc3339();
+        connection
+            .execute(
+                "UPDATE worker_leases SET lease_until = ?2 WHERE lease_id = ?1",
+                params![lease_id, old],
+            )
+            .expect("expire lease");
+        let recovered =
+            recover_expired_worker_leases_with_connection(&connection, &Utc::now().to_rfc3339())
+                .expect("recover expired");
+        let state = get_stage_state(&database_path, "entity-1", "incoming")
+            .expect("state")
+            .expect("state exists");
+        let lease_status: String = connection
+            .query_row(
+                "SELECT status FROM worker_leases WHERE lease_id = ?1",
+                params![lease_id],
+                |row| row.get(0),
+            )
+            .expect("lease status");
+
+        assert_eq!(recovered, 1);
+        assert_eq!(lease_status, "expired");
+        assert_eq!(state.status, "pending");
+    }
+
+    #[test]
+    fn worker_recovery_skips_expired_lease_with_finished_run() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )],
+            &[("incoming", "entity-1")],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+        let task = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                worker_id: "worker-one".to_string(),
+                lease_ttl_sec: 1800,
+                now: Utc::now(),
+            },
+        )
+        .expect("claim")
+        .pop()
+        .expect("task");
+        let lease_id = task.lease_id.expect("lease id");
+        let run_id = "finished-run";
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                r#"
+                INSERT INTO stage_runs (
+                    run_id, entity_id, entity_file_id, stage_id, attempt_no, workflow_url,
+                    request_json, response_json, http_status, success, started_at, finished_at,
+                    duration_ms
+                )
+                VALUES (?1, 'entity-1', ?2, 'incoming', 1, 'http://localhost', '{}', '{}', 200, 1, ?3, ?3, 1)
+                "#,
+                params![run_id, task.file_instance_id, now],
+            )
+            .expect("stage run");
+        connection
+            .execute(
+                "UPDATE worker_leases SET run_id = ?2, lease_until = ?3 WHERE lease_id = ?1",
+                params![
+                    lease_id,
+                    run_id,
+                    (Utc::now() - Duration::seconds(60)).to_rfc3339()
+                ],
+            )
+            .expect("attach finished run");
+
+        let recovered =
+            recover_expired_worker_leases_with_connection(&connection, &Utc::now().to_rfc3339())
+                .expect("recover");
+        let lease_status: String = connection
+            .query_row(
+                "SELECT status FROM worker_leases WHERE lease_id = ?1",
+                params![lease_id],
+                |row| row.get(0),
+            )
+            .expect("lease status");
+
+        assert_eq!(recovered, 0);
+        assert_eq!(lease_status, "active");
     }
 
     #[test]

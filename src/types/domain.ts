@@ -47,6 +47,8 @@ export interface RuntimeConfig {
   stuck_task_timeout_sec: number;
   request_timeout_sec: number;
   file_stability_delay_ms: number;
+  worker_lease_sec: number;
+  worker_heartbeat_sec: number;
   worker_pools: WorkerPoolsConfig;
 }
 
@@ -95,6 +97,8 @@ export interface RuntimeConfigDraft {
   stuck_task_timeout_sec: number;
   request_timeout_sec: number;
   file_stability_delay_ms: number;
+  worker_lease_sec: number;
+  worker_heartbeat_sec: number;
   worker_pools: WorkerPoolsConfig;
 }
 
@@ -490,6 +494,51 @@ export interface RuntimeSummary {
   entities_by_status: StatusCount[];
   execution_status_counts: StatusCount[];
   last_reconciliation_at: string | null;
+}
+
+export interface WorkerPoolRuntimeSummary {
+  resource_class: ResourceClass;
+  configured_concurrency: number;
+  active_leases: number;
+  expired_leases: number;
+}
+
+export interface WorkerLeaseRecord {
+  lease_id: string;
+  state_id: number;
+  entity_id: string;
+  entity_file_id: number;
+  stage_id: string;
+  resource_class: ResourceClass;
+  worker_id: string;
+  status: string;
+  run_id: string | null;
+  leased_at: string;
+  lease_until: string;
+  heartbeat_at: string;
+  released_at: string | null;
+  release_reason: string | null;
+  updated_at: string;
+}
+
+export interface WorkerSummary {
+  worker_lease_sec: number;
+  worker_heartbeat_sec: number;
+  pools: WorkerPoolRuntimeSummary[];
+  active_leases_total: number;
+  expired_leases_total: number;
+  last_recovery_at: string | null;
+  recent_leases: WorkerLeaseRecord[];
+}
+
+export interface WorkerSummaryResult {
+  summary: WorkerSummary | null;
+  errors: CommandErrorInfo[];
+}
+
+export interface RecoverExpiredWorkerLeasesResult {
+  recovered: number;
+  errors: CommandErrorInfo[];
 }
 
 export type DashboardStageHealth = "ok" | "warning" | "error" | "inactive";

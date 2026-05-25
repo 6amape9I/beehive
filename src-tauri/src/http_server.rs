@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Instant;
 
 use crate::http_api;
+use crate::services::workers;
 use crate::services::workspaces;
 
 const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
@@ -77,6 +78,7 @@ impl ServerConfig {
 }
 
 pub fn run_server(config: ServerConfig) -> Result<(), String> {
+    workers::start_from_env()?;
     let listener = TcpListener::bind(config.bind_addr())
         .map_err(|error| format!("Failed to bind Beehive server: {error}"))?;
     log_json(

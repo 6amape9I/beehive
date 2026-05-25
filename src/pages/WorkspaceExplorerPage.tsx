@@ -8,6 +8,8 @@ import { PaginationControls } from "../components/entities/PaginationControls";
 import {
   listEntities,
   listWorkspaceEntities,
+  getWorkerSummary,
+  recoverExpiredWorkerLeases,
   reconcileS3Workspace,
   reconcileS3WorkspaceById,
   runSelectedPipelineWavesById,
@@ -20,6 +22,7 @@ import type {
   EntityValidationStatus,
   RunSelectedPipelineWavesSummary,
   SortDirection,
+  WorkerSummary,
 } from "../types/domain";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -123,6 +126,7 @@ export function WorkspaceExplorerPage() {
   const [selectedEntityIds, setSelectedEntityIds] = useState<string[]>([]);
   const [selectedPipelineSummary, setSelectedPipelineSummary] =
     useState<RunSelectedPipelineWavesSummary | null>(null);
+  const [workerSummary, setWorkerSummary] = useState<WorkerSummary | null>(null);
 
   const selectedRows = useMemo(
     () => entities.filter((entity) => selectedEntityIds.includes(entity.entity_id)),
@@ -249,6 +253,39 @@ export function WorkspaceExplorerPage() {
     }
   }
 
+  async function handleLoadWorkerSummary() {
+    if (!workspaceId) return;
+    setActiveAction("worker-summary");
+    setActionMessage(null);
+    try {
+      const result = await getWorkerSummary(workspaceId);
+      setErrors(result.errors);
+      setWorkerSummary(result.summary);
+      setActionMessage(
+        result.summary
+          ? `Worker summary loaded: ${result.summary.active_leases_total} active lease(s), ${result.summary.expired_leases_total} expired.`
+          : "Worker summary unavailable.",
+      );
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
+  async function handleRecoverExpiredLeases() {
+    if (!workspaceId) return;
+    setActiveAction("worker-recovery");
+    setActionMessage(null);
+    try {
+      const result = await recoverExpiredWorkerLeases(workspaceId);
+      setErrors(result.errors);
+      setActionMessage(`Worker lease recovery complete: ${result.recovered} recovered.`);
+      await handleLoadWorkerSummary();
+      await loadEntities();
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
   function toggleEntity(entity: EntityTableRow, checked: boolean) {
     if (!entity.latest_file_id || !isSelectableEntity(entity)) return;
     setSelectedEntityIds((current) => {
@@ -357,6 +394,38 @@ export function WorkspaceExplorerPage() {
             </div>
             {selectedPipelineSummary ? <SelectedPipelineSummary summary={selectedPipelineSummary} /> : null}
           </section>
+
+          {workspaceId ? (
+            <section className="panel">
+              <div className="panel-heading">
+                <div>
+                  <h2>Worker Pools</h2>
+                  <span className="muted">
+                    DB-backed lease diagnostics for this workspace.
+                  </span>
+                </div>
+                <div className="button-row">
+                  <button
+                    type="button"
+                    className="button secondary"
+                    disabled={activeAction === "worker-summary"}
+                    onClick={() => void handleLoadWorkerSummary()}
+                  >
+                    {activeAction === "worker-summary" ? "Loading..." : "Load summary"}
+                  </button>
+                  <button
+                    type="button"
+                    className="button secondary"
+                    disabled={activeAction === "worker-recovery"}
+                    onClick={() => void handleRecoverExpiredLeases()}
+                  >
+                    {activeAction === "worker-recovery" ? "Recovering..." : "Recover expired"}
+                  </button>
+                </div>
+              </div>
+              {workerSummary ? <WorkerPoolsSummary summary={workerSummary} /> : null}
+            </section>
+          ) : null}
 
           <section className="panel">
             <div className="panel-heading">
@@ -578,6 +647,65 @@ function SelectedPipelineSummary({ summary }: { summary: RunSelectedPipelineWave
                     <td>
                       <code>{output.s3_uri ?? output.key ?? "not available"}</code>
                     </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function WorkerPoolsSummary({ summary }: { summary: WorkerSummary }) {
+  return (
+    <div className="workspace-wave-summary">
+      <div className="summary-card-grid">
+        <SummaryCard label="Active leases" value={summary.active_leases_total} />
+        <SummaryCard label="Expired leases" value={summary.expired_leases_total} />
+        <SummaryCard label="Lease sec" value={summary.worker_lease_sec} />
+        <SummaryCard label="Heartbeat sec" value={summary.worker_heartbeat_sec} />
+        <SummaryCard label="Last recovery" value={summary.last_recovery_at ?? "never"} />
+      </div>
+      <div className="summary-card-grid">
+        {summary.pools.map((pool) => (
+          <SummaryCard
+            key={pool.resource_class}
+            label={pool.resource_class === "local_llm" ? "Local LLM pool" : "Default pool"}
+            value={`${pool.active_leases}/${pool.configured_concurrency} active`}
+          />
+        ))}
+      </div>
+      {summary.recent_leases.length > 0 ? (
+        <details className="diagnostics-block">
+          <summary>
+            <strong>Recent leases</strong>
+            <span className="muted">Latest worker lease records</span>
+          </summary>
+          <div className="table-wrap">
+            <table className="workspace-file-table">
+              <thead>
+                <tr>
+                  <th>Lease</th>
+                  <th>Worker</th>
+                  <th>Stage</th>
+                  <th>Status</th>
+                  <th>Until</th>
+                </tr>
+              </thead>
+              <tbody>
+                {summary.recent_leases.map((lease) => (
+                  <tr key={lease.lease_id}>
+                    <td>
+                      <code>{lease.lease_id}</code>
+                    </td>
+                    <td>{lease.worker_id}</td>
+                    <td>{lease.stage_id}</td>
+                    <td>
+                      <StatusBadge status={lease.status} />
+                    </td>
+                    <td>{lease.lease_until}</td>
                   </tr>
                 ))}
               </tbody>

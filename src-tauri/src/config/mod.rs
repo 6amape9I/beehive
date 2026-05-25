@@ -5,9 +5,10 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::domain::{
-    ConfigValidationIssue, ConfigValidationResult, PipelineConfig, ProjectConfig, ResourceClass,
-    RuntimeConfig, StageDefinition, StorageConfig, StorageProvider, ValidationSeverity,
-    WorkerPoolConfig, WorkerPoolsConfig, DEFAULT_REQUEST_TIMEOUT_SEC, MAX_WORKER_POOL_CONCURRENCY,
+    default_worker_lease_sec, ConfigValidationIssue, ConfigValidationResult, PipelineConfig,
+    ProjectConfig, ResourceClass, RuntimeConfig, StageDefinition, StorageConfig, StorageProvider,
+    ValidationSeverity, WorkerPoolConfig, WorkerPoolsConfig, DEFAULT_REQUEST_TIMEOUT_SEC,
+    DEFAULT_WORKER_HEARTBEAT_SEC, MAX_WORKER_POOL_CONCURRENCY,
 };
 
 #[derive(Debug, Deserialize)]
@@ -31,6 +32,8 @@ struct RawRuntimeConfig {
     stuck_task_timeout_sec: Option<u64>,
     request_timeout_sec: Option<u64>,
     file_stability_delay_ms: Option<u64>,
+    worker_lease_sec: Option<u64>,
+    worker_heartbeat_sec: Option<u64>,
     worker_pools: Option<BTreeMap<String, RawWorkerPoolConfig>>,
 }
 
@@ -83,6 +86,8 @@ runtime:
   stuck_task_timeout_sec: 900
   request_timeout_sec: 300
   file_stability_delay_ms: 1000
+  worker_lease_sec: 1800
+  worker_heartbeat_sec: 30
   worker_pools:
     default:
       concurrency: 1
@@ -479,12 +484,38 @@ fn build_runtime_config(
                     "request_timeout_sec must be greater than 0.",
                 ));
             }
+            let effective_request_timeout_sec =
+                request_timeout_sec.max(DEFAULT_REQUEST_TIMEOUT_SEC);
+            let worker_lease_sec = runtime
+                .worker_lease_sec
+                .unwrap_or_else(|| default_worker_lease_sec(effective_request_timeout_sec));
+            if worker_lease_sec == 0 {
+                issues.push(issue(
+                    ValidationSeverity::Error,
+                    "invalid_runtime_worker_lease_sec",
+                    "runtime.worker_lease_sec",
+                    "worker_lease_sec must be greater than 0.",
+                ));
+            }
+            let worker_heartbeat_sec = runtime
+                .worker_heartbeat_sec
+                .unwrap_or(DEFAULT_WORKER_HEARTBEAT_SEC);
+            if worker_heartbeat_sec == 0 {
+                issues.push(issue(
+                    ValidationSeverity::Error,
+                    "invalid_runtime_worker_heartbeat_sec",
+                    "runtime.worker_heartbeat_sec",
+                    "worker_heartbeat_sec must be greater than 0.",
+                ));
+            }
             RuntimeConfig {
                 scan_interval_sec: runtime.scan_interval_sec.unwrap_or(5),
                 max_parallel_tasks: runtime.max_parallel_tasks.unwrap_or(3),
                 stuck_task_timeout_sec: runtime.stuck_task_timeout_sec.unwrap_or(900),
-                request_timeout_sec: request_timeout_sec.max(DEFAULT_REQUEST_TIMEOUT_SEC),
+                request_timeout_sec: effective_request_timeout_sec,
                 file_stability_delay_ms: runtime.file_stability_delay_ms.unwrap_or(1000),
+                worker_lease_sec,
+                worker_heartbeat_sec,
                 worker_pools: build_worker_pools_config(runtime.worker_pools, issues),
             }
         }
@@ -1016,6 +1047,12 @@ stages:
 
         assert!(loaded.validation.is_valid, "{:?}", loaded.validation.issues);
         assert_eq!(config.stages[0].resource_class, ResourceClass::LocalLlm);
+        assert_eq!(
+            config.runtime.request_timeout_sec,
+            DEFAULT_REQUEST_TIMEOUT_SEC
+        );
+        assert_eq!(config.runtime.worker_lease_sec, 1800);
+        assert_eq!(config.runtime.worker_heartbeat_sec, 30);
     }
 
     #[test]
@@ -1076,6 +1113,8 @@ project:
   workdir: .
 runtime:
   request_timeout_sec: 300
+  worker_lease_sec: 2400
+  worker_heartbeat_sec: 15
   worker_pools:
     default:
       concurrency: 10
@@ -1091,6 +1130,8 @@ stages:
         let config = loaded.config.expect("config");
 
         assert!(loaded.validation.is_valid, "{:?}", loaded.validation.issues);
+        assert_eq!(config.runtime.worker_lease_sec, 2400);
+        assert_eq!(config.runtime.worker_heartbeat_sec, 15);
         assert_eq!(config.runtime.worker_pools.default.concurrency, 10);
         assert_eq!(config.runtime.worker_pools.local_llm.concurrency, 1);
     }

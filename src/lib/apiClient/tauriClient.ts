@@ -19,6 +19,7 @@ import type {
   OpenEntityPathResult,
   PipelineConfigDraft,
   PipelineEditorStateResult,
+  RecoverExpiredWorkerLeasesResult,
   ReconcileStuckTasksResult,
   RegisterS3SourceArtifactRequest,
   RegisterS3SourceArtifactResult,
@@ -42,6 +43,7 @@ import type {
   UpdateStageNextStageResult,
   UpdateWorkspaceRequest,
   ValidatePipelineConfigDraftResult,
+  WorkerSummaryResult,
   WorkspaceExplorerResult,
   WorkspaceMutationResult,
   WorkspaceRegistryEntryResult,
@@ -277,6 +279,30 @@ export const tauriClient: BeehiveApiClient = {
       maxWaves,
       maxTasksPerWave,
       stopOnFirstFailure,
+    });
+  },
+  getWorkerSummary(workspaceId: string): Promise<WorkerSummaryResult> {
+    return Promise.resolve({
+      summary: null,
+      errors: [
+        {
+          code: "worker_summary_http_only",
+          message: `Worker summary for '${workspaceId}' is available through the HTTP API.`,
+          path: null,
+        },
+      ],
+    });
+  },
+  recoverExpiredWorkerLeases(workspaceId: string): Promise<RecoverExpiredWorkerLeasesResult> {
+    return Promise.resolve({
+      recovered: 0,
+      errors: [
+        {
+          code: "worker_recovery_http_only",
+          message: `Worker lease recovery for '${workspaceId}' is available through the HTTP API.`,
+          path: null,
+        },
+      ],
     });
   },
   runEntityStage(path: string, entityId: string, stageId: string): Promise<RunEntityStageResult> {

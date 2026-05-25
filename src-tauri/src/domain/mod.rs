@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const DEFAULT_REQUEST_TIMEOUT_SEC: u64 = 300;
+pub const DEFAULT_WORKER_HEARTBEAT_SEC: u64 = 30;
+pub const MIN_WORKER_LEASE_SEC: u64 = 1800;
 pub const MAX_WORKER_POOL_CONCURRENCY: u32 = 128;
 
 #[allow(dead_code)]
@@ -77,9 +79,21 @@ impl ResourceClass {
         }
     }
 
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "default" => Some(Self::Default),
+            "local_llm" => Some(Self::LocalLlm),
+            _ => None,
+        }
+    }
+
     pub fn uses_local_llm(&self) -> bool {
         matches!(self, Self::LocalLlm)
     }
+}
+
+pub fn default_worker_lease_sec(request_timeout_sec: u64) -> u64 {
+    (request_timeout_sec + 300).max(MIN_WORKER_LEASE_SEC)
 }
 
 impl Default for ResourceClass {
@@ -125,6 +139,8 @@ pub struct RuntimeConfig {
     pub stuck_task_timeout_sec: u64,
     pub request_timeout_sec: u64,
     pub file_stability_delay_ms: u64,
+    pub worker_lease_sec: u64,
+    pub worker_heartbeat_sec: u64,
     #[serde(default)]
     pub worker_pools: WorkerPoolsConfig,
 }
@@ -137,6 +153,8 @@ impl Default for RuntimeConfig {
             stuck_task_timeout_sec: 900,
             request_timeout_sec: DEFAULT_REQUEST_TIMEOUT_SEC,
             file_stability_delay_ms: 1000,
+            worker_lease_sec: default_worker_lease_sec(DEFAULT_REQUEST_TIMEOUT_SEC),
+            worker_heartbeat_sec: DEFAULT_WORKER_HEARTBEAT_SEC,
             worker_pools: WorkerPoolsConfig::default(),
         }
     }
@@ -264,6 +282,8 @@ pub struct RuntimeConfigDraft {
     pub stuck_task_timeout_sec: i64,
     pub request_timeout_sec: i64,
     pub file_stability_delay_ms: i64,
+    pub worker_lease_sec: i64,
+    pub worker_heartbeat_sec: i64,
     #[serde(default)]
     pub worker_pools: WorkerPoolsConfig,
 }
@@ -721,6 +741,56 @@ pub struct RuntimeSummary {
     pub entities_by_status: Vec<StatusCount>,
     pub execution_status_counts: Vec<StatusCount>,
     pub last_reconciliation_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerPoolRuntimeSummary {
+    pub resource_class: ResourceClass,
+    pub configured_concurrency: u32,
+    pub active_leases: u64,
+    pub expired_leases: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerLeaseRecord {
+    pub lease_id: String,
+    pub state_id: i64,
+    pub entity_id: String,
+    pub entity_file_id: i64,
+    pub stage_id: String,
+    pub resource_class: ResourceClass,
+    pub worker_id: String,
+    pub status: String,
+    pub run_id: Option<String>,
+    pub leased_at: String,
+    pub lease_until: String,
+    pub heartbeat_at: String,
+    pub released_at: Option<String>,
+    pub release_reason: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerSummary {
+    pub worker_lease_sec: u64,
+    pub worker_heartbeat_sec: u64,
+    pub pools: Vec<WorkerPoolRuntimeSummary>,
+    pub active_leases_total: u64,
+    pub expired_leases_total: u64,
+    pub last_recovery_at: Option<String>,
+    pub recent_leases: Vec<WorkerLeaseRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerSummaryResult {
+    pub summary: Option<WorkerSummary>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecoverExpiredWorkerLeasesResult {
+    pub recovered: u64,
+    pub errors: Vec<CommandErrorInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -17,6 +17,7 @@ import type {
   OpenEntityPathResult,
   PipelineConfigDraft,
   PipelineEditorStateResult,
+  RecoverExpiredWorkerLeasesResult,
   ReconcileStuckTasksResult,
   RegisterS3SourceArtifactRequest,
   RegisterS3SourceArtifactResult,
@@ -40,6 +41,7 @@ import type {
   UpdateStageNextStageResult,
   UpdateWorkspaceRequest,
   ValidatePipelineConfigDraftResult,
+  WorkerSummaryResult,
   WorkspaceExplorerResult,
   WorkspaceMutationResult,
   WorkspaceRegistryEntryResult,
@@ -311,6 +313,12 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
         max_tasks_per_wave: maxTasksPerWave,
         stop_on_first_failure: stopOnFirstFailure,
       }),
+    getWorkerSummary: (workspaceId: string): Promise<WorkerSummaryResult> =>
+      fetchJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/workers/summary`),
+    recoverExpiredWorkerLeases: (
+      workspaceId: string,
+    ): Promise<RecoverExpiredWorkerLeasesResult> =>
+      postJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/workers/recover-expired-leases`),
     runEntityStage: (
       path: string,
       _entityId: string,
