@@ -1,6 +1,7 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::database;
@@ -10,6 +11,8 @@ use crate::services::{runtime, workspaces};
 
 const DEFAULT_IDLE_SLEEP_MS: u64 = 1000;
 const DEFAULT_RECOVERY_INTERVAL_SEC: u64 = 30;
+const WORKER_CONTEXT_LOG_INTERVAL_SEC: u64 = 60;
+const WORKER_IDLE_LOG_INTERVAL_SEC: u64 = 60;
 pub(crate) const BROAD_RUN_DISABLED_CODE: &str = "workers_enabled_broad_run_disabled";
 pub(crate) const BROAD_RUN_DISABLED_MESSAGE: &str =
     "Workers are enabled for this workspace. Use selected run or worker pools instead.";
@@ -25,7 +28,7 @@ struct WorkerEnvConfig {
 }
 
 pub(crate) fn worker_summary(workspace_id: &str) -> Result<WorkerSummary, String> {
-    let context = runtime::load_workspace_context(workspace_id)?;
+    let context = runtime::load_worker_runtime_context(workspace_id)?;
     let mut summary = database::get_worker_summary(&context.database_path, &context.config)?;
     summary.workers_enabled = workspace_workers_enabled(workspace_id);
     summary.broad_runs_disabled = summary.workers_enabled;
@@ -35,7 +38,7 @@ pub(crate) fn worker_summary(workspace_id: &str) -> Result<WorkerSummary, String
 }
 
 pub(crate) fn recover_expired_leases(workspace_id: &str) -> Result<u64, String> {
-    let context = runtime::load_workspace_context(workspace_id)?;
+    let context = runtime::load_worker_runtime_context(workspace_id)?;
     database::recover_expired_worker_leases(&context.database_path)
 }
 
@@ -43,7 +46,7 @@ pub(crate) fn start_workers(
     workspace_id: &str,
     input: &WorkerStartRequest,
 ) -> Result<WorkerSummary, String> {
-    let context = runtime::load_workspace_context(workspace_id)?;
+    let context = runtime::load_worker_runtime_context(workspace_id)?;
     let env_config = WorkerEnvConfig::from_env()?;
     let default_limit = effective_concurrency(
         context.config.runtime.worker_pools.default.concurrency,
@@ -62,7 +65,7 @@ pub(crate) fn start_workers(
 }
 
 pub(crate) fn stop_workers(workspace_id: &str) -> Result<WorkerSummary, String> {
-    let context = runtime::load_workspace_context(workspace_id)?;
+    let context = runtime::load_worker_runtime_context(workspace_id)?;
     database::set_all_worker_pools_stopped(&context.database_path)?;
     worker_summary(workspace_id)
 }
@@ -72,7 +75,7 @@ pub(crate) fn update_pool_desired_concurrency(
     resource_class: ResourceClass,
     desired_concurrency: u32,
 ) -> Result<WorkerSummary, String> {
-    let context = runtime::load_workspace_context(workspace_id)?;
+    let context = runtime::load_worker_runtime_context(workspace_id)?;
     let env_config = WorkerEnvConfig::from_env()?;
     let configured = match resource_class {
         ResourceClass::Default => context.config.runtime.worker_pools.default.concurrency,
@@ -92,13 +95,13 @@ pub(crate) fn update_pool_desired_concurrency(
 }
 
 pub(crate) fn pause_all(workspace_id: &str, reason: Option<&str>) -> Result<WorkerSummary, String> {
-    let context = runtime::load_workspace_context(workspace_id)?;
+    let context = runtime::load_worker_runtime_context(workspace_id)?;
     database::set_all_worker_pools_paused(&context.database_path, true, reason)?;
     worker_summary(workspace_id)
 }
 
 pub(crate) fn resume_all(workspace_id: &str) -> Result<WorkerSummary, String> {
-    let context = runtime::load_workspace_context(workspace_id)?;
+    let context = runtime::load_worker_runtime_context(workspace_id)?;
     database::set_all_worker_pools_paused(&context.database_path, false, None)?;
     worker_summary(workspace_id)
 }
@@ -108,7 +111,7 @@ pub(crate) fn pause_pool(
     resource_class: ResourceClass,
     reason: Option<&str>,
 ) -> Result<WorkerSummary, String> {
-    let context = runtime::load_workspace_context(workspace_id)?;
+    let context = runtime::load_worker_runtime_context(workspace_id)?;
     database::set_worker_pool_paused(&context.database_path, resource_class, true, reason)?;
     worker_summary(workspace_id)
 }
@@ -117,7 +120,7 @@ pub(crate) fn resume_pool(
     workspace_id: &str,
     resource_class: ResourceClass,
 ) -> Result<WorkerSummary, String> {
-    let context = runtime::load_workspace_context(workspace_id)?;
+    let context = runtime::load_worker_runtime_context(workspace_id)?;
     database::set_worker_pool_paused(&context.database_path, resource_class, false, None)?;
     worker_summary(workspace_id)
 }
@@ -127,7 +130,7 @@ pub(crate) fn release_lease(
     lease_id: &str,
     reason: &str,
 ) -> Result<bool, String> {
-    let context = runtime::load_workspace_context(workspace_id)?;
+    let context = runtime::load_worker_runtime_context(workspace_id)?;
     database::release_worker_lease(&context.database_path, lease_id, reason)
 }
 
@@ -225,55 +228,121 @@ fn worker_loop(
     let idle_sleep = Duration::from_millis(config.idle_sleep_ms.max(100));
     let recovery_interval = Duration::from_secs(config.recovery_interval_sec.max(1));
     let mut last_recovery = Instant::now() - recovery_interval;
+    let context_log_interval = Duration::from_secs(WORKER_CONTEXT_LOG_INTERVAL_SEC);
+    let idle_log_interval = Duration::from_secs(WORKER_IDLE_LOG_INTERVAL_SEC);
+    let mut last_context_log = Instant::now() - context_log_interval;
+    let mut last_context_error_log = Instant::now() - context_log_interval;
+    let mut last_idle_log = Instant::now() - idle_log_interval;
+
+    log_worker_event(
+        "worker_loop_started",
+        Some(&worker_id),
+        Some(json!({
+            "workspace_id": workspace_id,
+            "resource_class": resource_class.as_str(),
+        })),
+    );
 
     loop {
-        let context = match runtime::load_workspace_context(&workspace_id) {
-            Ok(context) => context,
+        let log_context_loaded = last_context_log.elapsed() >= context_log_interval;
+        let summary = match run_worker_loop_once(
+            &workspace_id,
+            resource_class,
+            &worker_id,
+            &mut last_recovery,
+            recovery_interval,
+            log_context_loaded,
+        ) {
+            Ok(summary) => summary,
             Err(message) => {
-                log_worker_error(&worker_id, &message);
+                if last_context_error_log.elapsed() >= context_log_interval {
+                    log_worker_event(
+                        "worker_context_error",
+                        Some(&worker_id),
+                        Some(json!({
+                            "workspace_id": workspace_id,
+                            "resource_class": resource_class.as_str(),
+                            "message": message,
+                        })),
+                    );
+                    last_context_error_log = Instant::now();
+                }
                 thread::sleep(idle_sleep);
                 continue;
             }
         };
-        if last_recovery.elapsed() >= recovery_interval {
-            if let Err(message) = database::recover_expired_worker_leases(&context.database_path) {
-                log_worker_error(&worker_id, &message);
-            }
-            last_recovery = Instant::now();
+        if log_context_loaded {
+            last_context_log = Instant::now();
         }
-        match database::worker_pool_is_paused(&context.database_path, resource_class) {
-            Ok(true) => {
-                thread::sleep(idle_sleep);
-                continue;
+        if worker_was_idle(&summary) {
+            if last_idle_log.elapsed() >= idle_log_interval {
+                log_worker_event(
+                    "worker_claim_idle",
+                    Some(&worker_id),
+                    Some(json!({
+                        "workspace_id": workspace_id,
+                        "resource_class": resource_class.as_str(),
+                    })),
+                );
+                last_idle_log = Instant::now();
             }
-            Ok(false) => {}
-            Err(message) => {
-                log_worker_error(&worker_id, &message);
-                thread::sleep(idle_sleep);
-                continue;
-            }
-        }
-
-        let summary = executor::run_worker_task(
-            &context.workdir_path,
-            &context.database_path,
-            resource_class,
-            &worker_id,
-            context.config.runtime.request_timeout_sec,
-            context.config.runtime.worker_lease_sec,
-            context.config.runtime.worker_heartbeat_sec,
-            context.config.runtime.scheduling_policy,
-            context.config.runtime.file_stability_delay_ms,
-        );
-        match summary {
-            Ok(summary) if worker_was_idle(&summary) => thread::sleep(idle_sleep),
-            Ok(_) => {}
-            Err(message) => {
-                log_worker_error(&worker_id, &message);
-                thread::sleep(idle_sleep);
-            }
+            thread::sleep(idle_sleep);
         }
     }
+}
+
+fn run_worker_loop_once(
+    workspace_id: &str,
+    resource_class: ResourceClass,
+    worker_id: &str,
+    last_recovery: &mut Instant,
+    recovery_interval: Duration,
+    log_context_loaded: bool,
+) -> Result<RunDueTasksSummary, String> {
+    let context = runtime::load_worker_runtime_context(workspace_id)?;
+    if log_context_loaded {
+        log_worker_event(
+            "worker_context_loaded",
+            Some(worker_id),
+            Some(json!({
+                "workspace_id": workspace_id,
+                "resource_class": resource_class.as_str(),
+                "database_path": context.database_path.display().to_string(),
+            })),
+        );
+    }
+    if last_recovery.elapsed() >= recovery_interval {
+        if let Err(message) = database::recover_expired_worker_leases(&context.database_path) {
+            log_worker_event(
+                "worker_context_error",
+                Some(worker_id),
+                Some(json!({
+                    "workspace_id": workspace_id,
+                    "resource_class": resource_class.as_str(),
+                    "message": message,
+                    "phase": "recover_expired_worker_leases",
+                })),
+            );
+        }
+        *last_recovery = Instant::now();
+    }
+    match database::worker_pool_is_paused(&context.database_path, resource_class) {
+        Ok(true) => return Ok(RunDueTasksSummary::default()),
+        Ok(false) => {}
+        Err(message) => return Err(message),
+    }
+
+    executor::run_worker_task(
+        &context.workdir_path,
+        &context.database_path,
+        resource_class,
+        worker_id,
+        context.config.runtime.request_timeout_sec,
+        context.config.runtime.worker_lease_sec,
+        context.config.runtime.worker_heartbeat_sec,
+        context.config.runtime.scheduling_policy,
+        context.config.runtime.file_stability_delay_ms,
+    )
 }
 
 fn worker_was_idle(summary: &RunDueTasksSummary) -> bool {
@@ -434,13 +503,140 @@ fn log_worker_manager(code: &str, message: &str) {
     eprintln!(r#"{{"event":"worker_manager","code":"{code}","message":"{message}"}}"#);
 }
 
-fn log_worker_error(worker_id: &str, message: &str) {
-    eprintln!(r#"{{"event":"worker_error","worker_id":"{worker_id}","message":"{message}"}}"#);
+fn log_worker_event(code: &str, worker_id: Option<&str>, payload: Option<serde_json::Value>) {
+    let mut event = json!({
+        "event": "worker_lifecycle",
+        "code": code,
+    });
+    if let Some(worker_id) = worker_id {
+        event["worker_id"] = json!(worker_id);
+    }
+    if let Some(payload) = payload {
+        event["payload"] = payload;
+    }
+    eprintln!("{event}");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database;
+    use crate::discovery::scan_workspace;
+    use crate::services::{runtime, workspaces};
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::path::Path;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct MockWebhook {
+        url: String,
+        request_count: Arc<AtomicUsize>,
+    }
+
+    fn with_test_env<F>(registry_path: &Path, root: &Path, run: F)
+    where
+        F: FnOnce(),
+    {
+        let _guard = workspaces::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_registry = std::env::var_os("BEEHIVE_WORKSPACES_CONFIG");
+        let previous_root = std::env::var_os("BEEHIVE_WORKSPACES_ROOT");
+        std::env::set_var("BEEHIVE_WORKSPACES_CONFIG", registry_path);
+        std::env::set_var("BEEHIVE_WORKSPACES_ROOT", root);
+        run();
+        restore_env_var("BEEHIVE_WORKSPACES_CONFIG", previous_registry.as_deref());
+        restore_env_var("BEEHIVE_WORKSPACES_ROOT", previous_root.as_deref());
+    }
+
+    fn restore_env_var(name: &str, value: Option<&OsStr>) {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+
+    fn mock_webhook() -> MockWebhook {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock webhook");
+        let address = listener.local_addr().expect("mock address");
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&request_count);
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0_u8; 4096];
+                let _ = stream.read(&mut buffer);
+                count.fetch_add(1, Ordering::SeqCst);
+                let body = r#"{"success":true}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        MockWebhook {
+            url: format!("http://{address}/webhook"),
+            request_count,
+        }
+    }
+
+    fn write_registry(registry_path: &Path, workdir: &Path) {
+        fs::write(
+            registry_path,
+            format!(
+                r#"
+workspaces:
+  - id: smoke
+    name: Smoke
+    provider: s3
+    bucket: steos-s3-data
+    workspace_prefix: smoke
+    region: ru-1
+    endpoint: https://s3.example
+    workdir_path: {}
+    pipeline_path: {}
+    database_path: {}
+"#,
+                workdir.display(),
+                workdir.join("pipeline.yaml").display(),
+                workdir.join("app.db").display()
+            ),
+        )
+        .expect("registry");
+    }
+
+    fn write_pipeline(workdir: &Path, workflow_url: &str) {
+        fs::create_dir_all(workdir).expect("workdir");
+        fs::write(
+            workdir.join("pipeline.yaml"),
+            format!(
+                r#"
+project:
+  name: smoke
+  workdir: .
+runtime:
+  request_timeout_sec: 5
+  file_stability_delay_ms: 0
+  worker_pools:
+    default:
+      concurrency: 1
+    local_llm:
+      concurrency: 0
+stages:
+  - id: stage_0
+    input_folder: stages/stage_0
+    workflow_url: {workflow_url}
+"#
+            ),
+        )
+        .expect("pipeline");
+    }
 
     #[test]
     fn workers_disabled_by_default_and_require_scope() {
@@ -465,5 +661,45 @@ mod tests {
 
         let all = vec!["all".to_string()];
         assert!(workers_enabled_for_scope(true, Some(&all), "workspace-c"));
+    }
+
+    #[test]
+    fn worker_loop_once_reaches_claim_and_calls_webhook_without_bootstrap_loop() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().join("root");
+        let workdir = root.join("smoke");
+        let registry_path = tempdir.path().join("workspaces.yaml");
+        let webhook = mock_webhook();
+        write_pipeline(&workdir, &webhook.url);
+        write_registry(&registry_path, &workdir);
+
+        with_test_env(&registry_path, &root, || {
+            let context = runtime::load_workspace_context("smoke").expect("heavy bootstrap once");
+            let source_path = workdir.join("stages/stage_0/entity-1.json");
+            fs::create_dir_all(source_path.parent().expect("source parent")).expect("source dir");
+            fs::write(
+                &source_path,
+                r#"{"id":"entity-1","payload":{"title":"hello"},"meta":{}}"#,
+            )
+            .expect("source file");
+            scan_workspace(&workdir, &context.database_path).expect("scan");
+            database::set_all_worker_pools_started(&context.database_path, 1, 0)
+                .expect("start pool");
+
+            let mut last_recovery = Instant::now();
+            let summary = run_worker_loop_once(
+                "smoke",
+                ResourceClass::Default,
+                "test-worker",
+                &mut last_recovery,
+                Duration::from_secs(DEFAULT_RECOVERY_INTERVAL_SEC),
+                false,
+            )
+            .expect("worker iteration");
+
+            assert_eq!(summary.claimed, 1);
+            assert_eq!(summary.succeeded, 1);
+            assert_eq!(webhook.request_count.load(Ordering::SeqCst), 1);
+        });
     }
 }

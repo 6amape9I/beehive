@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -19,6 +21,12 @@ const DEFAULT_WORKSPACES_ROOT: &str = "/tmp/beehive-web-workspaces";
 const DEFAULT_S3_BUCKET: &str = "steos-s3-data";
 const DEFAULT_S3_REGION: &str = "ru-1";
 const DEFAULT_S3_ENDPOINT: &str = "https://s3.ru-1.storage.selcloud.ru";
+
+#[cfg(test)]
+pub(crate) fn env_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkspaceRegistryFile {
@@ -788,18 +796,12 @@ mod tests {
     use crate::domain::CreateS3StageRequest;
     use crate::services::pipeline;
     use std::ffi::OsStr;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn with_test_env<F>(registry_path: &Path, root: &Path, run: F)
     where
         F: FnOnce(),
     {
-        let _guard = env_lock()
+        let _guard = env_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous_registry = std::env::var_os("BEEHIVE_WORKSPACES_CONFIG");

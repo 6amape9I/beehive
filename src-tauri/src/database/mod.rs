@@ -208,6 +208,24 @@ pub fn bootstrap_database(path: &Path, config: &PipelineConfig) -> Result<Databa
     })
 }
 
+pub(crate) fn verify_worker_runtime_database(path: &Path) -> Result<u32, String> {
+    if !path.exists() {
+        return Err(format!(
+            "workspace_not_bootstrapped_for_workers: SQLite database '{}' does not exist; open or bootstrap the workspace before starting workers.",
+            path.display()
+        ));
+    }
+    let connection = open_readonly_connection(path)?;
+    let schema_version = current_schema_version(&connection)?;
+    if schema_version != SCHEMA_VERSION {
+        return Err(format!(
+            "workspace_not_bootstrapped_for_workers: SQLite schema version '{}' is not current '{}'; open or bootstrap the workspace before starting workers.",
+            schema_version, SCHEMA_VERSION
+        ));
+    }
+    Ok(schema_version)
+}
+
 fn sync_storage_settings(connection: &Connection, config: &PipelineConfig) -> Result<(), String> {
     let now = Utc::now().to_rfc3339();
     set_setting(connection, "project_name", &config.project.name, &now)?;
@@ -5500,6 +5518,10 @@ fn migrate_v11_to_v12(connection: &mut Connection) -> Result<(), String> {
 }
 
 fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Result<(), String> {
+    retry_sqlite_busy_operation(|| sync_stages_once(connection, stages))
+}
+
+fn sync_stages_once(connection: &mut Connection, stages: &[StageDefinition]) -> Result<(), String> {
     let now = Utc::now().to_rfc3339();
     let transaction = connection
         .transaction()

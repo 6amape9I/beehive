@@ -256,6 +256,30 @@ pub fn run_worker_task(
     let Some(task) = tasks.into_iter().next() else {
         return Ok(RunDueTasksSummary::default());
     };
+    let log_state_id = task.state_id;
+    let log_entity_id = task.entity_id.clone();
+    let log_stage_id = task.stage_id.clone();
+    let log_lease_id = task.lease_id.clone();
+    log_worker_task_event(
+        "worker_claimed_task",
+        worker_id,
+        resource_class,
+        log_state_id,
+        &log_entity_id,
+        &log_stage_id,
+        log_lease_id.as_deref(),
+        None,
+    );
+    log_worker_task_event(
+        "worker_task_started",
+        worker_id,
+        resource_class,
+        log_state_id,
+        &log_entity_id,
+        &log_stage_id,
+        log_lease_id.as_deref(),
+        None,
+    );
 
     let (heartbeat_stop_tx, heartbeat_stop_rx) = mpsc::channel();
     let heartbeat_handle = task.lease_id.clone().map(|lease_id| {
@@ -285,18 +309,46 @@ pub fn run_worker_task(
         claimed: 1,
         ..RunDueTasksSummary::default()
     };
-    match outcome {
-        Ok(TaskOutcome::Succeeded) => summary.succeeded = 1,
-        Ok(TaskOutcome::RetryScheduled) => summary.retry_scheduled = 1,
-        Ok(TaskOutcome::Failed) => summary.failed = 1,
-        Ok(TaskOutcome::Blocked) => summary.blocked = 1,
-        Ok(TaskOutcome::Skipped) => summary.skipped = 1,
-        Err(message) => summary.errors.push(CommandErrorInfo {
-            code: "worker_task_execution_failed".to_string(),
-            message,
-            path: None,
-        }),
-    }
+    let outcome_label = match outcome {
+        Ok(TaskOutcome::Succeeded) => {
+            summary.succeeded = 1;
+            "succeeded"
+        }
+        Ok(TaskOutcome::RetryScheduled) => {
+            summary.retry_scheduled = 1;
+            "retry_scheduled"
+        }
+        Ok(TaskOutcome::Failed) => {
+            summary.failed = 1;
+            "failed"
+        }
+        Ok(TaskOutcome::Blocked) => {
+            summary.blocked = 1;
+            "blocked"
+        }
+        Ok(TaskOutcome::Skipped) => {
+            summary.skipped = 1;
+            "skipped"
+        }
+        Err(message) => {
+            summary.errors.push(CommandErrorInfo {
+                code: "worker_task_execution_failed".to_string(),
+                message,
+                path: None,
+            });
+            "error"
+        }
+    };
+    log_worker_task_event(
+        "worker_task_finished",
+        worker_id,
+        resource_class,
+        log_state_id,
+        &log_entity_id,
+        &log_stage_id,
+        log_lease_id.as_deref(),
+        Some(outcome_label),
+    );
     Ok(summary)
 }
 
@@ -310,6 +362,34 @@ pub fn reconcile_stuck_tasks(
         stuck_task_timeout_sec,
         &Utc::now().to_rfc3339(),
     )
+}
+
+fn log_worker_task_event(
+    code: &str,
+    worker_id: &str,
+    resource_class: ResourceClass,
+    state_id: i64,
+    entity_id: &str,
+    stage_id: &str,
+    lease_id: Option<&str>,
+    outcome: Option<&str>,
+) {
+    let mut event = json!({
+        "event": "worker_lifecycle",
+        "code": code,
+        "worker_id": worker_id,
+        "resource_class": resource_class.as_str(),
+        "state_id": state_id,
+        "entity_id": entity_id,
+        "stage_id": stage_id,
+    });
+    if let Some(lease_id) = lease_id {
+        event["lease_id"] = json!(lease_id);
+    }
+    if let Some(outcome) = outcome {
+        event["outcome"] = json!(outcome);
+    }
+    eprintln!("{event}");
 }
 
 enum TaskOutcome {
