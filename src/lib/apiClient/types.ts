@@ -150,6 +150,17 @@ export interface BeehiveApiClient {
     stopOnFirstFailure: boolean,
   ): Promise<RunSelectedPipelineWavesResult>;
   getWorkerSummary(workspaceId: string): Promise<WorkerSummaryResult>;
+  startWorkers(
+    workspaceId: string,
+    defaultWorkers: number,
+    localLlmWorkers: number,
+  ): Promise<WorkerPoolControlResult>;
+  stopWorkers(workspaceId: string): Promise<WorkerPoolControlResult>;
+  updateWorkerPool(
+    workspaceId: string,
+    resourceClass: string,
+    desiredConcurrency: number,
+  ): Promise<WorkerPoolControlResult>;
   recoverExpiredWorkerLeases(workspaceId: string): Promise<RecoverExpiredWorkerLeasesResult>;
   pauseWorkers(workspaceId: string, reason?: string | null): Promise<WorkerPoolControlResult>;
   resumeWorkers(workspaceId: string): Promise<WorkerPoolControlResult>;

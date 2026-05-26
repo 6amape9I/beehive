@@ -295,6 +295,50 @@ export const tauriClient: BeehiveApiClient = {
       ],
     });
   },
+  startWorkers(
+    workspaceId: string,
+    _defaultWorkers: number,
+    _localLlmWorkers: number,
+  ): Promise<WorkerPoolControlResult> {
+    return Promise.resolve({
+      summary: null,
+      errors: [
+        {
+          code: "worker_start_http_only",
+          message: `Worker start for '${workspaceId}' is available through the HTTP API.`,
+          path: null,
+        },
+      ],
+    });
+  },
+  stopWorkers(workspaceId: string): Promise<WorkerPoolControlResult> {
+    return Promise.resolve({
+      summary: null,
+      errors: [
+        {
+          code: "worker_stop_http_only",
+          message: `Worker stop for '${workspaceId}' is available through the HTTP API.`,
+          path: null,
+        },
+      ],
+    });
+  },
+  updateWorkerPool(
+    workspaceId: string,
+    resourceClass: string,
+    _desiredConcurrency: number,
+  ): Promise<WorkerPoolControlResult> {
+    return Promise.resolve({
+      summary: null,
+      errors: [
+        {
+          code: "worker_pool_update_http_only",
+          message: `Worker pool update for '${workspaceId}/${resourceClass}' is available through the HTTP API.`,
+          path: null,
+        },
+      ],
+    });
+  },
   recoverExpiredWorkerLeases(workspaceId: string): Promise<RecoverExpiredWorkerLeasesResult> {
     return Promise.resolve({
       recovered: 0,

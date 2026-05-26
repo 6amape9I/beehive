@@ -41,6 +41,8 @@ export interface WorkerPoolsConfig {
   local_llm: WorkerPoolConfig;
 }
 
+export type SchedulingPolicy = "depth_first" | "fifo";
+
 export interface RuntimeConfig {
   scan_interval_sec: number;
   max_parallel_tasks: number;
@@ -49,6 +51,7 @@ export interface RuntimeConfig {
   file_stability_delay_ms: number;
   worker_lease_sec: number;
   worker_heartbeat_sec: number;
+  scheduling_policy: SchedulingPolicy;
   worker_pools: WorkerPoolsConfig;
 }
 
@@ -99,6 +102,7 @@ export interface RuntimeConfigDraft {
   file_stability_delay_ms: number;
   worker_lease_sec: number;
   worker_heartbeat_sec: number;
+  scheduling_policy: SchedulingPolicy;
   worker_pools: WorkerPoolsConfig;
 }
 
@@ -499,6 +503,9 @@ export interface RuntimeSummary {
 export interface WorkerPoolRuntimeSummary {
   resource_class: ResourceClass;
   configured_concurrency: number;
+  desired_concurrency: number;
+  effective_concurrency: number;
+  is_started: boolean;
   active_leases: number;
   expired_leases: number;
   pending_count: number;
@@ -536,8 +543,10 @@ export interface WorkerLeaseRecord {
 export interface WorkerSummary {
   worker_lease_sec: number;
   worker_heartbeat_sec: number;
+  scheduling_policy: SchedulingPolicy;
   workers_enabled: boolean;
   broad_runs_disabled: boolean;
+  runtime_status: string;
   paused_all: boolean;
   pools: WorkerPoolRuntimeSummary[];
   active_leases_total: number;

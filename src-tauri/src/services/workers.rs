@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::database;
-use crate::domain::{ResourceClass, RunDueTasksSummary, WorkerSummary};
+use crate::domain::{ResourceClass, RunDueTasksSummary, WorkerStartRequest, WorkerSummary};
 use crate::executor;
 use crate::services::{runtime, workspaces};
 
@@ -29,12 +29,66 @@ pub(crate) fn worker_summary(workspace_id: &str) -> Result<WorkerSummary, String
     let mut summary = database::get_worker_summary(&context.database_path, &context.config)?;
     summary.workers_enabled = workspace_workers_enabled(workspace_id);
     summary.broad_runs_disabled = summary.workers_enabled;
+    apply_env_effective_concurrency(&mut summary, &context.config.runtime.worker_pools)?;
+    summary.runtime_status = runtime_status(&summary);
     Ok(summary)
 }
 
 pub(crate) fn recover_expired_leases(workspace_id: &str) -> Result<u64, String> {
     let context = runtime::load_workspace_context(workspace_id)?;
     database::recover_expired_worker_leases(&context.database_path)
+}
+
+pub(crate) fn start_workers(
+    workspace_id: &str,
+    input: &WorkerStartRequest,
+) -> Result<WorkerSummary, String> {
+    let context = runtime::load_workspace_context(workspace_id)?;
+    let env_config = WorkerEnvConfig::from_env()?;
+    let default_limit = effective_concurrency(
+        context.config.runtime.worker_pools.default.concurrency,
+        env_config.default_concurrency,
+    );
+    let local_llm_limit = effective_concurrency(
+        context.config.runtime.worker_pools.local_llm.concurrency,
+        env_config.local_llm_concurrency,
+    );
+    database::set_all_worker_pools_started(
+        &context.database_path,
+        input.default_workers.min(default_limit),
+        input.local_llm_workers.min(local_llm_limit),
+    )?;
+    worker_summary(workspace_id)
+}
+
+pub(crate) fn stop_workers(workspace_id: &str) -> Result<WorkerSummary, String> {
+    let context = runtime::load_workspace_context(workspace_id)?;
+    database::set_all_worker_pools_stopped(&context.database_path)?;
+    worker_summary(workspace_id)
+}
+
+pub(crate) fn update_pool_desired_concurrency(
+    workspace_id: &str,
+    resource_class: ResourceClass,
+    desired_concurrency: u32,
+) -> Result<WorkerSummary, String> {
+    let context = runtime::load_workspace_context(workspace_id)?;
+    let env_config = WorkerEnvConfig::from_env()?;
+    let configured = match resource_class {
+        ResourceClass::Default => context.config.runtime.worker_pools.default.concurrency,
+        ResourceClass::LocalLlm => context.config.runtime.worker_pools.local_llm.concurrency,
+    };
+    let env_value = match resource_class {
+        ResourceClass::Default => env_config.default_concurrency,
+        ResourceClass::LocalLlm => env_config.local_llm_concurrency,
+    };
+    let limit = effective_concurrency(configured, env_value);
+    database::update_worker_pool_desired_concurrency(
+        &context.database_path,
+        resource_class,
+        desired_concurrency.min(limit),
+    )?;
+    worker_summary(workspace_id)
 }
 
 pub(crate) fn pause_all(workspace_id: &str, reason: Option<&str>) -> Result<WorkerSummary, String> {
@@ -208,6 +262,7 @@ fn worker_loop(
             context.config.runtime.request_timeout_sec,
             context.config.runtime.worker_lease_sec,
             context.config.runtime.worker_heartbeat_sec,
+            context.config.runtime.scheduling_policy,
             context.config.runtime.file_stability_delay_ms,
         );
         match summary {
@@ -223,6 +278,53 @@ fn worker_loop(
 
 fn worker_was_idle(summary: &RunDueTasksSummary) -> bool {
     summary.claimed == 0 && summary.errors.is_empty()
+}
+
+fn apply_env_effective_concurrency(
+    summary: &mut WorkerSummary,
+    configured: &crate::domain::WorkerPoolsConfig,
+) -> Result<(), String> {
+    let env_config = WorkerEnvConfig::from_env()?;
+    for pool in &mut summary.pools {
+        let env_value = match pool.resource_class {
+            ResourceClass::Default => env_config.default_concurrency,
+            ResourceClass::LocalLlm => env_config.local_llm_concurrency,
+        };
+        let yaml_limit = match pool.resource_class {
+            ResourceClass::Default => configured.default.concurrency,
+            ResourceClass::LocalLlm => configured.local_llm.concurrency,
+        };
+        let upper_bound = effective_concurrency(yaml_limit, env_value);
+        pool.effective_concurrency = if pool.is_started {
+            pool.desired_concurrency.min(upper_bound)
+        } else {
+            0
+        };
+    }
+    Ok(())
+}
+
+fn runtime_status(summary: &WorkerSummary) -> String {
+    let any_started = summary.pools.iter().any(|pool| pool.is_started);
+    let any_active = summary.active_leases_total > 0;
+    let all_started_paused = summary
+        .pools
+        .iter()
+        .filter(|pool| pool.is_started)
+        .all(|pool| pool.is_paused);
+    if !summary.workers_enabled {
+        return "stopped".to_string();
+    }
+    if any_started && all_started_paused {
+        return "paused".to_string();
+    }
+    if any_started {
+        return "running".to_string();
+    }
+    if any_active {
+        return "draining".to_string();
+    }
+    "stopped".to_string()
 }
 
 fn effective_concurrency(configured: u32, env_value: Option<u32>) -> u32 {

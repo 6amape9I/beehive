@@ -6,9 +6,9 @@ use serde::Deserialize;
 
 use crate::domain::{
     default_worker_lease_sec, ConfigValidationIssue, ConfigValidationResult, PipelineConfig,
-    ProjectConfig, ResourceClass, RuntimeConfig, StageDefinition, StorageConfig, StorageProvider,
-    ValidationSeverity, WorkerPoolConfig, WorkerPoolsConfig, DEFAULT_REQUEST_TIMEOUT_SEC,
-    DEFAULT_WORKER_HEARTBEAT_SEC, MAX_WORKER_POOL_CONCURRENCY,
+    ProjectConfig, ResourceClass, RuntimeConfig, SchedulingPolicy, StageDefinition, StorageConfig,
+    StorageProvider, ValidationSeverity, WorkerPoolConfig, WorkerPoolsConfig,
+    DEFAULT_REQUEST_TIMEOUT_SEC, DEFAULT_WORKER_HEARTBEAT_SEC, MAX_WORKER_POOL_CONCURRENCY,
 };
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +34,7 @@ struct RawRuntimeConfig {
     file_stability_delay_ms: Option<u64>,
     worker_lease_sec: Option<u64>,
     worker_heartbeat_sec: Option<u64>,
+    scheduling_policy: Option<String>,
     worker_pools: Option<BTreeMap<String, RawWorkerPoolConfig>>,
 }
 
@@ -88,6 +89,7 @@ runtime:
   file_stability_delay_ms: 1000
   worker_lease_sec: 1800
   worker_heartbeat_sec: 30
+  scheduling_policy: depth_first
   worker_pools:
     default:
       concurrency: 1
@@ -516,6 +518,7 @@ fn build_runtime_config(
                 file_stability_delay_ms: runtime.file_stability_delay_ms.unwrap_or(1000),
                 worker_lease_sec,
                 worker_heartbeat_sec,
+                scheduling_policy: build_scheduling_policy(runtime.scheduling_policy, issues),
                 worker_pools: build_worker_pools_config(runtime.worker_pools, issues),
             }
         }
@@ -529,6 +532,29 @@ fn build_runtime_config(
             RuntimeConfig::default()
         }
     }
+}
+
+fn build_scheduling_policy(
+    raw_policy: Option<String>,
+    issues: &mut Vec<ConfigValidationIssue>,
+) -> SchedulingPolicy {
+    let Some(raw_policy) = raw_policy else {
+        return SchedulingPolicy::DepthFirst;
+    };
+    let normalized = raw_policy.trim();
+    SchedulingPolicy::from_str(normalized).unwrap_or_else(|| {
+        issues.push(issue(
+            ValidationSeverity::Error,
+            "invalid_runtime_scheduling_policy",
+            "runtime.scheduling_policy",
+            format!(
+                "scheduling_policy must be '{}' or '{}'.",
+                SchedulingPolicy::DepthFirst.as_str(),
+                SchedulingPolicy::Fifo.as_str()
+            ),
+        ));
+        SchedulingPolicy::DepthFirst
+    })
 }
 
 fn build_worker_pools_config(
@@ -1101,6 +1127,10 @@ stages:
         let config = loaded.config.expect("config");
 
         assert!(loaded.validation.is_valid, "{:?}", loaded.validation.issues);
+        assert_eq!(
+            config.runtime.scheduling_policy,
+            SchedulingPolicy::DepthFirst
+        );
         assert_eq!(config.runtime.worker_pools.default.concurrency, 1);
         assert_eq!(config.runtime.worker_pools.local_llm.concurrency, 1);
     }
@@ -1113,6 +1143,7 @@ project:
   workdir: .
 runtime:
   request_timeout_sec: 300
+  scheduling_policy: fifo
   worker_lease_sec: 2400
   worker_heartbeat_sec: 15
   worker_pools:
@@ -1130,10 +1161,36 @@ stages:
         let config = loaded.config.expect("config");
 
         assert!(loaded.validation.is_valid, "{:?}", loaded.validation.issues);
+        assert_eq!(config.runtime.scheduling_policy, SchedulingPolicy::Fifo);
         assert_eq!(config.runtime.worker_lease_sec, 2400);
         assert_eq!(config.runtime.worker_heartbeat_sec, 15);
         assert_eq!(config.runtime.worker_pools.default.concurrency, 10);
         assert_eq!(config.runtime.worker_pools.local_llm.concurrency, 1);
+    }
+
+    #[test]
+    fn invalid_scheduling_policy_is_rejected() {
+        let yaml = r#"
+project:
+  name: beehive
+  workdir: .
+runtime:
+  request_timeout_sec: 300
+  scheduling_policy: breadth_first
+stages:
+  - id: terminal
+    input_folder: stages/terminal
+    workflow_url: http://localhost:5678/webhook/terminal
+"#;
+
+        let loaded = parse_pipeline_config(yaml, "now".to_string());
+
+        assert!(!loaded.validation.is_valid);
+        assert!(loaded
+            .validation
+            .issues
+            .iter()
+            .any(|issue| issue.code == "invalid_runtime_scheduling_policy"));
     }
 
     #[test]

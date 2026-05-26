@@ -284,6 +284,7 @@ fn validate_draft(
             file_stability_delay_ms: draft.runtime.file_stability_delay_ms as u64,
             worker_lease_sec: draft.runtime.worker_lease_sec as u64,
             worker_heartbeat_sec: draft.runtime.worker_heartbeat_sec as u64,
+            scheduling_policy: draft.runtime.scheduling_policy,
             worker_pools: draft.runtime.worker_pools.clone(),
         },
         stages: draft
@@ -736,6 +737,7 @@ fn draft_from_config(config: &PipelineConfig) -> PipelineConfigDraft {
             file_stability_delay_ms: config.runtime.file_stability_delay_ms as i64,
             worker_lease_sec: config.runtime.worker_lease_sec as i64,
             worker_heartbeat_sec: config.runtime.worker_heartbeat_sec as i64,
+            scheduling_policy: config.runtime.scheduling_policy,
             worker_pools: config.runtime.worker_pools.clone(),
         },
         stages: config
@@ -945,6 +947,7 @@ mod tests {
                 file_stability_delay_ms: 1000,
                 worker_lease_sec: 1800,
                 worker_heartbeat_sec: 30,
+                scheduling_policy: Default::default(),
                 worker_pools: Default::default(),
             },
             stages,

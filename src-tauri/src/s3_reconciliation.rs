@@ -1444,6 +1444,7 @@ mod tests {
                 file_stability_delay_ms: 0,
                 worker_lease_sec: 1800,
                 worker_heartbeat_sec: 30,
+                scheduling_policy: Default::default(),
                 worker_pools: Default::default(),
             },
             stages: vec![
@@ -1520,6 +1521,7 @@ mod tests {
                 file_stability_delay_ms: 0,
                 worker_lease_sec: 1800,
                 worker_heartbeat_sec: 30,
+                scheduling_policy: Default::default(),
                 worker_pools: Default::default(),
             },
             stages: vec![

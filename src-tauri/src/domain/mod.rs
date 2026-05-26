@@ -106,6 +106,36 @@ fn is_default_resource_class(value: &ResourceClass) -> bool {
     *value == ResourceClass::Default
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SchedulingPolicy {
+    DepthFirst,
+    Fifo,
+}
+
+impl SchedulingPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DepthFirst => "depth_first",
+            Self::Fifo => "fifo",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "depth_first" => Some(Self::DepthFirst),
+            "fifo" => Some(Self::Fifo),
+            _ => None,
+        }
+    }
+}
+
+impl Default for SchedulingPolicy {
+    fn default() -> Self {
+        Self::DepthFirst
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerPoolConfig {
     pub concurrency: u32,
@@ -142,6 +172,8 @@ pub struct RuntimeConfig {
     pub worker_lease_sec: u64,
     pub worker_heartbeat_sec: u64,
     #[serde(default)]
+    pub scheduling_policy: SchedulingPolicy,
+    #[serde(default)]
     pub worker_pools: WorkerPoolsConfig,
 }
 
@@ -155,6 +187,7 @@ impl Default for RuntimeConfig {
             file_stability_delay_ms: 1000,
             worker_lease_sec: default_worker_lease_sec(DEFAULT_REQUEST_TIMEOUT_SEC),
             worker_heartbeat_sec: DEFAULT_WORKER_HEARTBEAT_SEC,
+            scheduling_policy: SchedulingPolicy::default(),
             worker_pools: WorkerPoolsConfig::default(),
         }
     }
@@ -284,6 +317,8 @@ pub struct RuntimeConfigDraft {
     pub file_stability_delay_ms: i64,
     pub worker_lease_sec: i64,
     pub worker_heartbeat_sec: i64,
+    #[serde(default)]
+    pub scheduling_policy: SchedulingPolicy,
     #[serde(default)]
     pub worker_pools: WorkerPoolsConfig,
 }
@@ -747,6 +782,9 @@ pub struct RuntimeSummary {
 pub struct WorkerPoolRuntimeSummary {
     pub resource_class: ResourceClass,
     pub configured_concurrency: u32,
+    pub desired_concurrency: u32,
+    pub effective_concurrency: u32,
+    pub is_started: bool,
     pub active_leases: u64,
     pub expired_leases: u64,
     pub pending_count: u64,
@@ -786,8 +824,10 @@ pub struct WorkerLeaseRecord {
 pub struct WorkerSummary {
     pub worker_lease_sec: u64,
     pub worker_heartbeat_sec: u64,
+    pub scheduling_policy: SchedulingPolicy,
     pub workers_enabled: bool,
     pub broad_runs_disabled: bool,
+    pub runtime_status: String,
     pub paused_all: bool,
     pub pools: Vec<WorkerPoolRuntimeSummary>,
     pub active_leases_total: u64,
@@ -812,6 +852,28 @@ pub struct RecoverExpiredWorkerLeasesResult {
 pub struct WorkerPoolControlResult {
     pub summary: Option<WorkerSummary>,
     pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerStartRequest {
+    pub default_workers: u32,
+    pub local_llm_workers: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerStopRequest {
+    pub mode: Option<String>,
+}
+
+impl Default for WorkerStopRequest {
+    fn default() -> Self {
+        Self { mode: None }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerPoolUpdateRequest {
+    pub desired_concurrency: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

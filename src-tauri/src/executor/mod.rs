@@ -22,8 +22,8 @@ use crate::database::{
 };
 use crate::domain::{
     AppEventLevel, ArtifactLocation, CommandErrorInfo, EntityFileRecord, PipelineWaveSummary,
-    ResourceClass, RunDueTasksSummary, RunPipelineWavesSummary, S3StorageConfig, StageRecord,
-    StageStatus, StorageProvider, DEFAULT_REQUEST_TIMEOUT_SEC,
+    ResourceClass, RunDueTasksSummary, RunPipelineWavesSummary, S3StorageConfig, SchedulingPolicy,
+    StageRecord, StageStatus, StorageProvider, DEFAULT_REQUEST_TIMEOUT_SEC,
 };
 use crate::file_ops;
 use crate::file_safety::read_stable_file;
@@ -236,6 +236,7 @@ pub fn run_worker_task(
     request_timeout_sec: u64,
     lease_ttl_sec: u64,
     heartbeat_interval_sec: u64,
+    scheduling_policy: SchedulingPolicy,
     file_stability_delay_ms: u64,
 ) -> Result<RunDueTasksSummary, String> {
     let mut connection = open_connection(database_path)?;
@@ -246,6 +247,7 @@ pub fn run_worker_task(
             limit: 1,
             worker_id: worker_id.to_string(),
             lease_ttl_sec,
+            scheduling_policy,
             now: Utc::now(),
         },
     )?;
@@ -1057,6 +1059,52 @@ fn finish_failure(
     finished_at: DateTime<Utc>,
     duration_ms: u64,
 ) -> Result<TaskOutcome, String> {
+    if failure_is_contract_blocking(&failure) {
+        finish_stage_run(
+            connection,
+            &FinishStageRunInput {
+                run_id: run_id.to_string(),
+                response_json: failure.response_json.clone(),
+                http_status: failure.http_status,
+                success: false,
+                error_type: Some(failure.error_type.clone()),
+                error_message: Some(failure.message.clone()),
+                finished_at: finished_at.to_rfc3339(),
+                duration_ms,
+            },
+        )?;
+        block_stage_state(
+            connection,
+            task.state_id,
+            &failure.message,
+            &finished_at.to_rfc3339(),
+        )?;
+        finish_task_lease(
+            connection,
+            task,
+            "failed",
+            "deterministic_contract_blocked",
+            &finished_at.to_rfc3339(),
+        )?;
+        insert_app_event(
+            connection,
+            AppEventLevel::Error,
+            "task_blocked",
+            &format!(
+                "Entity '{}' on stage '{}' was blocked by deterministic contract error: {}",
+                task.entity_id, task.stage_id, failure.message
+            ),
+            Some(json!({
+                "entity_id": task.entity_id,
+                "stage_id": task.stage_id,
+                "run_id": run_id,
+                "error_type": failure.error_type,
+            })),
+            &finished_at.to_rfc3339(),
+        )?;
+        return Ok(TaskOutcome::Blocked);
+    }
+
     let next_retry_at = if attempt_no < task.max_attempts {
         Some((finished_at + Duration::seconds(task.retry_delay_sec as i64)).to_rfc3339())
     } else {
@@ -1114,7 +1162,6 @@ fn finish_failure(
             task.entity_id, task.stage_id, attempt_no, failure.message
         ),
         Some(json!({
-            "entity_id": task.entity_id,
             "stage_id": task.stage_id,
             "run_id": run_id,
             "error_type": failure.error_type,
@@ -1127,6 +1174,13 @@ fn finish_failure(
     } else {
         TaskOutcome::Failed
     })
+}
+
+fn failure_is_contract_blocking(failure: &AttemptFailure) -> bool {
+    matches!(
+        failure.error_type.as_str(),
+        "contract" | "invalid_json" | "manifest_invalid" | "manifest_blocked" | "copy_blocked"
+    )
 }
 
 fn block_task(
@@ -1761,6 +1815,7 @@ mod tests {
                 file_stability_delay_ms: 0,
                 worker_lease_sec: 1800,
                 worker_heartbeat_sec: 30,
+                scheduling_policy: Default::default(),
                 worker_pools: Default::default(),
             },
             stages: vec![
@@ -3256,8 +3311,8 @@ mod tests {
         let target_files = files_for_stage(&database_path, "normalized");
         let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
 
-        assert_eq!(summary.failed, 1);
-        assert_eq!(stage_status(&database_path, "incoming"), "failed");
+        assert_eq!(summary.blocked, 1);
+        assert_eq!(stage_status(&database_path, "incoming"), "blocked");
         assert!(target_files.is_empty());
         assert_eq!(runs[0].error_type.as_deref(), Some("contract"));
     }
@@ -3390,15 +3445,16 @@ mod tests {
     }
 
     #[test]
-    fn contract_errors_are_failed_attempts() {
+    fn contract_errors_block_without_retry() {
         let server = mock_server(vec![(200, r#"{"success":true,"meta":{}}"#)]);
         let (_tempdir, workdir, database_path, _source_path) = prepare_workdir(&server.url, 1, 0);
 
         let summary = run_due_tasks(&workdir, &database_path, 1, 5, 1, 0).expect("run tasks");
         let runs = list_stage_runs(&database_path, Some("entity-1")).expect("runs");
 
-        assert_eq!(summary.failed, 1);
-        assert_eq!(stage_status(&database_path, "incoming"), "failed");
+        assert_eq!(summary.blocked, 1);
+        assert_eq!(summary.retry_scheduled, 0);
+        assert_eq!(stage_status(&database_path, "incoming"), "blocked");
         assert_eq!(runs[0].error_type.as_deref(), Some("contract"));
     }
 

@@ -19,6 +19,9 @@ import {
   resumeWorkers,
   runSelectedPipelineWavesById,
   scanWorkspace,
+  startWorkers,
+  stopWorkers,
+  updateWorkerPool,
 } from "../lib/runtimeApi";
 import type {
   CommandErrorInfo,
@@ -134,6 +137,10 @@ export function WorkspaceExplorerPage() {
   const [selectedPipelineSummary, setSelectedPipelineSummary] =
     useState<RunSelectedPipelineWavesSummary | null>(null);
   const [workerSummary, setWorkerSummary] = useState<WorkerSummary | null>(null);
+  const [workerDesiredCounts, setWorkerDesiredCounts] = useState<Record<string, number>>({
+    default: 1,
+    local_llm: 1,
+  });
 
   const selectedRows = useMemo(
     () => entities.filter((entity) => selectedEntityIds.includes(entity.entity_id)),
@@ -268,6 +275,7 @@ export function WorkspaceExplorerPage() {
       const result = await getWorkerSummary(workspaceId);
       setErrors(result.errors);
       setWorkerSummary(result.summary);
+      syncWorkerDesiredCounts(result.summary);
       setActionMessage(
         result.summary
           ? `Worker summary loaded: ${result.summary.active_leases_total} active lease(s), ${result.summary.expired_leases_total} expired.`
@@ -306,12 +314,43 @@ export function WorkspaceExplorerPage() {
       setErrors(result.errors);
       if (result.summary) {
         setWorkerSummary(result.summary);
+        syncWorkerDesiredCounts(result.summary);
       }
       setActionMessage(message(result.summary));
       await loadEntities();
     } finally {
       setActiveAction(null);
     }
+  }
+
+  async function handleStartWorkers() {
+    await handleWorkerControl(
+      "worker-start",
+      () =>
+        startWorkers(
+          workspaceId as string,
+          workerDesiredCounts.default ?? 0,
+          workerDesiredCounts.local_llm ?? 0,
+        ),
+      (summary) => `Workers started: ${workerRuntimeSummaryText(summary)}.`,
+    );
+  }
+
+  async function handleStopWorkers() {
+    await handleWorkerControl(
+      "worker-stop",
+      () => stopWorkers(workspaceId as string),
+      (summary) => `Workers stopping: ${workerRuntimeSummaryText(summary)}.`,
+    );
+  }
+
+  async function handleUpdatePoolDesired(resourceClass: string) {
+    const desired = workerDesiredCounts[resourceClass] ?? 0;
+    await handleWorkerControl(
+      `worker-desired-${resourceClass}`,
+      () => updateWorkerPool(workspaceId as string, resourceClass, desired),
+      () => `${workerPoolLabel(resourceClass)} desired workers set to ${desired}.`,
+    );
   }
 
   async function handlePauseAllWorkers() {
@@ -367,6 +406,24 @@ export function WorkspaceExplorerPage() {
     } finally {
       setActiveAction(null);
     }
+  }
+
+  function handleWorkerDesiredCountChange(resourceClass: string, value: number) {
+    setWorkerDesiredCounts((current) => ({
+      ...current,
+      [resourceClass]: boundedInteger(value, 0, 999),
+    }));
+  }
+
+  function syncWorkerDesiredCounts(summary: WorkerSummary | null) {
+    if (!summary) return;
+    setWorkerDesiredCounts((current) => {
+      const next = { ...current };
+      for (const pool of summary.pools) {
+        next[pool.resource_class] = pool.desired_concurrency;
+      }
+      return next;
+    });
   }
 
   function toggleEntity(entity: EntityTableRow, checked: boolean) {
@@ -504,7 +561,51 @@ export function WorkspaceExplorerPage() {
                     DB-backed pool controls, queue counts, and recent leases.
                   </span>
                 </div>
-                <div className="button-row">
+                <div className="worker-runtime-controls">
+                  <label className="inline-field" htmlFor="default-worker-count">
+                    Default workers
+                    <input
+                      id="default-worker-count"
+                      type="number"
+                      min={0}
+                      max={999}
+                      value={workerDesiredCounts.default ?? 0}
+                      disabled={activeAction !== null}
+                      onChange={(event) =>
+                        handleWorkerDesiredCountChange("default", Number(event.target.value))
+                      }
+                    />
+                  </label>
+                  <label className="inline-field" htmlFor="local-llm-worker-count">
+                    Local LLM workers
+                    <input
+                      id="local-llm-worker-count"
+                      type="number"
+                      min={0}
+                      max={999}
+                      value={workerDesiredCounts.local_llm ?? 0}
+                      disabled={activeAction !== null}
+                      onChange={(event) =>
+                        handleWorkerDesiredCountChange("local_llm", Number(event.target.value))
+                      }
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="button primary"
+                    disabled={activeAction !== null}
+                    onClick={() => void handleStartWorkers()}
+                  >
+                    {activeAction === "worker-start" ? "Starting..." : "Start workers"}
+                  </button>
+                  <button
+                    type="button"
+                    className="button secondary"
+                    disabled={activeAction !== null}
+                    onClick={() => void handleStopWorkers()}
+                  >
+                    {activeAction === "worker-stop" ? "Stopping..." : "Stop workers"}
+                  </button>
                   <button
                     type="button"
                     className="button secondary"
@@ -513,6 +614,8 @@ export function WorkspaceExplorerPage() {
                   >
                     {activeAction === "worker-summary" ? "Loading..." : "Load summary"}
                   </button>
+                </div>
+                <div className="button-row">
                   <button
                     type="button"
                     className="button secondary"
@@ -543,6 +646,9 @@ export function WorkspaceExplorerPage() {
                 <WorkerPoolsSummary
                   summary={workerSummary}
                   activeAction={activeAction}
+                  desiredCounts={workerDesiredCounts}
+                  onDesiredCountChange={handleWorkerDesiredCountChange}
+                  onApplyDesiredPool={handleUpdatePoolDesired}
                   onPausePool={handlePausePool}
                   onResumePool={handleResumePool}
                   onReleaseLease={handleReleaseWorkerLease}
@@ -786,6 +892,9 @@ function SelectedPipelineSummary({ summary }: { summary: RunSelectedPipelineWave
 function WorkerPoolsSummary({
   summary,
   activeAction,
+  desiredCounts,
+  onDesiredCountChange,
+  onApplyDesiredPool,
   onPausePool,
   onResumePool,
   onReleaseLease,
@@ -793,6 +902,9 @@ function WorkerPoolsSummary({
 }: {
   summary: WorkerSummary;
   activeAction: string | null;
+  desiredCounts: Record<string, number>;
+  onDesiredCountChange: (resourceClass: string, value: number) => void;
+  onApplyDesiredPool: (resourceClass: string) => void;
   onPausePool: (resourceClass: string) => void;
   onResumePool: (resourceClass: string) => void;
   onReleaseLease: (lease: WorkerLeaseRecord) => void;
@@ -808,7 +920,7 @@ function WorkerPoolsSummary({
     <div className="workspace-wave-summary">
       {!summary.workers_enabled ? (
         <p className="empty-text">
-          Workers are disabled. Set BEEHIVE_WORKERS_ENABLED=1 and BEEHIVE_WORKER_WORKSPACES=&lt;workspace_id&gt; to start background processing.
+          Worker supervisor is disabled on this server. Start/Stop state will be saved, but background claiming needs the server worker guard enabled.
         </p>
       ) : null}
       {summary.broad_runs_disabled ? (
@@ -822,18 +934,28 @@ function WorkerPoolsSummary({
         </p>
       ) : null}
       <div className="summary-card-grid">
+        <SummaryCard label="Runtime status" value={summary.runtime_status} />
+        <SummaryCard label="Scheduling" value={summary.scheduling_policy} />
         <SummaryCard label="Active leases" value={summary.active_leases_total} />
         <SummaryCard label="Expired leases" value={summary.expired_leases_total} />
         <SummaryCard label="Lease sec" value={summary.worker_lease_sec} />
         <SummaryCard label="Heartbeat sec" value={summary.worker_heartbeat_sec} />
         <SummaryCard label="Last recovery" value={summary.last_recovery_at ?? "never"} />
       </div>
+      {summary.scheduling_policy === "depth_first" ? (
+        <p className="empty-text">
+          Depth-first prioritizes fresh child artifacts so a subset of entities moves deeper through the pipeline sooner.
+        </p>
+      ) : null}
       <div className="worker-pool-grid">
         {summary.pools.map((pool) => (
           <WorkerPoolCard
             key={pool.resource_class}
             pool={pool}
             activeAction={activeAction}
+            desiredCount={desiredCounts[pool.resource_class] ?? pool.desired_concurrency}
+            onDesiredCountChange={onDesiredCountChange}
+            onApplyDesiredPool={onApplyDesiredPool}
             onPausePool={onPausePool}
             onResumePool={onResumePool}
           />
@@ -925,11 +1047,17 @@ function WorkerPoolsSummary({
 function WorkerPoolCard({
   pool,
   activeAction,
+  desiredCount,
+  onDesiredCountChange,
+  onApplyDesiredPool,
   onPausePool,
   onResumePool,
 }: {
   pool: WorkerPoolRuntimeSummary;
   activeAction: string | null;
+  desiredCount: number;
+  onDesiredCountChange: (resourceClass: string, value: number) => void;
+  onApplyDesiredPool: (resourceClass: string) => void;
   onPausePool: (resourceClass: string) => void;
   onResumePool: (resourceClass: string) => void;
 }) {
@@ -938,9 +1066,12 @@ function WorkerPoolCard({
     <div className="summary-card">
       <span>{workerPoolLabel(pool.resource_class)}</span>
       <strong>
-        {pool.active_leases}/{pool.configured_concurrency} running
+        {pool.active_leases}/{pool.effective_concurrency} active
       </strong>
+      <span>{pool.is_started ? "started" : "stopped"}</span>
       <span>{pool.is_paused ? "paused" : "resumed"}</span>
+      <span>{pool.desired_concurrency} desired</span>
+      <span>{pool.configured_concurrency} YAML limit</span>
       <span>{pendingTotal} pending</span>
       <span>{pool.retry_wait_not_due_count} retry wait</span>
       <span>{pool.queued_count} queued</span>
@@ -952,7 +1083,27 @@ function WorkerPoolCard({
       <span>{pool.average_duration_ms !== null ? `${pool.average_duration_ms}ms avg` : "no duration"}</span>
       {pool.pause_reason ? <span>{pool.pause_reason}</span> : null}
       {pool.last_error ? <span>{pool.last_error}</span> : null}
+      <label className="inline-field" htmlFor={`desired-${pool.resource_class}`}>
+        Desired
+        <input
+          id={`desired-${pool.resource_class}`}
+          type="number"
+          min={0}
+          max={999}
+          value={desiredCount}
+          disabled={activeAction !== null}
+          onChange={(event) => onDesiredCountChange(pool.resource_class, Number(event.target.value))}
+        />
+      </label>
       <div className="button-row">
+        <button
+          type="button"
+          className="button secondary"
+          disabled={activeAction !== null}
+          onClick={() => onApplyDesiredPool(pool.resource_class)}
+        >
+          {activeAction === `worker-desired-${pool.resource_class}` ? "Applying..." : "Apply desired"}
+        </button>
         <button
           type="button"
           className="button secondary"
@@ -976,6 +1127,22 @@ function WorkerPoolCard({
 
 function workerPoolLabel(resourceClass: string) {
   return resourceClass === "local_llm" ? "Local LLM pool" : "Default pool";
+}
+
+function workerRuntimeSummaryText(summary: WorkerSummary | null) {
+  if (!summary) return "summary unavailable";
+  const pools = summary.pools
+    .map(
+      (pool) =>
+        `${pool.resource_class} ${pool.desired_concurrency} desired/${pool.active_leases} active`,
+    )
+    .join(", ");
+  return `${summary.runtime_status}, ${pools}`;
+}
+
+function boundedInteger(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, Math.floor(value)));
 }
 
 function shortId(value: string) {

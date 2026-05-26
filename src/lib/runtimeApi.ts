@@ -271,6 +271,26 @@ export function getWorkerSummary(workspaceId: string): Promise<WorkerSummaryResu
   return apiClient.getWorkerSummary(workspaceId);
 }
 
+export function startWorkers(
+  workspaceId: string,
+  defaultWorkers: number,
+  localLlmWorkers: number,
+): Promise<WorkerPoolControlResult> {
+  return apiClient.startWorkers(workspaceId, defaultWorkers, localLlmWorkers);
+}
+
+export function stopWorkers(workspaceId: string): Promise<WorkerPoolControlResult> {
+  return apiClient.stopWorkers(workspaceId);
+}
+
+export function updateWorkerPool(
+  workspaceId: string,
+  resourceClass: string,
+  desiredConcurrency: number,
+): Promise<WorkerPoolControlResult> {
+  return apiClient.updateWorkerPool(workspaceId, resourceClass, desiredConcurrency);
+}
+
 export function recoverExpiredWorkerLeases(
   workspaceId: string,
 ): Promise<RecoverExpiredWorkerLeasesResult> {

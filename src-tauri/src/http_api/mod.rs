@@ -10,7 +10,8 @@ use crate::domain::{
     RunDueTasksResult, RunPipelineWavesResult, RunSelectedPipelineWavesRequest,
     RunSelectedPipelineWavesResult, S3ReconciliationResult, S3StageMutationResult,
     StageRunOutputsResult, UpdateEntityRequest, UpdateS3StageRequest, UpdateStageNextStageResult,
-    UpdateWorkspaceRequest, WorkerLeaseReleaseResult, WorkerPoolControlResult, WorkerSummaryResult,
+    UpdateWorkspaceRequest, WorkerLeaseReleaseResult, WorkerPoolControlResult,
+    WorkerPoolUpdateRequest, WorkerStartRequest, WorkerStopRequest, WorkerSummaryResult,
     WorkspaceMutationResult, WorkspaceRegistryEntryResult, WorkspaceRegistryListResult,
 };
 use crate::services::{
@@ -339,6 +340,53 @@ fn route_json_request(
                             "recover_expired_worker_leases_failed",
                             message,
                         )],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("POST", ["api", "workspaces", _, "workers", "start"]) => {
+                let input = parse_body::<WorkerStartRequest>(body)?;
+                let result = match workers::start_workers(workspace_id, &input) {
+                    Ok(summary) => WorkerPoolControlResult {
+                        summary: Some(summary),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => WorkerPoolControlResult {
+                        summary: None,
+                        errors: vec![command_error("worker_start_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("POST", ["api", "workspaces", _, "workers", "stop"]) => {
+                let _input = parse_optional_body::<WorkerStopRequest>(body)?;
+                let result = match workers::stop_workers(workspace_id) {
+                    Ok(summary) => WorkerPoolControlResult {
+                        summary: Some(summary),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => WorkerPoolControlResult {
+                        summary: None,
+                        errors: vec![command_error("worker_stop_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("PATCH", ["api", "workspaces", _, "workers", "pools", resource_class]) => {
+                let input = parse_body::<WorkerPoolUpdateRequest>(body)?;
+                let result = match parse_resource_class(resource_class).and_then(|resource_class| {
+                    let desired = input.desired_concurrency.ok_or_else(|| {
+                        "desired_concurrency is required for worker pool update.".to_string()
+                    })?;
+                    workers::update_pool_desired_concurrency(workspace_id, resource_class, desired)
+                }) {
+                    Ok(summary) => WorkerPoolControlResult {
+                        summary: Some(summary),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => WorkerPoolControlResult {
+                        summary: None,
+                        errors: vec![command_error("worker_pool_update_failed", message)],
                     },
                 };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
@@ -970,6 +1018,39 @@ mod tests {
         assert_eq!(
             recovery.body["errors"][0]["code"].as_str(),
             Some("recover_expired_worker_leases_failed")
+        );
+
+        let start = handle_json_request(
+            "POST",
+            "/api/workspaces/missing/workers/start",
+            Some(r#"{"default_workers":2,"local_llm_workers":1}"#),
+        );
+        assert_eq!(start.status_code, 200);
+        assert_eq!(
+            start.body["errors"][0]["code"].as_str(),
+            Some("worker_start_failed")
+        );
+
+        let stop = handle_json_request(
+            "POST",
+            "/api/workspaces/missing/workers/stop",
+            Some(r#"{"mode":"drain"}"#),
+        );
+        assert_eq!(stop.status_code, 200);
+        assert_eq!(
+            stop.body["errors"][0]["code"].as_str(),
+            Some("worker_stop_failed")
+        );
+
+        let pool_update = handle_json_request(
+            "PATCH",
+            "/api/workspaces/missing/workers/pools/default",
+            Some(r#"{"desired_concurrency":3}"#),
+        );
+        assert_eq!(pool_update.status_code, 200);
+        assert_eq!(
+            pool_update.body["errors"][0]["code"].as_str(),
+            Some("worker_pool_update_failed")
         );
 
         let pause = handle_json_request(

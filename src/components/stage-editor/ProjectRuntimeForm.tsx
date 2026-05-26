@@ -1,4 +1,4 @@
-import type { PipelineConfigDraft, RuntimeConfigDraft } from "../../types/domain";
+import type { PipelineConfigDraft, RuntimeConfigDraft, SchedulingPolicy } from "../../types/domain";
 
 interface ProjectRuntimeFormProps {
   draft: PipelineConfigDraft;
@@ -7,7 +7,7 @@ interface ProjectRuntimeFormProps {
 }
 
 type RuntimeField = keyof RuntimeConfigDraft;
-type RuntimeNumberField = Exclude<RuntimeField, "worker_pools">;
+type RuntimeNumberField = Exclude<RuntimeField, "worker_pools" | "scheduling_policy">;
 type StorageField = "bucket" | "workspace_prefix" | "region" | "endpoint";
 
 const runtimeFields: Array<{ key: RuntimeNumberField; label: string; min: number }> = [
@@ -27,12 +27,22 @@ export function ProjectRuntimeForm({ draft, disabled, onChange }: ProjectRuntime
     endpoint: null,
   };
 
-  function updateRuntime(key: RuntimeField, value: number) {
+  function updateRuntime(key: RuntimeNumberField, value: number) {
     onChange({
       ...draft,
       runtime: {
         ...draft.runtime,
         [key]: value,
+      },
+    });
+  }
+
+  function updateSchedulingPolicy(value: SchedulingPolicy) {
+    onChange({
+      ...draft,
+      runtime: {
+        ...draft.runtime,
+        scheduling_policy: value,
       },
     });
   }
@@ -96,6 +106,18 @@ export function ProjectRuntimeForm({ draft, disabled, onChange }: ProjectRuntime
             />
           </div>
         ))}
+        <div className="form-row">
+          <label htmlFor="scheduling-policy">Scheduling policy</label>
+          <select
+            id="scheduling-policy"
+            value={draft.runtime.scheduling_policy}
+            disabled={disabled}
+            onChange={(event) => updateSchedulingPolicy(event.target.value as SchedulingPolicy)}
+          >
+            <option value="depth_first">depth_first</option>
+            <option value="fifo">fifo</option>
+          </select>
+        </div>
       </div>
       <h3>Worker pools</h3>
       <div className="inline-meta">

@@ -1,10 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::thread;
+use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension, Transaction};
+use rusqlite::{
+    params, params_from_iter, Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction,
+    TransactionBehavior,
+};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -13,8 +18,8 @@ use crate::domain::{
     EntityFileRecord, EntityFilters, EntityListQuery, EntityRecord, EntityStageStateRecord,
     EntityTableRow, EntityTimelineItem, EntityValidationStatus, InvalidDiscoveryRecord,
     OutputRegistrationReport, OutputRegistrationReportItem, PipelineConfig, ResourceClass,
-    RuntimeSummary, StageDefinition, StageRecord, StageRunRecord, StageStatus, StatusCount,
-    StorageProvider, UpdateEntityRequest, WorkerLeaseRecord, WorkerPoolRuntimeSummary,
+    RuntimeSummary, SchedulingPolicy, StageDefinition, StageRecord, StageRunRecord, StageStatus,
+    StatusCount, StorageProvider, UpdateEntityRequest, WorkerLeaseRecord, WorkerPoolRuntimeSummary,
     WorkerSummary, WorkspaceEntityTrail, WorkspaceEntityTrailEdge, WorkspaceEntityTrailNode,
     WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceFileNode, WorkspaceStageTree,
     WorkspaceStageTreeCounters,
@@ -30,7 +35,9 @@ pub(crate) use entities::{
     evaluate_entity_file_allowed_actions, record_entity_file_json_edit_rejected,
 };
 
-const SCHEMA_VERSION: u32 = 11;
+const SCHEMA_VERSION: u32 = 12;
+const DEFAULT_SQLITE_BUSY_TIMEOUT_MS: u64 = 30_000;
+const SQLITE_WRITE_RETRY_BACKOFF_MS: [u64; 5] = [50, 100, 200, 400, 800];
 
 pub(crate) struct PersistEntityFileInput {
     pub entity_id: String,
@@ -109,7 +116,16 @@ pub(crate) struct WorkerLeaseClaimInput {
     pub limit: u64,
     pub worker_id: String,
     pub lease_ttl_sec: u64,
+    pub scheduling_policy: SchedulingPolicy,
     pub now: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkerPoolControlState {
+    pub desired_concurrency: u32,
+    pub is_started: bool,
+    pub is_paused: bool,
+    pub pause_reason: Option<String>,
 }
 
 pub struct EntityTablePage {
@@ -246,13 +262,14 @@ pub fn open_connection(path: &Path) -> Result<Connection, String> {
 }
 
 fn configure_sqlite_connection(connection: &Connection, writable: bool) -> Result<(), String> {
+    let busy_timeout_ms = sqlite_busy_timeout_ms_from_env();
     connection
-        .execute_batch(
+        .execute_batch(&format!(
             r#"
             PRAGMA foreign_keys = ON;
-            PRAGMA busy_timeout = 5000;
-            "#,
-        )
+            PRAGMA busy_timeout = {busy_timeout_ms};
+            "#
+        ))
         .map_err(|error| format!("Failed to configure SQLite connection pragmas: {error}"))?;
     if writable {
         connection
@@ -265,6 +282,74 @@ fn configure_sqlite_connection(connection: &Connection, writable: bool) -> Resul
             .map_err(|error| format!("Failed to configure SQLite WAL pragmas: {error}"))?;
     }
     Ok(())
+}
+
+fn sqlite_busy_timeout_ms_from_env() -> u64 {
+    parse_sqlite_busy_timeout_ms(
+        std::env::var("BEEHIVE_SQLITE_BUSY_TIMEOUT_MS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+pub(crate) fn parse_sqlite_busy_timeout_ms(value: Option<&str>) -> u64 {
+    value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_SQLITE_BUSY_TIMEOUT_MS)
+}
+
+pub(crate) fn sqlite_error_is_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked,
+                ..
+            },
+            _
+        )
+    )
+}
+
+pub(crate) fn sqlite_message_is_busy(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("database is locked")
+        || normalized.contains("database is busy")
+        || normalized.contains("sqlite_busy")
+        || normalized.contains("sqlite_locked")
+}
+
+pub(crate) fn retry_sqlite_busy_operation<T, F>(mut operation: F) -> Result<T, String>
+where
+    F: FnMut() -> Result<T, String>,
+{
+    retry_sqlite_busy_operation_with_sleep(&mut operation, |delay| thread::sleep(delay))
+}
+
+pub(crate) fn retry_sqlite_busy_operation_with_sleep<T, F, S>(
+    operation: &mut F,
+    mut sleep: S,
+) -> Result<T, String>
+where
+    F: FnMut() -> Result<T, String>,
+    S: FnMut(StdDuration),
+{
+    let mut attempt = 0;
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(message)
+                if sqlite_message_is_busy(&message)
+                    && attempt < SQLITE_WRITE_RETRY_BACKOFF_MS.len() =>
+            {
+                let delay = StdDuration::from_millis(SQLITE_WRITE_RETRY_BACKOFF_MS[attempt]);
+                attempt += 1;
+                sleep(delay);
+            }
+            Err(message) => return Err(message),
+        }
+    }
 }
 
 fn open_readonly_connection(path: &Path) -> Result<Connection, String> {
@@ -1511,7 +1596,10 @@ pub(crate) fn list_eligible_runtime_tasks(
                     state.status = 'pending'
                     OR (state.status = 'retry_wait' AND state.next_retry_at IS NOT NULL AND state.next_retry_at <= ?1)
                   )
-            ORDER BY state.updated_at ASC, state.id ASC
+            ORDER BY
+                CASE WHEN state.status = 'pending' THEN 0 ELSE 1 END ASC,
+                state.updated_at ASC,
+                state.id ASC
             LIMIT ?2
             "#,
         )
@@ -1762,19 +1850,51 @@ pub(crate) fn claim_worker_runtime_tasks(
     connection: &mut Connection,
     input: &WorkerLeaseClaimInput,
 ) -> Result<Vec<RuntimeTaskRecord>, String> {
+    retry_sqlite_busy_operation(|| claim_worker_runtime_tasks_once(connection, input))
+}
+
+fn claim_worker_runtime_tasks_once(
+    connection: &mut Connection,
+    input: &WorkerLeaseClaimInput,
+) -> Result<Vec<RuntimeTaskRecord>, String> {
     if input.limit == 0 {
-        return Ok(Vec::new());
-    }
-    if worker_pool_is_paused_with_connection(connection, input.resource_class)? {
         return Ok(Vec::new());
     }
     let now = input.now.to_rfc3339();
     let lease_until = (input.now + Duration::seconds(input.lease_ttl_sec as i64)).to_rfc3339();
     let transaction = connection
-        .transaction()
-        .map_err(|error| format!("Failed to start worker lease claim transaction: {error}"))?;
-    let candidates =
-        list_eligible_worker_runtime_tasks(&transaction, &now, input.resource_class, input.limit)?;
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| {
+            if sqlite_error_is_busy(&error) {
+                format!(
+                    "Failed to start worker lease claim transaction: database is locked/busy: {error}"
+                )
+            } else {
+                format!("Failed to start worker lease claim transaction: {error}")
+            }
+        })?;
+    let control = worker_pool_control_state(&transaction, input.resource_class)?;
+    if !control.is_started || control.is_paused || control.desired_concurrency == 0 {
+        transaction
+            .commit()
+            .map_err(|error| format!("Failed to commit idle worker claim transaction: {error}"))?;
+        return Ok(Vec::new());
+    }
+    let active_leases = active_worker_lease_count(&transaction, input.resource_class)?;
+    if active_leases >= control.desired_concurrency as u64 {
+        transaction.commit().map_err(|error| {
+            format!("Failed to commit capped worker claim transaction: {error}")
+        })?;
+        return Ok(Vec::new());
+    }
+    let available_capacity = (control.desired_concurrency as u64 - active_leases).min(input.limit);
+    let candidates = list_eligible_worker_runtime_tasks(
+        &transaction,
+        &now,
+        input.resource_class,
+        input.scheduling_policy,
+        available_capacity,
+    )?;
     let mut claimed = Vec::new();
 
     for candidate in candidates {
@@ -1918,34 +2038,136 @@ pub(crate) fn set_worker_pool_paused_with_connection(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
-    connection
-        .execute(
-            r#"
-            INSERT INTO worker_pool_controls (resource_class, is_paused, pause_reason, updated_at)
-            VALUES (?1, ?2, ?3, ?4)
+    retry_sqlite_busy_operation(|| {
+        connection
+            .execute(
+                r#"
+            INSERT INTO worker_pool_controls (
+                resource_class,
+                desired_concurrency,
+                is_started,
+                is_paused,
+                pause_reason,
+                updated_at
+            )
+            VALUES (?1, 0, 0, ?2, ?3, ?4)
             ON CONFLICT(resource_class) DO UPDATE SET
                 is_paused = excluded.is_paused,
                 pause_reason = excluded.pause_reason,
                 updated_at = excluded.updated_at
             "#,
-            params![
-                resource_class.as_str(),
-                if is_paused { 1_i64 } else { 0_i64 },
-                if is_paused {
-                    normalized_reason.as_deref()
-                } else {
-                    None
-                },
-                now
-            ],
-        )
-        .map_err(|error| {
-            format!(
-                "Failed to update worker pool '{}' pause state: {error}",
-                resource_class.as_str()
+                params![
+                    resource_class.as_str(),
+                    if is_paused { 1_i64 } else { 0_i64 },
+                    if is_paused {
+                        normalized_reason.as_deref()
+                    } else {
+                        None
+                    },
+                    now
+                ],
             )
-        })?;
+            .map_err(|error| {
+                format!(
+                    "Failed to update worker pool '{}' pause state: {error}",
+                    resource_class.as_str()
+                )
+            })
+            .map(|_| ())
+    })?;
     Ok(())
+}
+
+pub fn set_all_worker_pools_started(
+    path: &Path,
+    default_desired_concurrency: u32,
+    local_llm_desired_concurrency: u32,
+) -> Result<(), String> {
+    let connection = open_connection(path)?;
+    set_worker_pool_runtime_state_with_connection(
+        &connection,
+        ResourceClass::Default,
+        true,
+        default_desired_concurrency,
+    )?;
+    set_worker_pool_runtime_state_with_connection(
+        &connection,
+        ResourceClass::LocalLlm,
+        true,
+        local_llm_desired_concurrency,
+    )?;
+    Ok(())
+}
+
+pub fn set_all_worker_pools_stopped(path: &Path) -> Result<(), String> {
+    let connection = open_connection(path)?;
+    for resource_class in [ResourceClass::Default, ResourceClass::LocalLlm] {
+        let current = worker_pool_control_state(&connection, resource_class)?;
+        set_worker_pool_runtime_state_with_connection(
+            &connection,
+            resource_class,
+            false,
+            current.desired_concurrency,
+        )?;
+    }
+    Ok(())
+}
+
+pub fn update_worker_pool_desired_concurrency(
+    path: &Path,
+    resource_class: ResourceClass,
+    desired_concurrency: u32,
+) -> Result<(), String> {
+    let connection = open_connection(path)?;
+    let current = worker_pool_control_state(&connection, resource_class)?;
+    set_worker_pool_runtime_state_with_connection(
+        &connection,
+        resource_class,
+        current.is_started,
+        desired_concurrency,
+    )
+}
+
+pub(crate) fn set_worker_pool_runtime_state_with_connection(
+    connection: &Connection,
+    resource_class: ResourceClass,
+    is_started: bool,
+    desired_concurrency: u32,
+) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    retry_sqlite_busy_operation(|| {
+        connection
+            .execute(
+                r#"
+                INSERT INTO worker_pool_controls (
+                    resource_class,
+                    desired_concurrency,
+                    is_started,
+                    is_paused,
+                    pause_reason,
+                    updated_at
+                )
+                VALUES (?1, ?2, ?3, 0, NULL, ?4)
+                ON CONFLICT(resource_class) DO UPDATE SET
+                    desired_concurrency = excluded.desired_concurrency,
+                    is_started = excluded.is_started,
+                    updated_at = excluded.updated_at
+                "#,
+                params![
+                    resource_class.as_str(),
+                    desired_concurrency as i64,
+                    if is_started { 1_i64 } else { 0_i64 },
+                    now,
+                ],
+            )
+            .map_err(|error| {
+                format!(
+                    "Failed to update worker pool '{}' runtime state: {error}",
+                    resource_class.as_str()
+                )
+            })
+            .map(|_| ())
+    })
 }
 
 pub fn worker_pool_is_paused(path: &Path, resource_class: ResourceClass) -> Result<bool, String> {
@@ -1957,17 +2179,42 @@ pub(crate) fn worker_pool_is_paused_with_connection(
     connection: &Connection,
     resource_class: ResourceClass,
 ) -> Result<bool, String> {
+    worker_pool_control_state(connection, resource_class).map(|state| state.is_paused)
+}
+
+pub(crate) fn worker_pool_control_state(
+    connection: &Connection,
+    resource_class: ResourceClass,
+) -> Result<WorkerPoolControlState, String> {
     connection
         .query_row(
-            "SELECT is_paused FROM worker_pool_controls WHERE resource_class = ?1",
+            r#"
+            SELECT desired_concurrency, is_started, is_paused, pause_reason
+            FROM worker_pool_controls
+            WHERE resource_class = ?1
+            "#,
             params![resource_class.as_str()],
-            |row| row.get::<_, i64>(0),
+            |row| {
+                Ok(WorkerPoolControlState {
+                    desired_concurrency: row.get::<_, i64>(0)?.max(0) as u32,
+                    is_started: row.get::<_, i64>(1)? != 0,
+                    is_paused: row.get::<_, i64>(2)? != 0,
+                    pause_reason: row.get::<_, Option<String>>(3)?,
+                })
+            },
         )
         .optional()
-        .map(|value| value.unwrap_or(0) != 0)
+        .map(|value| {
+            value.unwrap_or(WorkerPoolControlState {
+                desired_concurrency: 0,
+                is_started: false,
+                is_paused: false,
+                pause_reason: None,
+            })
+        })
         .map_err(|error| {
             format!(
-                "Failed to read worker pool '{}' pause state: {error}",
+                "Failed to read worker pool '{}' control state: {error}",
                 resource_class.as_str()
             )
         })
@@ -1977,10 +2224,24 @@ fn list_eligible_worker_runtime_tasks(
     connection: &Connection,
     now: &str,
     resource_class: ResourceClass,
+    scheduling_policy: SchedulingPolicy,
     limit: u64,
 ) -> Result<Vec<RuntimeTaskRecord>, String> {
+    let ordering = match scheduling_policy {
+        SchedulingPolicy::DepthFirst => {
+            "CASE WHEN state.status = 'pending' THEN 0 ELSE 1 END ASC,
+             CASE WHEN file.producer_run_id IS NOT NULL THEN 0 ELSE 1 END ASC,
+             state.updated_at DESC,
+             state.id DESC"
+        }
+        SchedulingPolicy::Fifo => {
+            "CASE WHEN state.status = 'pending' THEN 0 ELSE 1 END ASC,
+             state.updated_at ASC,
+             state.id ASC"
+        }
+    };
     let mut statement = connection
-        .prepare(
+        .prepare(&format!(
             r#"
             SELECT
                 state.id,
@@ -2011,14 +2272,14 @@ fn list_eligible_worker_runtime_tasks(
                     SELECT 1 FROM worker_leases lease
                     WHERE lease.state_id = state.id AND lease.status = 'active'
               )
-              AND (
+                  AND (
                     state.status = 'pending'
                     OR (state.status = 'retry_wait' AND state.next_retry_at IS NOT NULL AND state.next_retry_at <= ?1)
                   )
-            ORDER BY state.updated_at ASC, state.id ASC
+            ORDER BY {ordering}
             LIMIT ?3
-            "#,
-        )
+            "#
+        ))
         .map_err(|error| format!("Failed to prepare eligible worker task query: {error}"))?;
     let rows = statement
         .query_map(
@@ -2034,6 +2295,17 @@ fn list_eligible_worker_runtime_tasks(
         );
     }
     Ok(tasks)
+}
+
+fn active_worker_lease_count(
+    connection: &Connection,
+    resource_class: ResourceClass,
+) -> Result<u64, String> {
+    query_count(
+        connection,
+        "SELECT COUNT(*) FROM worker_leases WHERE resource_class = ?1 AND status = 'active'",
+        params![resource_class.as_str()],
+    )
 }
 
 pub(crate) fn active_worker_lease_exists(
@@ -2382,8 +2654,10 @@ pub fn get_worker_summary(path: &Path, config: &PipelineConfig) -> Result<Worker
     Ok(WorkerSummary {
         worker_lease_sec: config.runtime.worker_lease_sec,
         worker_heartbeat_sec: config.runtime.worker_heartbeat_sec,
+        scheduling_policy: config.runtime.scheduling_policy,
         workers_enabled: false,
         broad_runs_disabled: false,
+        runtime_status: "stopped".to_string(),
         paused_all,
         pools: vec![default_pool, local_llm_pool],
         active_leases_total,
@@ -2475,10 +2749,14 @@ fn worker_pool_summary(
 ) -> Result<WorkerPoolRuntimeSummary, String> {
     let active_leases = lease_count(connection, resource_class, "active")?;
     let expired_leases = lease_count(connection, resource_class, "expired")?;
-    let (is_paused, pause_reason) = worker_pool_pause_state(connection, resource_class)?;
+    let control = worker_pool_control_state(connection, resource_class)?;
+    let effective_concurrency = configured_concurrency.min(control.desired_concurrency);
     Ok(WorkerPoolRuntimeSummary {
         resource_class,
         configured_concurrency,
+        desired_concurrency: control.desired_concurrency,
+        effective_concurrency,
+        is_started: control.is_started,
         active_leases,
         expired_leases,
         pending_count: queue_count(connection, resource_class, "pending", now)?,
@@ -2488,32 +2766,12 @@ fn worker_pool_summary(
         in_progress_count: queue_count(connection, resource_class, "in_progress", now)?,
         blocked_count: queue_count(connection, resource_class, "blocked", now)?,
         failed_count: queue_count(connection, resource_class, "failed", now)?,
-        is_paused,
-        pause_reason,
+        is_paused: control.is_paused,
+        pause_reason: control.pause_reason,
         oldest_pending_age_sec: oldest_pending_age_sec(connection, resource_class, now)?,
         average_duration_ms: average_duration_ms(connection, resource_class)?,
         last_error: last_worker_pool_error(connection, resource_class)?,
     })
-}
-
-fn worker_pool_pause_state(
-    connection: &Connection,
-    resource_class: ResourceClass,
-) -> Result<(bool, Option<String>), String> {
-    connection
-        .query_row(
-            "SELECT is_paused, pause_reason FROM worker_pool_controls WHERE resource_class = ?1",
-            params![resource_class.as_str()],
-            |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, Option<String>>(1)?)),
-        )
-        .optional()
-        .map(|value| value.unwrap_or((false, None)))
-        .map_err(|error| {
-            format!(
-                "Failed to read worker pool '{}' control state: {error}",
-                resource_class.as_str()
-            )
-        })
 }
 
 fn queue_count(
@@ -4163,7 +4421,7 @@ pub(crate) fn load_setting(connection: &Connection, key: &str) -> Result<Option<
 
 fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
     match current_schema_version(connection)? {
-        0 => create_schema_v11(connection)?,
+        0 => create_schema_v12(connection)?,
         1 => {
             migrate_v1_to_v2(connection)?;
             migrate_v2_to_v3(connection)?;
@@ -4175,6 +4433,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
+            migrate_v11_to_v12(connection)?;
         }
         2 => {
             migrate_v2_to_v3(connection)?;
@@ -4186,6 +4445,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
+            migrate_v11_to_v12(connection)?;
         }
         3 => {
             migrate_v3_to_v4(connection)?;
@@ -4196,6 +4456,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
+            migrate_v11_to_v12(connection)?;
         }
         4 => {
             migrate_v4_to_v5(connection)?;
@@ -4205,6 +4466,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
+            migrate_v11_to_v12(connection)?;
         }
         5 => {
             migrate_v5_to_v6(connection)?;
@@ -4213,6 +4475,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
+            migrate_v11_to_v12(connection)?;
         }
         6 => {
             migrate_v6_to_v7(connection)?;
@@ -4220,27 +4483,35 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
+            migrate_v11_to_v12(connection)?;
         }
         7 => {
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
+            migrate_v11_to_v12(connection)?;
         }
         8 => {
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
+            migrate_v11_to_v12(connection)?;
         }
         9 => {
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
+            migrate_v11_to_v12(connection)?;
         }
-        10 => migrate_v10_to_v11(connection)?,
-        11 => {}
+        10 => {
+            migrate_v10_to_v11(connection)?;
+            migrate_v11_to_v12(connection)?;
+        }
+        11 => migrate_v11_to_v12(connection)?,
+        12 => {}
         version => {
             return Err(format!(
-            "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, or 11."
+            "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, or 12."
         ))
         }
     }
@@ -4288,7 +4559,7 @@ fn current_schema_version(connection: &Connection) -> Result<u32, String> {
         .map_err(|error| format!("Failed to read PRAGMA user_version: {error}"))
 }
 
-fn create_schema_v11(connection: &Connection) -> Result<(), String> {
+fn create_schema_v12(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
             r#"
@@ -4449,6 +4720,8 @@ fn create_schema_v11(connection: &Connection) -> Result<(), String> {
 
             CREATE TABLE IF NOT EXISTS worker_pool_controls (
                 resource_class TEXT PRIMARY KEY CHECK (resource_class IN ('default', 'local_llm')),
+                desired_concurrency INTEGER NOT NULL DEFAULT 0,
+                is_started INTEGER NOT NULL DEFAULT 0,
                 is_paused INTEGER NOT NULL DEFAULT 0,
                 pause_reason TEXT,
                 updated_at TEXT NOT NULL
@@ -4474,10 +4747,10 @@ fn create_schema_v11(connection: &Connection) -> Result<(), String> {
             CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_files_s3_producer_artifact ON entity_files(producer_run_id, artifact_id)
                 WHERE storage_provider = 's3' AND producer_run_id IS NOT NULL AND artifact_id IS NOT NULL;
 
-            PRAGMA user_version = 11;
+            PRAGMA user_version = 12;
             "#,
         )
-        .map_err(|error| format!("Failed to create SQLite schema v11: {error}"))?;
+        .map_err(|error| format!("Failed to create SQLite schema v12: {error}"))?;
     Ok(())
 }
 
@@ -5198,6 +5471,31 @@ fn migrate_v10_to_v11(connection: &mut Connection) -> Result<(), String> {
         &now,
     )?;
     set_setting(connection, "schema_version", "11", &now)?;
+    Ok(())
+}
+
+fn migrate_v11_to_v12(connection: &mut Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            r#"
+            ALTER TABLE worker_pool_controls ADD COLUMN desired_concurrency INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE worker_pool_controls ADD COLUMN is_started INTEGER NOT NULL DEFAULT 0;
+
+            PRAGMA user_version = 12;
+            "#,
+        )
+        .map_err(|error| format!("Failed to migrate schema from v11 to v12: {error}"))?;
+
+    let now = Utc::now().to_rfc3339();
+    insert_app_event(
+        connection,
+        AppEventLevel::Info,
+        "schema_migrated_to_v12",
+        "SQLite schema migrated from version 11 to version 12.",
+        None,
+        &now,
+    )?;
+    set_setting(connection, "schema_version", "12", &now)?;
     Ok(())
 }
 
@@ -6704,6 +7002,20 @@ mod tests {
         (tempdir, workdir, database_path)
     }
 
+    fn start_test_pool(
+        connection: &Connection,
+        resource_class: ResourceClass,
+        desired_concurrency: u32,
+    ) {
+        set_worker_pool_runtime_state_with_connection(
+            connection,
+            resource_class,
+            true,
+            desired_concurrency,
+        )
+        .expect("start worker pool");
+    }
+
     fn s3_pointer_input(
         entity_id: &str,
         artifact_id: &str,
@@ -6921,7 +7233,7 @@ mod tests {
         let table_names = load_table_names(&connection).expect("table names");
 
         assert!(database_path.exists());
-        assert_eq!(result.schema_version, 11);
+        assert_eq!(result.schema_version, 12);
         assert!(table_names.contains(&"entity_files".to_string()));
         assert!(table_names.contains(&"entities".to_string()));
         assert!(table_names.contains(&"entity_stage_states".to_string()));
@@ -6991,7 +7303,7 @@ mod tests {
             load_entity_files_from_connection(&connection, Some("entity-1")).expect("load files");
         let events = load_app_events_from_connection(&connection, 20).expect("events");
 
-        assert_eq!(result.schema_version, 11);
+        assert_eq!(result.schema_version, 12);
         assert_eq!(entity.file_count, 1);
         assert_eq!(files.len(), 1);
         assert!(events
@@ -7009,6 +7321,9 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.code == "schema_migrated_to_v11"));
+        assert!(events
+            .iter()
+            .any(|event| event.code == "schema_migrated_to_v12"));
     }
 
     #[test]
@@ -7022,7 +7337,7 @@ mod tests {
         let result = bootstrap_database(&database_path, &test_config(vec![stage("ingest", None)]))
             .expect("bootstrap");
 
-        assert_eq!(result.schema_version, 11);
+        assert_eq!(result.schema_version, 12);
     }
 
     #[test]
@@ -7038,6 +7353,8 @@ mod tests {
             ],
         );
         let mut connection = open_connection(&database_path).expect("open");
+        start_test_pool(&connection, ResourceClass::Default, 10);
+        start_test_pool(&connection, ResourceClass::LocalLlm, 10);
 
         let disabled = claim_worker_runtime_tasks(
             &mut connection,
@@ -7046,6 +7363,7 @@ mod tests {
                 limit: 0,
                 worker_id: "default-worker-disabled".to_string(),
                 lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
                 now: Utc::now(),
             },
         )
@@ -7059,6 +7377,7 @@ mod tests {
                 limit: 10,
                 worker_id: "default-worker".to_string(),
                 lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
                 now: Utc::now(),
             },
         )
@@ -7075,6 +7394,7 @@ mod tests {
                 limit: 10,
                 worker_id: "llm-worker".to_string(),
                 lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
                 now: Utc::now(),
             },
         )
@@ -7097,8 +7417,74 @@ mod tests {
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .expect("journal mode");
 
-        assert_eq!(busy_timeout, 5000);
+        assert_eq!(busy_timeout, 30_000);
         assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+    }
+
+    #[test]
+    fn sqlite_busy_timeout_env_parser_defaults_and_accepts_positive_values() {
+        assert_eq!(parse_sqlite_busy_timeout_ms(None), 30_000);
+        assert_eq!(parse_sqlite_busy_timeout_ms(Some("")), 30_000);
+        assert_eq!(parse_sqlite_busy_timeout_ms(Some("0")), 30_000);
+        assert_eq!(parse_sqlite_busy_timeout_ms(Some("15000")), 15_000);
+    }
+
+    #[test]
+    fn sqlite_busy_detection_matches_error_codes_and_messages() {
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: ErrorCode::DatabaseBusy,
+                extended_code: 5,
+            },
+            Some("database is locked".to_string()),
+        );
+        assert!(sqlite_error_is_busy(&busy));
+        assert!(sqlite_message_is_busy(
+            "Failed to start transaction: database is locked"
+        ));
+        assert!(sqlite_message_is_busy("SQLITE_BUSY while committing"));
+        assert!(!sqlite_message_is_busy("UNIQUE constraint failed"));
+    }
+
+    #[test]
+    fn sqlite_busy_retry_helper_retries_then_succeeds() {
+        let mut attempts = 0;
+        let mut sleeps = Vec::new();
+        let mut operation = || {
+            attempts += 1;
+            if attempts < 3 {
+                Err("database is locked".to_string())
+            } else {
+                Ok("ok")
+            }
+        };
+
+        let result = retry_sqlite_busy_operation_with_sleep(&mut operation, |delay| {
+            sleeps.push(delay.as_millis())
+        })
+        .expect("retry result");
+
+        assert_eq!(result, "ok");
+        assert_eq!(attempts, 3);
+        assert_eq!(sleeps, vec![50, 100]);
+    }
+
+    #[test]
+    fn sqlite_busy_retry_helper_stops_after_retry_limit() {
+        let mut attempts = 0;
+        let mut sleeps = Vec::new();
+        let mut operation = || {
+            attempts += 1;
+            Err::<(), _>("database is busy".to_string())
+        };
+
+        let result = retry_sqlite_busy_operation_with_sleep(&mut operation, |delay| {
+            sleeps.push(delay.as_millis())
+        });
+
+        assert!(result.is_err());
+        assert_eq!(attempts, SQLITE_WRITE_RETRY_BACKOFF_MS.len() + 1);
+        assert_eq!(sleeps.len(), SQLITE_WRITE_RETRY_BACKOFF_MS.len());
     }
 
     #[test]
@@ -7114,6 +7500,8 @@ mod tests {
             ],
         );
         let mut connection = open_connection(&database_path).expect("open");
+        start_test_pool(&connection, ResourceClass::Default, 1);
+        start_test_pool(&connection, ResourceClass::LocalLlm, 1);
 
         set_worker_pool_paused_with_connection(
             &connection,
@@ -7129,6 +7517,7 @@ mod tests {
                 limit: 1,
                 worker_id: "default-worker".to_string(),
                 lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
                 now: Utc::now(),
             },
         )
@@ -7142,6 +7531,7 @@ mod tests {
                 limit: 1,
                 worker_id: "llm-worker".to_string(),
                 lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
                 now: Utc::now(),
             },
         )
@@ -7157,11 +7547,209 @@ mod tests {
                 limit: 1,
                 worker_id: "default-worker".to_string(),
                 lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
                 now: Utc::now(),
             },
         )
         .expect("resumed claim");
         assert_eq!(default_resumed_claim.len(), 1);
+    }
+
+    #[test]
+    fn worker_claim_requires_start_and_respects_desired_concurrency() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )],
+            &[("incoming", "entity-1"), ("incoming", "entity-2")],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+        let stopped = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 10,
+                worker_id: "worker-stopped".to_string(),
+                lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
+                now: Utc::now(),
+            },
+        )
+        .expect("stopped claim");
+        assert!(stopped.is_empty());
+
+        start_test_pool(&connection, ResourceClass::Default, 1);
+        let first = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 10,
+                worker_id: "worker-one".to_string(),
+                lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
+                now: Utc::now(),
+            },
+        )
+        .expect("first claim");
+        assert_eq!(first.len(), 1);
+
+        let capped = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 10,
+                worker_id: "worker-two".to_string(),
+                lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
+                now: Utc::now(),
+            },
+        )
+        .expect("capped claim");
+        assert!(capped.is_empty());
+    }
+
+    #[test]
+    fn depth_first_claims_fresh_child_before_older_source() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )],
+            &[("incoming", "source-old"), ("incoming", "child-new")],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+        seed_worker_ordering_fixture(&connection);
+        start_test_pool(&connection, ResourceClass::Default, 1);
+
+        let tasks = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                worker_id: "depth-worker".to_string(),
+                lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
+                now: Utc::now(),
+            },
+        )
+        .expect("depth-first claim");
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].entity_id, "child-new");
+    }
+
+    #[test]
+    fn fifo_claims_older_source_before_fresh_child() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )],
+            &[("incoming", "source-old"), ("incoming", "child-new")],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+        seed_worker_ordering_fixture(&connection);
+        start_test_pool(&connection, ResourceClass::Default, 1);
+
+        let tasks = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                worker_id: "fifo-worker".to_string(),
+                lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::Fifo,
+                now: Utc::now(),
+            },
+        )
+        .expect("fifo claim");
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].entity_id, "source-old");
+    }
+
+    #[test]
+    fn worker_claim_prefers_pending_before_due_retry_wait() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )],
+            &[("incoming", "pending-healthy"), ("incoming", "retry-due")],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+        let old = (Utc::now() - Duration::minutes(30)).to_rfc3339();
+        let recent = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "UPDATE entity_stage_states SET updated_at = ?2 WHERE entity_id = ?1",
+                params!["pending-healthy", old],
+            )
+            .expect("older pending");
+        connection
+            .execute(
+                r#"
+                UPDATE entity_stage_states
+                SET status = 'retry_wait',
+                    attempts = 1,
+                    next_retry_at = ?2,
+                    updated_at = ?3
+                WHERE entity_id = ?1
+                "#,
+                params!["retry-due", old, recent],
+            )
+            .expect("retry due");
+        connection
+            .execute(
+                "UPDATE entity_files SET producer_run_id = 'run-retry' WHERE entity_id = ?1",
+                params!["retry-due"],
+            )
+            .expect("mark retry as child");
+        start_test_pool(&connection, ResourceClass::Default, 1);
+
+        let tasks = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                worker_id: "retry-order-worker".to_string(),
+                lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
+                now: Utc::now(),
+            },
+        )
+        .expect("retry demotion claim");
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].entity_id, "pending-healthy");
+    }
+
+    fn seed_worker_ordering_fixture(connection: &Connection) {
+        let old = (Utc::now() - Duration::minutes(30)).to_rfc3339();
+        let recent = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "UPDATE entity_stage_states SET updated_at = ?2 WHERE entity_id = ?1",
+                params!["source-old", old],
+            )
+            .expect("older source");
+        connection
+            .execute(
+                "UPDATE entity_stage_states SET updated_at = ?2 WHERE entity_id = ?1",
+                params!["child-new", recent],
+            )
+            .expect("newer child");
+        connection
+            .execute(
+                "UPDATE entity_files SET producer_run_id = 'run-child' WHERE entity_id = ?1",
+                params!["child-new"],
+            )
+            .expect("mark child");
     }
 
     #[test]
@@ -7224,6 +7812,7 @@ mod tests {
             &[("incoming", "entity-1")],
         );
         let mut connection = open_connection(&database_path).expect("open");
+        start_test_pool(&connection, ResourceClass::Default, 1);
         let first = claim_worker_runtime_tasks(
             &mut connection,
             &WorkerLeaseClaimInput {
@@ -7231,6 +7820,7 @@ mod tests {
                 limit: 1,
                 worker_id: "worker-one".to_string(),
                 lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
                 now: Utc::now(),
             },
         )
@@ -7244,6 +7834,7 @@ mod tests {
                 limit: 1,
                 worker_id: "worker-two".to_string(),
                 lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
                 now: Utc::now(),
             },
         )
@@ -7279,6 +7870,7 @@ mod tests {
             &[("incoming", "entity-1")],
         );
         let mut connection = open_connection(&database_path).expect("open");
+        start_test_pool(&connection, ResourceClass::Default, 1);
         let task = claim_worker_runtime_tasks(
             &mut connection,
             &WorkerLeaseClaimInput {
@@ -7286,6 +7878,7 @@ mod tests {
                 limit: 1,
                 worker_id: "worker-one".to_string(),
                 lease_ttl_sec: 10,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
                 now: Utc::now(),
             },
         )
@@ -7340,6 +7933,7 @@ mod tests {
             &[("incoming", "entity-1")],
         );
         let mut connection = open_connection(&database_path).expect("open");
+        start_test_pool(&connection, ResourceClass::Default, 1);
         let task = claim_worker_runtime_tasks(
             &mut connection,
             &WorkerLeaseClaimInput {
@@ -7347,6 +7941,7 @@ mod tests {
                 limit: 1,
                 worker_id: "worker-one".to_string(),
                 lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
                 now: Utc::now(),
             },
         )
@@ -7396,6 +7991,7 @@ mod tests {
             &[("incoming", "entity-1")],
         );
         let mut connection = open_connection(&database_path).expect("open");
+        start_test_pool(&connection, ResourceClass::Default, 1);
         let task = claim_worker_runtime_tasks(
             &mut connection,
             &WorkerLeaseClaimInput {
@@ -7403,6 +7999,7 @@ mod tests {
                 limit: 1,
                 worker_id: "worker-one".to_string(),
                 lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
                 now: Utc::now(),
             },
         )
@@ -7462,6 +8059,7 @@ mod tests {
             &[("incoming", "entity-1")],
         );
         let mut connection = open_connection(&database_path).expect("open");
+        start_test_pool(&connection, ResourceClass::Default, 1);
         let task = claim_worker_runtime_tasks(
             &mut connection,
             &WorkerLeaseClaimInput {
@@ -7469,6 +8067,7 @@ mod tests {
                 limit: 1,
                 worker_id: "worker-one".to_string(),
                 lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
                 now: Utc::now(),
             },
         )
@@ -7528,6 +8127,7 @@ mod tests {
             &[("incoming", "entity-1")],
         );
         let mut connection = open_connection(&database_path).expect("open");
+        start_test_pool(&connection, ResourceClass::Default, 1);
         let task = claim_worker_runtime_tasks(
             &mut connection,
             &WorkerLeaseClaimInput {
@@ -7535,6 +8135,7 @@ mod tests {
                 limit: 1,
                 worker_id: "worker-one".to_string(),
                 lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
                 now: Utc::now(),
             },
         )

@@ -317,6 +317,31 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
       }),
     getWorkerSummary: (workspaceId: string): Promise<WorkerSummaryResult> =>
       fetchJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/workers/summary`),
+    startWorkers: (
+      workspaceId: string,
+      defaultWorkers: number,
+      localLlmWorkers: number,
+    ): Promise<WorkerPoolControlResult> =>
+      postJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/workers/start`, {
+        default_workers: defaultWorkers,
+        local_llm_workers: localLlmWorkers,
+      }),
+    stopWorkers: (workspaceId: string): Promise<WorkerPoolControlResult> =>
+      postJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/workers/stop`, {
+        mode: "drain",
+      }),
+    updateWorkerPool: (
+      workspaceId: string,
+      resourceClass: string,
+      desiredConcurrency: number,
+    ): Promise<WorkerPoolControlResult> =>
+      fetchJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/workers/pools/${encodeURIComponent(resourceClass)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ desired_concurrency: desiredConcurrency }),
+        },
+      ),
     recoverExpiredWorkerLeases: (
       workspaceId: string,
     ): Promise<RecoverExpiredWorkerLeasesResult> =>

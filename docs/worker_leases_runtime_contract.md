@@ -14,6 +14,7 @@ No worker startup path targets every workspace implicitly.
 ## Schema
 
 Schema v10 added `worker_leases`. Schema v11 adds `worker_pool_controls`.
+Schema v12 extends `worker_pool_controls` with runtime start/stop state.
 
 Required lease fields:
 
@@ -55,6 +56,8 @@ This is the DB-level double-claim guard.
 `worker_pool_controls` stores pause/resume state inside each workspace DB:
 
 - `resource_class`
+- `desired_concurrency`
+- `is_started`
 - `is_paused`
 - `pause_reason`
 - `updated_at`
@@ -86,7 +89,20 @@ The claim transaction:
 
 Existing manual/selected claim paths refuse active worker leases.
 
-If a worker pool is paused, worker lease claim returns no tasks for that pool.
+If a worker pool is stopped, paused, or has `desired_concurrency = 0`, worker lease claim returns no tasks for that pool.
+
+Active leases cap new claims:
+
+```text
+active leases for pool must be < desired_concurrency
+```
+
+B14 supports `runtime.scheduling_policy`:
+
+- `depth_first`
+- `fifo`
+
+Both policies claim `pending` before due `retry_wait`. `depth_first` then prefers child artifacts with `entity_files.producer_run_id IS NOT NULL` and newer state timestamps. `fifo` uses older state timestamps first.
 
 ## Execution
 
@@ -154,6 +170,12 @@ BEEHIVE_WORKER_LOCAL_LLM_CONCURRENCY=1
 
 Effective concurrency never exceeds `runtime.worker_pools.*.concurrency`. `concurrency=0` disables the pool.
 
+B14 treats env and YAML as upper bounds. UI/API `desired_concurrency` controls actual claiming inside each workspace:
+
+```text
+effective_pool_limit = min(env_max, pipeline_yaml_pool_concurrency, ui_desired_concurrency)
+```
+
 Optional tuning:
 
 ```bash
@@ -165,6 +187,9 @@ BEEHIVE_WORKER_RECOVERY_INTERVAL_SEC=30
 
 ```text
 GET  /api/workspaces/{workspace_id}/workers/summary
+POST /api/workspaces/{workspace_id}/workers/start
+POST /api/workspaces/{workspace_id}/workers/stop
+PATCH /api/workspaces/{workspace_id}/workers/pools/{resource_class}
 POST /api/workspaces/{workspace_id}/workers/recover-expired-leases
 POST /api/workspaces/{workspace_id}/workers/pause
 POST /api/workspaces/{workspace_id}/workers/resume
