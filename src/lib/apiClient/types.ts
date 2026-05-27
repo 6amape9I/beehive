@@ -43,6 +43,7 @@ import type {
   ValidatePipelineConfigDraftResult,
   WorkerLeaseReleaseResult,
   WorkerPoolControlResult,
+  WorkerReconcileStuckResult,
   WorkerSummaryResult,
   WorkspaceExplorerResult,
   WorkspaceMutationResult,
@@ -162,6 +163,7 @@ export interface BeehiveApiClient {
     desiredConcurrency: number,
   ): Promise<WorkerPoolControlResult>;
   recoverExpiredWorkerLeases(workspaceId: string): Promise<RecoverExpiredWorkerLeasesResult>;
+  reconcileStuckWorkerStates(workspaceId: string): Promise<WorkerReconcileStuckResult>;
   pauseWorkers(workspaceId: string, reason?: string | null): Promise<WorkerPoolControlResult>;
   resumeWorkers(workspaceId: string): Promise<WorkerPoolControlResult>;
   pauseWorkerPool(

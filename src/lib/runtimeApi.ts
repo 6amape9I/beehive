@@ -41,6 +41,7 @@ import type {
   ValidatePipelineConfigDraftResult,
   WorkerLeaseReleaseResult,
   WorkerPoolControlResult,
+  WorkerReconcileStuckResult,
   WorkerSummaryResult,
   WorkspaceExplorerResult,
 } from "../types/domain";
@@ -295,6 +296,12 @@ export function recoverExpiredWorkerLeases(
   workspaceId: string,
 ): Promise<RecoverExpiredWorkerLeasesResult> {
   return apiClient.recoverExpiredWorkerLeases(workspaceId);
+}
+
+export function reconcileStuckWorkerStates(
+  workspaceId: string,
+): Promise<WorkerReconcileStuckResult> {
+  return apiClient.reconcileStuckWorkerStates(workspaceId);
 }
 
 export function pauseWorkers(

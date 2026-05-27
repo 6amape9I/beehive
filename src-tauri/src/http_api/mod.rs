@@ -11,8 +11,9 @@ use crate::domain::{
     RunSelectedPipelineWavesResult, S3ReconciliationResult, S3StageMutationResult,
     StageRunOutputsResult, UpdateEntityRequest, UpdateS3StageRequest, UpdateStageNextStageResult,
     UpdateWorkspaceRequest, WorkerLeaseReleaseResult, WorkerPoolControlResult,
-    WorkerPoolUpdateRequest, WorkerStartRequest, WorkerStopRequest, WorkerSummaryResult,
-    WorkspaceMutationResult, WorkspaceRegistryEntryResult, WorkspaceRegistryListResult,
+    WorkerPoolUpdateRequest, WorkerReconcileStuckResult, WorkerStartRequest, WorkerStopRequest,
+    WorkerSummaryResult, WorkspaceMutationResult, WorkspaceRegistryEntryResult,
+    WorkspaceRegistryListResult,
 };
 use crate::services::{
     artifacts, entities, pipeline, runtime, selected_runner, workers, workspaces,
@@ -340,6 +341,21 @@ fn route_json_request(
                             "recover_expired_worker_leases_failed",
                             message,
                         )],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("POST", ["api", "workspaces", _, "workers", "reconcile-stuck"]) => {
+                let result = match workers::reconcile_stuck(workspace_id) {
+                    Ok((reconciled, summary)) => WorkerReconcileStuckResult {
+                        reconciled,
+                        summary: Some(summary),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => WorkerReconcileStuckResult {
+                        reconciled: 0,
+                        summary: None,
+                        errors: vec![command_error("worker_reconcile_stuck_failed", message)],
                     },
                 };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
@@ -1018,6 +1034,17 @@ mod tests {
         assert_eq!(
             recovery.body["errors"][0]["code"].as_str(),
             Some("recover_expired_worker_leases_failed")
+        );
+
+        let reconcile = handle_json_request(
+            "POST",
+            "/api/workspaces/missing/workers/reconcile-stuck",
+            None,
+        );
+        assert_eq!(reconcile.status_code, 200);
+        assert_eq!(
+            reconcile.body["errors"][0]["code"].as_str(),
+            Some("worker_reconcile_stuck_failed")
         );
 
         let start = handle_json_request(

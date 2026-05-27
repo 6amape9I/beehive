@@ -20,9 +20,9 @@ use crate::domain::{
     OutputRegistrationReport, OutputRegistrationReportItem, PipelineConfig, ResourceClass,
     RuntimeSummary, SchedulingPolicy, StageDefinition, StageRecord, StageRunRecord, StageStatus,
     StatusCount, StorageProvider, UpdateEntityRequest, WorkerLeaseRecord, WorkerPoolRuntimeSummary,
-    WorkerSummary, WorkspaceEntityTrail, WorkspaceEntityTrailEdge, WorkspaceEntityTrailNode,
-    WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceFileNode, WorkspaceStageTree,
-    WorkspaceStageTreeCounters,
+    WorkerStateAnomalyCount, WorkerStateAnomalyRecord, WorkerSummary, WorkspaceEntityTrail,
+    WorkspaceEntityTrailEdge, WorkspaceEntityTrailNode, WorkspaceExplorerResult,
+    WorkspaceExplorerTotals, WorkspaceFileNode, WorkspaceStageTree, WorkspaceStageTreeCounters,
 };
 use crate::state_machine::{
     parse_status as parse_runtime_status, status_value as runtime_status_value,
@@ -2662,6 +2662,15 @@ pub fn get_worker_summary(path: &Path, config: &PipelineConfig) -> Result<Worker
     let expired_leases_total = default_pool.expired_leases + local_llm_pool.expired_leases;
     let paused_all = default_pool.is_paused && local_llm_pool.is_paused;
     let recent_leases = list_recent_worker_leases(&connection, 20)?;
+    let all_anomalies = list_worker_state_anomalies(
+        &connection,
+        &now,
+        config.runtime.worker_heartbeat_sec,
+        config.runtime.worker_lease_sec,
+        None,
+    )?;
+    let worker_state_anomaly_counts = worker_state_anomaly_counts(&all_anomalies);
+    let recent_worker_state_anomalies = all_anomalies.into_iter().take(20).collect();
     let last_recovery_at = connection
         .query_row(
             "SELECT MAX(created_at) FROM app_events WHERE code = 'worker_lease_expired'",
@@ -2682,6 +2691,784 @@ pub fn get_worker_summary(path: &Path, config: &PipelineConfig) -> Result<Worker
         expired_leases_total,
         last_recovery_at,
         recent_leases,
+        worker_state_anomaly_counts,
+        recent_worker_state_anomalies,
+    })
+}
+
+pub fn reconcile_stuck_worker_states(path: &Path, worker_lease_sec: u64) -> Result<u64, String> {
+    let connection = open_connection(path)?;
+    let now = Utc::now().to_rfc3339();
+    let mut reconciled = recover_expired_worker_leases_with_connection(&connection, &now)?;
+    reconciled += reconcile_active_finished_worker_leases(&connection, &now)?;
+    reconciled += reconcile_in_progress_without_active_lease(&connection, worker_lease_sec, &now)?;
+    reconciled += reconcile_queued_without_active_lease(&connection, &now)?;
+    Ok(reconciled)
+}
+
+pub(crate) fn finish_worker_task_internal_error(
+    path: &Path,
+    task: &RuntimeTaskRecord,
+    message: &str,
+) -> Result<(), String> {
+    let connection = open_connection(path)?;
+    let now = Utc::now().to_rfc3339();
+    let lease = match task.lease_id.as_deref() {
+        Some(lease_id) => match find_worker_lease_by_id(&connection, lease_id)? {
+            Some(lease) if lease.status == "active" => Some(lease),
+            _ => find_active_worker_lease_by_state_id(&connection, task.state_id)?,
+        },
+        None => find_active_worker_lease_by_state_id(&connection, task.state_id)?,
+    };
+    let Some(lease) = lease else {
+        return Ok(());
+    };
+    if lease.status != "active" {
+        return Ok(());
+    }
+    let lease_id = lease.lease_id.clone();
+
+    let run_id = match lease.run_id.clone() {
+        Some(run_id) => Some(run_id),
+        None => find_latest_unfinished_run_id_for_state(&connection, task.state_id)?,
+    };
+    if let Some(run_id) = run_id.as_deref() {
+        finish_unfinished_stage_run(&connection, run_id, "worker_internal_error", message, &now)?;
+    }
+
+    if let Some(state) = find_stage_state_by_id(&connection, task.state_id)? {
+        if matches!(state.status.as_str(), "queued" | "in_progress") {
+            let next_status = if state.attempts < state.max_attempts {
+                StageStatus::RetryWait
+            } else {
+                StageStatus::Failed
+            };
+            let next_retry_at = if matches!(next_status, StageStatus::RetryWait) {
+                Some(now.as_str())
+            } else {
+                None
+            };
+            update_stage_state_failure_with_reason(
+                &connection,
+                task.state_id,
+                next_status,
+                message,
+                None,
+                next_retry_at,
+                &now,
+                RuntimeTransitionReason::StuckReconciliation,
+            )?;
+        }
+    }
+
+    finish_worker_lease(
+        &connection,
+        &lease_id,
+        "failed",
+        "worker_internal_error",
+        &now,
+    )?;
+    insert_app_event(
+        &connection,
+        AppEventLevel::Error,
+        "worker_internal_error_reconciled",
+        &format!(
+            "Worker task internal error was reconciled for entity '{}' on stage '{}': {}",
+            task.entity_id, task.stage_id, message
+        ),
+        Some(json!({
+            "lease_id": lease_id,
+            "state_id": task.state_id,
+            "entity_id": task.entity_id,
+            "stage_id": task.stage_id,
+            "resource_class": task.resource_class.as_str(),
+            "message": message,
+        })),
+        &now,
+    )?;
+    Ok(())
+}
+
+fn worker_state_anomaly_counts(
+    anomalies: &[WorkerStateAnomalyRecord],
+) -> Vec<WorkerStateAnomalyCount> {
+    let mut counts = HashMap::<String, u64>::new();
+    for anomaly in anomalies {
+        *counts.entry(anomaly.diagnosis.clone()).or_insert(0) += 1;
+    }
+    let mut counts = counts
+        .into_iter()
+        .map(|(diagnosis, count)| WorkerStateAnomalyCount { diagnosis, count })
+        .collect::<Vec<_>>();
+    counts.sort_by(|left, right| left.diagnosis.cmp(&right.diagnosis));
+    counts
+}
+
+fn reconcile_active_finished_worker_leases(
+    connection: &Connection,
+    now: &str,
+) -> Result<u64, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT
+                lease_id,
+                state_id,
+                entity_id,
+                entity_file_id,
+                stage_id,
+                resource_class,
+                worker_id,
+                status,
+                run_id,
+                leased_at,
+                lease_until,
+                heartbeat_at,
+                released_at,
+                release_reason,
+                updated_at
+            FROM worker_leases
+            WHERE status = 'active'
+              AND run_id IS NOT NULL
+              AND EXISTS (
+                    SELECT 1
+                    FROM stage_runs run
+                    WHERE run.run_id = worker_leases.run_id
+                      AND run.finished_at IS NOT NULL
+              )
+            ORDER BY updated_at ASC, id ASC
+            "#,
+        )
+        .map_err(|error| {
+            format!("Failed to prepare active finished worker lease query: {error}")
+        })?;
+    let rows = statement
+        .query_map([], worker_lease_from_row)
+        .map_err(|error| format!("Failed to query active finished worker leases: {error}"))?;
+    let mut leases = Vec::new();
+    for row in rows {
+        leases.push(
+            row.map_err(|error| format!("Failed to read active finished lease row: {error}"))?,
+        );
+    }
+    drop(statement);
+
+    let mut reconciled = 0_u64;
+    for lease in leases {
+        let Some(run_id) = lease.run_id.as_deref() else {
+            continue;
+        };
+        let Some(run) = find_stage_run_by_run_id(connection, run_id)? else {
+            continue;
+        };
+        if run.finished_at.is_none() {
+            continue;
+        }
+        if let Some(state) = find_stage_state_by_id(connection, lease.state_id)? {
+            reconcile_state_from_finished_run(connection, &state, &run, now)?;
+        }
+        finish_worker_lease(
+            connection,
+            &lease.lease_id,
+            if run.success { "done" } else { "failed" },
+            "finished_run_reconciled",
+            now,
+        )?;
+        insert_app_event(
+            connection,
+            AppEventLevel::Warning,
+            "active_lease_with_finished_run_reconciled",
+            &format!(
+                "Active worker lease '{}' had a finished run and was reconciled.",
+                lease.lease_id
+            ),
+            Some(json!({
+                "lease_id": lease.lease_id,
+                "state_id": lease.state_id,
+                "entity_id": lease.entity_id,
+                "stage_id": lease.stage_id,
+                "resource_class": lease.resource_class.as_str(),
+                "worker_id": lease.worker_id,
+                "run_id": run.run_id,
+                "run_success": run.success,
+            })),
+            now,
+        )?;
+        reconciled += 1;
+    }
+    Ok(reconciled)
+}
+
+fn reconcile_state_from_finished_run(
+    connection: &Connection,
+    state: &EntityStageStateRecord,
+    run: &StageRunRecord,
+    now: &str,
+) -> Result<(), String> {
+    if run.success {
+        if state.status != "done" {
+            update_stage_state_success_with_reason(
+                connection,
+                state.id,
+                run.http_status,
+                run.finished_at.as_deref().unwrap_or(now),
+                state.created_child_path.as_deref(),
+                RuntimeTransitionReason::StuckReconciliation,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let message = run
+        .error_message
+        .as_deref()
+        .unwrap_or("Finished worker run failed before the active lease was closed.");
+    if failure_type_is_blocking(run.error_type.as_deref()) {
+        if state.status != "blocked" {
+            block_stage_state(
+                connection,
+                state.id,
+                message,
+                run.finished_at.as_deref().unwrap_or(now),
+            )?;
+        }
+        return Ok(());
+    }
+
+    if matches!(state.status.as_str(), "queued" | "in_progress") {
+        reconcile_state_to_retry_or_failed(
+            connection,
+            state,
+            message,
+            run.http_status,
+            run.finished_at.as_deref().unwrap_or(now),
+        )?;
+    }
+    Ok(())
+}
+
+fn reconcile_in_progress_without_active_lease(
+    connection: &Connection,
+    worker_lease_sec: u64,
+    now: &str,
+) -> Result<u64, String> {
+    let now_dt = DateTime::parse_from_rfc3339(now)
+        .map(|value| value.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    let recent_cutoff = (now_dt - Duration::seconds(worker_lease_sec.max(1) as i64)).to_rfc3339();
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT
+                id,
+                entity_id,
+                stage_id,
+                file_path,
+                file_instance_id,
+                file_exists,
+                status,
+                attempts,
+                max_attempts,
+                last_error,
+                last_http_status,
+                next_retry_at,
+                last_started_at,
+                last_finished_at,
+                created_child_path,
+                discovered_at,
+                last_seen_at,
+                updated_at
+            FROM entity_stage_states state
+            WHERE status = 'in_progress'
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM worker_leases lease
+                    WHERE lease.state_id = state.id
+                      AND lease.status = 'active'
+              )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM stage_runs run
+                    WHERE run.entity_id = state.entity_id
+                      AND run.stage_id = state.stage_id
+                      AND COALESCE(run.entity_file_id, state.file_instance_id) = state.file_instance_id
+                      AND run.finished_at IS NULL
+                      AND run.started_at > ?1
+              )
+            ORDER BY updated_at ASC, id ASC
+            "#,
+        )
+        .map_err(|error| {
+            format!("Failed to prepare in-progress-without-lease reconciliation query: {error}")
+        })?;
+    let rows = statement
+        .query_map(params![recent_cutoff], stage_state_from_row)
+        .map_err(|error| format!("Failed to query in-progress-without-lease states: {error}"))?;
+    let mut states = Vec::new();
+    for row in rows {
+        states.push(row.map_err(|error| {
+            format!("Failed to read in-progress-without-lease state row: {error}")
+        })?);
+    }
+    drop(statement);
+
+    let mut reconciled = 0_u64;
+    for state in states {
+        finish_unfinished_stage_runs_for_state(
+            connection,
+            state.id,
+            "in_progress_without_active_lease_reconciled",
+            "In-progress state had no active worker lease and was reconciled.",
+            now,
+        )?;
+        reconcile_state_to_retry_or_failed(
+            connection,
+            &state,
+            "In-progress state had no active worker lease.",
+            None,
+            now,
+        )?;
+        insert_app_event(
+            connection,
+            AppEventLevel::Warning,
+            "in_progress_without_active_lease_reconciled",
+            &format!(
+                "In-progress state without active lease was reconciled for entity '{}' on stage '{}'.",
+                state.entity_id, state.stage_id
+            ),
+            Some(json!({
+                "state_id": state.id,
+                "entity_id": state.entity_id,
+                "stage_id": state.stage_id,
+            })),
+            now,
+        )?;
+        reconciled += 1;
+    }
+    Ok(reconciled)
+}
+
+fn reconcile_queued_without_active_lease(
+    connection: &Connection,
+    now: &str,
+) -> Result<u64, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT
+                id,
+                entity_id,
+                stage_id,
+                file_path,
+                file_instance_id,
+                file_exists,
+                status,
+                attempts,
+                max_attempts,
+                last_error,
+                last_http_status,
+                next_retry_at,
+                last_started_at,
+                last_finished_at,
+                created_child_path,
+                discovered_at,
+                last_seen_at,
+                updated_at
+            FROM entity_stage_states state
+            WHERE status = 'queued'
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM worker_leases lease
+                    WHERE lease.state_id = state.id
+                      AND lease.status = 'active'
+              )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM stage_runs run
+                    WHERE run.entity_id = state.entity_id
+                      AND run.stage_id = state.stage_id
+                      AND COALESCE(run.entity_file_id, state.file_instance_id) = state.file_instance_id
+                      AND run.finished_at IS NULL
+              )
+            ORDER BY updated_at ASC, id ASC
+            "#,
+        )
+        .map_err(|error| {
+            format!("Failed to prepare queued-without-lease reconciliation query: {error}")
+        })?;
+    let rows = statement
+        .query_map([], stage_state_from_row)
+        .map_err(|error| format!("Failed to query queued-without-lease states: {error}"))?;
+    let mut states = Vec::new();
+    for row in rows {
+        states.push(
+            row.map_err(|error| format!("Failed to read queued-without-lease state row: {error}"))?,
+        );
+    }
+    drop(statement);
+
+    let mut reconciled = 0_u64;
+    for state in states {
+        release_queued_claim(connection, state.id, now)?;
+        insert_app_event(
+            connection,
+            AppEventLevel::Warning,
+            "queued_without_active_lease_reconciled",
+            &format!(
+                "Queued state without active lease was moved back to pending for entity '{}' on stage '{}'.",
+                state.entity_id, state.stage_id
+            ),
+            Some(json!({
+                "state_id": state.id,
+                "entity_id": state.entity_id,
+                "stage_id": state.stage_id,
+            })),
+            now,
+        )?;
+        reconciled += 1;
+    }
+    Ok(reconciled)
+}
+
+fn reconcile_state_to_retry_or_failed(
+    connection: &Connection,
+    state: &EntityStageStateRecord,
+    message: &str,
+    http_status: Option<i64>,
+    now: &str,
+) -> Result<(), String> {
+    let next_status = if state.attempts < state.max_attempts {
+        StageStatus::RetryWait
+    } else {
+        StageStatus::Failed
+    };
+    let next_retry_at = if matches!(next_status, StageStatus::RetryWait) {
+        Some(now)
+    } else {
+        None
+    };
+    update_stage_state_failure_with_reason(
+        connection,
+        state.id,
+        next_status,
+        message,
+        http_status,
+        next_retry_at,
+        now,
+        RuntimeTransitionReason::StuckReconciliation,
+    )
+}
+
+fn finish_unfinished_stage_runs_for_state(
+    connection: &Connection,
+    state_id: i64,
+    error_type: &str,
+    message: &str,
+    now: &str,
+) -> Result<u64, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT run.run_id
+            FROM stage_runs run
+            JOIN entity_stage_states state
+              ON state.entity_id = run.entity_id
+             AND state.stage_id = run.stage_id
+             AND COALESCE(run.entity_file_id, state.file_instance_id) = state.file_instance_id
+            WHERE state.id = ?1
+              AND run.finished_at IS NULL
+            ORDER BY run.started_at ASC, run.id ASC
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare unfinished stage-run query: {error}"))?;
+    let rows = statement
+        .query_map(params![state_id], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("Failed to query unfinished stage-runs: {error}"))?;
+    let mut run_ids = Vec::new();
+    for row in rows {
+        run_ids.push(row.map_err(|error| format!("Failed to read unfinished run id: {error}"))?);
+    }
+    drop(statement);
+    for run_id in &run_ids {
+        finish_unfinished_stage_run(connection, run_id, error_type, message, now)?;
+    }
+    Ok(run_ids.len() as u64)
+}
+
+fn find_latest_unfinished_run_id_for_state(
+    connection: &Connection,
+    state_id: i64,
+) -> Result<Option<String>, String> {
+    connection
+        .query_row(
+            r#"
+            SELECT run.run_id
+            FROM stage_runs run
+            JOIN entity_stage_states state
+              ON state.entity_id = run.entity_id
+             AND state.stage_id = run.stage_id
+             AND COALESCE(run.entity_file_id, state.file_instance_id) = state.file_instance_id
+            WHERE state.id = ?1
+              AND run.finished_at IS NULL
+            ORDER BY run.started_at DESC, run.id DESC
+            LIMIT 1
+            "#,
+            params![state_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| {
+            format!("Failed to find latest unfinished run for state '{state_id}': {error}")
+        })
+}
+
+fn finish_unfinished_stage_run(
+    connection: &Connection,
+    run_id: &str,
+    error_type: &str,
+    message: &str,
+    now: &str,
+) -> Result<(), String> {
+    let Some(run) = find_stage_run_by_run_id(connection, run_id)? else {
+        return Ok(());
+    };
+    if run.finished_at.is_some() {
+        return Ok(());
+    }
+    finish_stage_run(
+        connection,
+        &FinishStageRunInput {
+            run_id: run_id.to_string(),
+            response_json: None,
+            http_status: None,
+            success: false,
+            error_type: Some(error_type.to_string()),
+            error_message: Some(message.to_string()),
+            finished_at: now.to_string(),
+            duration_ms: 0,
+        },
+    )
+}
+
+fn find_stage_run_by_run_id(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<Option<StageRunRecord>, String> {
+    connection
+        .query_row(
+            r#"
+            SELECT id, run_id, entity_id, entity_file_id, stage_id, attempt_no, workflow_url,
+                   request_json, response_json, http_status, success, error_type, error_message,
+                   started_at, finished_at, duration_ms
+            FROM stage_runs
+            WHERE run_id = ?1
+            "#,
+            params![run_id],
+            stage_run_from_row,
+        )
+        .optional()
+        .map_err(|error| format!("Failed to load stage run '{run_id}': {error}"))
+}
+
+fn failure_type_is_blocking(error_type: Option<&str>) -> bool {
+    matches!(
+        error_type.unwrap_or_default(),
+        "contract" | "invalid_json" | "manifest_invalid" | "manifest_blocked" | "copy_blocked"
+    )
+}
+
+fn list_worker_state_anomalies(
+    connection: &Connection,
+    now: &str,
+    worker_heartbeat_sec: u64,
+    worker_lease_sec: u64,
+    limit: Option<usize>,
+) -> Result<Vec<WorkerStateAnomalyRecord>, String> {
+    let now_dt = DateTime::parse_from_rfc3339(now)
+        .map(|value| value.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    let heartbeat_cutoff =
+        (now_dt - Duration::seconds((worker_heartbeat_sec.max(1) * 2) as i64)).to_rfc3339();
+    let recent_in_progress_cutoff =
+        (now_dt - Duration::seconds(worker_lease_sec.max(1) as i64)).to_rfc3339();
+    let mut anomalies = Vec::new();
+    append_worker_lease_anomalies(connection, now, &heartbeat_cutoff, &mut anomalies)?;
+    append_worker_state_anomalies(connection, &recent_in_progress_cutoff, &mut anomalies)?;
+    anomalies.sort_by(|left, right| {
+        left.diagnosis
+            .cmp(&right.diagnosis)
+            .then_with(|| left.stage_id.cmp(&right.stage_id))
+            .then_with(|| left.entity_id.cmp(&right.entity_id))
+            .then_with(|| left.state_id.cmp(&right.state_id))
+    });
+    if let Some(limit) = limit {
+        anomalies.truncate(limit);
+    }
+    Ok(anomalies)
+}
+
+fn append_worker_lease_anomalies(
+    connection: &Connection,
+    now: &str,
+    heartbeat_cutoff: &str,
+    anomalies: &mut Vec<WorkerStateAnomalyRecord>,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT
+                lease.state_id,
+                lease.lease_id,
+                lease.entity_id,
+                lease.stage_id,
+                lease.resource_class,
+                state.status,
+                lease.status,
+                lease.worker_id,
+                lease.run_id,
+                lease.lease_until,
+                lease.heartbeat_at,
+                state.last_started_at,
+                state.last_finished_at,
+                CASE
+                    WHEN state.id IS NULL THEN 'active_lease_for_missing_state'
+                    WHEN run.finished_at IS NOT NULL THEN 'active_lease_with_finished_run'
+                    WHEN lease.lease_until < ?1 THEN 'active_lease_expired'
+                    WHEN lease.heartbeat_at < ?2 THEN 'active_lease_without_recent_heartbeat'
+                    WHEN state.status NOT IN ('queued', 'in_progress') THEN 'active_lease_for_state_not_running'
+                    ELSE 'active_lease_unknown'
+                END AS diagnosis
+            FROM worker_leases lease
+            LEFT JOIN entity_stage_states state ON state.id = lease.state_id
+            LEFT JOIN stage_runs run ON run.run_id = lease.run_id
+            WHERE lease.status = 'active'
+              AND (
+                    state.id IS NULL
+                 OR run.finished_at IS NOT NULL
+                 OR lease.lease_until < ?1
+                 OR lease.heartbeat_at < ?2
+                 OR state.status NOT IN ('queued', 'in_progress')
+              )
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare worker lease anomaly query: {error}"))?;
+    let rows = statement
+        .query_map(params![now, heartbeat_cutoff], |row| {
+            worker_state_anomaly_from_row(row, "Run reconcile stuck worker states.")
+        })
+        .map_err(|error| format!("Failed to query worker lease anomalies: {error}"))?;
+    for row in rows {
+        anomalies.push(
+            row.map_err(|error| format!("Failed to read worker lease anomaly row: {error}"))?,
+        );
+    }
+    Ok(())
+}
+
+fn append_worker_state_anomalies(
+    connection: &Connection,
+    recent_in_progress_cutoff: &str,
+    anomalies: &mut Vec<WorkerStateAnomalyRecord>,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT
+                state.id,
+                NULL AS lease_id,
+                state.entity_id,
+                state.stage_id,
+                stage.resource_class,
+                state.status,
+                NULL AS lease_status,
+                NULL AS worker_id,
+                run.run_id,
+                NULL AS lease_until,
+                NULL AS heartbeat_at,
+                state.last_started_at,
+                state.last_finished_at,
+                CASE
+                    WHEN state.status = 'in_progress'
+                     AND run.run_id IS NOT NULL
+                     AND run.started_at > ?1
+                    THEN 'recent_unleased_in_progress'
+                    WHEN state.status = 'in_progress' THEN 'in_progress_without_active_lease'
+                    ELSE 'queued_without_active_lease'
+                END AS diagnosis
+            FROM entity_stage_states state
+            JOIN stages stage ON stage.stage_id = state.stage_id
+            JOIN entities entity ON entity.entity_id = state.entity_id
+            LEFT JOIN stage_runs run ON run.run_id = (
+                SELECT latest.run_id
+                FROM stage_runs latest
+                WHERE latest.entity_id = state.entity_id
+                  AND latest.stage_id = state.stage_id
+                  AND COALESCE(latest.entity_file_id, state.file_instance_id) = state.file_instance_id
+                  AND latest.finished_at IS NULL
+                ORDER BY latest.started_at DESC, latest.id DESC
+                LIMIT 1
+            )
+            WHERE state.status IN ('queued', 'in_progress')
+              AND stage.is_active = 1
+              AND entity.is_archived = 0
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM worker_leases active
+                    WHERE active.state_id = state.id
+                      AND active.status = 'active'
+              )
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare worker state anomaly query: {error}"))?;
+    let rows = statement
+        .query_map(params![recent_in_progress_cutoff], |row| {
+            let diagnosis = row.get::<_, String>(13)?;
+            let recommended_action = if diagnosis == "recent_unleased_in_progress" {
+                "Wait for the recent unfinished run or inspect the worker before reconciling."
+            } else {
+                "Run reconcile stuck worker states."
+            };
+            worker_state_anomaly_from_row_with_diagnosis(row, diagnosis, recommended_action)
+        })
+        .map_err(|error| format!("Failed to query worker state anomalies: {error}"))?;
+    for row in rows {
+        anomalies.push(
+            row.map_err(|error| format!("Failed to read worker state anomaly row: {error}"))?,
+        );
+    }
+    Ok(())
+}
+
+fn worker_state_anomaly_from_row(
+    row: &rusqlite::Row<'_>,
+    recommended_action: &str,
+) -> rusqlite::Result<WorkerStateAnomalyRecord> {
+    let diagnosis = row.get::<_, String>(13)?;
+    worker_state_anomaly_from_row_with_diagnosis(row, diagnosis, recommended_action)
+}
+
+fn worker_state_anomaly_from_row_with_diagnosis(
+    row: &rusqlite::Row<'_>,
+    diagnosis: String,
+    recommended_action: &str,
+) -> rusqlite::Result<WorkerStateAnomalyRecord> {
+    let resource_class_text: String = row.get(4)?;
+    Ok(WorkerStateAnomalyRecord {
+        state_id: row.get(0)?,
+        lease_id: row.get(1)?,
+        entity_id: row.get(2)?,
+        stage_id: row.get(3)?,
+        resource_class: ResourceClass::from_str(&resource_class_text).unwrap_or_default(),
+        state_status: row.get(5)?,
+        lease_status: row.get(6)?,
+        worker_id: row.get(7)?,
+        run_id: row.get(8)?,
+        lease_until: row.get(9)?,
+        heartbeat_at: row.get(10)?,
+        last_started_at: row.get(11)?,
+        last_finished_at: row.get(12)?,
+        diagnosis,
+        recommended_action: recommended_action.to_string(),
     })
 }
 
@@ -2772,6 +3559,8 @@ fn worker_pool_summary(
     Ok(WorkerPoolRuntimeSummary {
         resource_class,
         configured_concurrency,
+        env_concurrency_limit: None,
+        requested_desired_concurrency: None,
         desired_concurrency: control.desired_concurrency,
         effective_concurrency,
         is_started: control.is_started,
@@ -3024,6 +3813,44 @@ fn find_worker_lease_by_id(
         .map_err(|error| format!("Failed to load worker lease '{lease_id}': {error}"))
 }
 
+fn find_active_worker_lease_by_state_id(
+    connection: &Connection,
+    state_id: i64,
+) -> Result<Option<WorkerLeaseRecord>, String> {
+    connection
+        .query_row(
+            r#"
+            SELECT
+                lease_id,
+                state_id,
+                entity_id,
+                entity_file_id,
+                stage_id,
+                resource_class,
+                worker_id,
+                status,
+                run_id,
+                leased_at,
+                lease_until,
+                heartbeat_at,
+                released_at,
+                release_reason,
+                updated_at
+            FROM worker_leases
+            WHERE state_id = ?1
+              AND status = 'active'
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            "#,
+            params![state_id],
+            worker_lease_from_row,
+        )
+        .optional()
+        .map_err(|error| {
+            format!("Failed to load active worker lease for state '{state_id}': {error}")
+        })
+}
+
 fn worker_lease_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkerLeaseRecord> {
     let resource_class_text: String = row.get(5)?;
     Ok(WorkerLeaseRecord {
@@ -3135,12 +3962,25 @@ pub(crate) fn update_stage_state_success(
     finished_at: &str,
     created_child_path: Option<&str>,
 ) -> Result<(), String> {
-    ensure_state_transition(
+    update_stage_state_success_with_reason(
         connection,
         state_id,
-        &StageStatus::Done,
+        http_status,
+        finished_at,
+        created_child_path,
         RuntimeTransitionReason::RuntimeSuccess,
-    )?;
+    )
+}
+
+fn update_stage_state_success_with_reason(
+    connection: &Connection,
+    state_id: i64,
+    http_status: Option<i64>,
+    finished_at: &str,
+    created_child_path: Option<&str>,
+    reason: RuntimeTransitionReason,
+) -> Result<(), String> {
+    ensure_state_transition(connection, state_id, &StageStatus::Done, reason)?;
     connection
         .execute(
             r#"
@@ -8068,6 +8908,369 @@ mod tests {
 
         assert_eq!(recovered, 0);
         assert_eq!(lease_status, "active");
+    }
+
+    #[test]
+    fn reconcile_finished_successful_run_marks_state_done_and_lease_done() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )],
+            &[("incoming", "entity-1")],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+        start_test_pool(&connection, ResourceClass::Default, 1);
+        let task = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                worker_id: "worker-one".to_string(),
+                lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
+                now: Utc::now(),
+            },
+        )
+        .expect("claim")
+        .pop()
+        .expect("task");
+        let lease_id = task.lease_id.clone().expect("lease id");
+        let now = Utc::now().to_rfc3339();
+        start_claimed_stage_run(
+            &mut connection,
+            task.state_id,
+            &NewStageRunInput {
+                run_id: "finished-success".to_string(),
+                entity_id: task.entity_id.clone(),
+                entity_file_id: task.file_instance_id,
+                stage_id: task.stage_id.clone(),
+                attempt_no: 1,
+                workflow_url: task.workflow_url.clone(),
+                request_json: "{}".to_string(),
+                started_at: now.clone(),
+            },
+        )
+        .expect("start run");
+        attach_worker_lease_run(&connection, &lease_id, "finished-success", &now)
+            .expect("attach run");
+        finish_stage_run(
+            &connection,
+            &FinishStageRunInput {
+                run_id: "finished-success".to_string(),
+                response_json: Some("{}".to_string()),
+                http_status: Some(200),
+                success: true,
+                error_type: None,
+                error_message: None,
+                finished_at: now.clone(),
+                duration_ms: 1,
+            },
+        )
+        .expect("finish run");
+
+        let before = get_worker_summary(
+            &database_path,
+            &test_config(vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )]),
+        )
+        .expect("summary");
+        assert!(before
+            .worker_state_anomaly_counts
+            .iter()
+            .any(|item| item.diagnosis == "active_lease_with_finished_run" && item.count == 1));
+
+        let reconciled = reconcile_stuck_worker_states(&database_path, 1800).expect("reconcile");
+        let state = get_stage_state(&database_path, "entity-1", "incoming")
+            .expect("state")
+            .expect("state exists");
+        let lease_status: String = connection
+            .query_row(
+                "SELECT status FROM worker_leases WHERE lease_id = ?1",
+                params![lease_id],
+                |row| row.get(0),
+            )
+            .expect("lease status");
+
+        assert_eq!(reconciled, 1);
+        assert_eq!(state.status, "done");
+        assert_eq!(lease_status, "done");
+    }
+
+    #[test]
+    fn reconcile_finished_failed_run_schedules_retry_and_fails_lease() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )],
+            &[("incoming", "entity-1")],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+        start_test_pool(&connection, ResourceClass::Default, 1);
+        let task = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                worker_id: "worker-one".to_string(),
+                lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
+                now: Utc::now(),
+            },
+        )
+        .expect("claim")
+        .pop()
+        .expect("task");
+        let lease_id = task.lease_id.clone().expect("lease id");
+        let now = Utc::now().to_rfc3339();
+        start_claimed_stage_run(
+            &mut connection,
+            task.state_id,
+            &NewStageRunInput {
+                run_id: "finished-failed".to_string(),
+                entity_id: task.entity_id.clone(),
+                entity_file_id: task.file_instance_id,
+                stage_id: task.stage_id.clone(),
+                attempt_no: 1,
+                workflow_url: task.workflow_url.clone(),
+                request_json: "{}".to_string(),
+                started_at: now.clone(),
+            },
+        )
+        .expect("start run");
+        attach_worker_lease_run(&connection, &lease_id, "finished-failed", &now)
+            .expect("attach run");
+        finish_stage_run(
+            &connection,
+            &FinishStageRunInput {
+                run_id: "finished-failed".to_string(),
+                response_json: None,
+                http_status: Some(500),
+                success: false,
+                error_type: Some("http_error".to_string()),
+                error_message: Some("HTTP 500".to_string()),
+                finished_at: now.clone(),
+                duration_ms: 1,
+            },
+        )
+        .expect("finish run");
+
+        let reconciled = reconcile_stuck_worker_states(&database_path, 1800).expect("reconcile");
+        let state = get_stage_state(&database_path, "entity-1", "incoming")
+            .expect("state")
+            .expect("state exists");
+        let lease_status: String = connection
+            .query_row(
+                "SELECT status FROM worker_leases WHERE lease_id = ?1",
+                params![lease_id],
+                |row| row.get(0),
+            )
+            .expect("lease status");
+
+        assert_eq!(reconciled, 1);
+        assert_eq!(state.status, "retry_wait");
+        assert_eq!(lease_status, "failed");
+    }
+
+    #[test]
+    fn reconcile_unleased_in_progress_and_queued_states_is_idempotent() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )],
+            &[
+                ("incoming", "entity-progress"),
+                ("incoming", "entity-queued"),
+            ],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+        start_test_pool(&connection, ResourceClass::Default, 2);
+        let mut tasks = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 2,
+                worker_id: "worker-one".to_string(),
+                lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::Fifo,
+                now: Utc::now(),
+            },
+        )
+        .expect("claim");
+        tasks.sort_by(|left, right| left.entity_id.cmp(&right.entity_id));
+        let progress = tasks
+            .iter()
+            .find(|task| task.entity_id == "entity-progress")
+            .expect("progress task")
+            .clone();
+        let queued = tasks
+            .iter()
+            .find(|task| task.entity_id == "entity-queued")
+            .expect("queued task")
+            .clone();
+        let old = (Utc::now() - Duration::seconds(7200)).to_rfc3339();
+        start_claimed_stage_run(
+            &mut connection,
+            progress.state_id,
+            &NewStageRunInput {
+                run_id: "old-unleased-run".to_string(),
+                entity_id: progress.entity_id.clone(),
+                entity_file_id: progress.file_instance_id,
+                stage_id: progress.stage_id.clone(),
+                attempt_no: 1,
+                workflow_url: progress.workflow_url.clone(),
+                request_json: "{}".to_string(),
+                started_at: old,
+            },
+        )
+        .expect("start old run");
+        attach_worker_lease_run(
+            &connection,
+            progress.lease_id.as_deref().expect("progress lease"),
+            "old-unleased-run",
+            &Utc::now().to_rfc3339(),
+        )
+        .expect("attach run");
+        connection
+            .execute(
+                "UPDATE worker_leases SET status = 'released', released_at = ?2, release_reason = 'test', updated_at = ?2 WHERE lease_id = ?1",
+                params![progress.lease_id.as_deref().expect("progress lease"), Utc::now().to_rfc3339()],
+            )
+            .expect("release progress lease");
+        connection
+            .execute(
+                "UPDATE worker_leases SET status = 'released', released_at = ?2, release_reason = 'test', updated_at = ?2 WHERE lease_id = ?1",
+                params![queued.lease_id.as_deref().expect("queued lease"), Utc::now().to_rfc3339()],
+            )
+            .expect("release queued lease");
+
+        let before = get_worker_summary(
+            &database_path,
+            &test_config(vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )]),
+        )
+        .expect("summary");
+        assert!(before
+            .worker_state_anomaly_counts
+            .iter()
+            .any(|item| item.diagnosis == "in_progress_without_active_lease" && item.count == 1));
+        assert!(before
+            .worker_state_anomaly_counts
+            .iter()
+            .any(|item| item.diagnosis == "queued_without_active_lease" && item.count == 1));
+
+        let reconciled = reconcile_stuck_worker_states(&database_path, 1).expect("reconcile");
+        let second = reconcile_stuck_worker_states(&database_path, 1).expect("reconcile again");
+        let progress_state = get_stage_state(&database_path, "entity-progress", "incoming")
+            .expect("progress state")
+            .expect("progress exists");
+        let queued_state = get_stage_state(&database_path, "entity-queued", "incoming")
+            .expect("queued state")
+            .expect("queued exists");
+        let run_error_type: String = connection
+            .query_row(
+                "SELECT error_type FROM stage_runs WHERE run_id = 'old-unleased-run'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("run error type");
+
+        assert_eq!(reconciled, 2);
+        assert_eq!(second, 0);
+        assert_eq!(progress_state.status, "retry_wait");
+        assert_eq!(queued_state.status, "pending");
+        assert_eq!(
+            run_error_type,
+            "in_progress_without_active_lease_reconciled"
+        );
+    }
+
+    #[test]
+    fn worker_internal_error_finalizer_clears_active_lease_and_in_progress() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![stage_with_resource(
+                "incoming",
+                None,
+                ResourceClass::Default,
+            )],
+            &[("incoming", "entity-1")],
+        );
+        let mut connection = open_connection(&database_path).expect("open");
+        start_test_pool(&connection, ResourceClass::Default, 1);
+        let task = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                worker_id: "worker-one".to_string(),
+                lease_ttl_sec: 1800,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
+                now: Utc::now(),
+            },
+        )
+        .expect("claim")
+        .pop()
+        .expect("task");
+        let lease_id = task.lease_id.clone().expect("lease id");
+        let now = Utc::now().to_rfc3339();
+        start_claimed_stage_run(
+            &mut connection,
+            task.state_id,
+            &NewStageRunInput {
+                run_id: "internal-error-run".to_string(),
+                entity_id: task.entity_id.clone(),
+                entity_file_id: task.file_instance_id,
+                stage_id: task.stage_id.clone(),
+                attempt_no: 1,
+                workflow_url: task.workflow_url.clone(),
+                request_json: "{}".to_string(),
+                started_at: now.clone(),
+            },
+        )
+        .expect("start run");
+        attach_worker_lease_run(&connection, &lease_id, "internal-error-run", &now)
+            .expect("attach run");
+
+        let mut task_without_lease_id = task.clone();
+        task_without_lease_id.lease_id = None;
+        finish_worker_task_internal_error(
+            &database_path,
+            &task_without_lease_id,
+            "synthetic internal error",
+        )
+        .expect("finalize");
+        let state = get_stage_state(&database_path, "entity-1", "incoming")
+            .expect("state")
+            .expect("state exists");
+        let lease_status: String = connection
+            .query_row(
+                "SELECT status FROM worker_leases WHERE lease_id = ?1",
+                params![lease_id],
+                |row| row.get(0),
+            )
+            .expect("lease status");
+        let run_error_type: String = connection
+            .query_row(
+                "SELECT error_type FROM stage_runs WHERE run_id = 'internal-error-run'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("run error type");
+
+        assert_eq!(state.status, "retry_wait");
+        assert_eq!(lease_status, "failed");
+        assert_eq!(run_error_type, "worker_internal_error");
     }
 
     #[test]

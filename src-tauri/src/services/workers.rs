@@ -61,7 +61,15 @@ pub(crate) fn start_workers(
         input.default_workers.min(default_limit),
         input.local_llm_workers.min(local_llm_limit),
     )?;
-    worker_summary(workspace_id)
+    let mut summary = worker_summary(workspace_id)?;
+    annotate_requested_desired(
+        &mut summary,
+        &[
+            (ResourceClass::Default, input.default_workers),
+            (ResourceClass::LocalLlm, input.local_llm_workers),
+        ],
+    );
+    Ok(summary)
 }
 
 pub(crate) fn stop_workers(workspace_id: &str) -> Result<WorkerSummary, String> {
@@ -91,7 +99,9 @@ pub(crate) fn update_pool_desired_concurrency(
         resource_class,
         desired_concurrency.min(limit),
     )?;
-    worker_summary(workspace_id)
+    let mut summary = worker_summary(workspace_id)?;
+    annotate_requested_desired(&mut summary, &[(resource_class, desired_concurrency)]);
+    Ok(summary)
 }
 
 pub(crate) fn pause_all(workspace_id: &str, reason: Option<&str>) -> Result<WorkerSummary, String> {
@@ -132,6 +142,16 @@ pub(crate) fn release_lease(
 ) -> Result<bool, String> {
     let context = runtime::load_worker_runtime_context(workspace_id)?;
     database::release_worker_lease(&context.database_path, lease_id, reason)
+}
+
+pub(crate) fn reconcile_stuck(workspace_id: &str) -> Result<(u64, WorkerSummary), String> {
+    let context = runtime::load_worker_runtime_context(workspace_id)?;
+    let reconciled = database::reconcile_stuck_worker_states(
+        &context.database_path,
+        context.config.runtime.worker_lease_sec,
+    )?;
+    let summary = worker_summary(workspace_id)?;
+    Ok((reconciled, summary))
 }
 
 pub(crate) fn workspace_workers_enabled(workspace_id: &str) -> bool {
@@ -359,6 +379,7 @@ fn apply_env_effective_concurrency(
             ResourceClass::Default => env_config.default_concurrency,
             ResourceClass::LocalLlm => env_config.local_llm_concurrency,
         };
+        pool.env_concurrency_limit = env_value;
         let yaml_limit = match pool.resource_class {
             ResourceClass::Default => configured.default.concurrency,
             ResourceClass::LocalLlm => configured.local_llm.concurrency,
@@ -371,6 +392,18 @@ fn apply_env_effective_concurrency(
         };
     }
     Ok(())
+}
+
+fn annotate_requested_desired(summary: &mut WorkerSummary, requested: &[(ResourceClass, u32)]) {
+    for (resource_class, requested_value) in requested {
+        if let Some(pool) = summary
+            .pools
+            .iter_mut()
+            .find(|pool| pool.resource_class == *resource_class)
+        {
+            pool.requested_desired_concurrency = Some(*requested_value);
+        }
+    }
 }
 
 fn runtime_status(summary: &WorkerSummary) -> String {
@@ -612,6 +645,15 @@ workspaces:
     }
 
     fn write_pipeline(workdir: &Path, workflow_url: &str) {
+        write_pipeline_with_concurrency(workdir, workflow_url, 1, 0);
+    }
+
+    fn write_pipeline_with_concurrency(
+        workdir: &Path,
+        workflow_url: &str,
+        default_concurrency: u32,
+        local_llm_concurrency: u32,
+    ) {
         fs::create_dir_all(workdir).expect("workdir");
         fs::write(
             workdir.join("pipeline.yaml"),
@@ -625,9 +667,9 @@ runtime:
   file_stability_delay_ms: 0
   worker_pools:
     default:
-      concurrency: 1
+      concurrency: {default_concurrency}
     local_llm:
-      concurrency: 0
+      concurrency: {local_llm_concurrency}
 stages:
   - id: stage_0
     input_folder: stages/stage_0
@@ -636,6 +678,19 @@ stages:
             ),
         )
         .expect("pipeline");
+    }
+
+    fn with_default_worker_env<F>(value: Option<&str>, run: F)
+    where
+        F: FnOnce(),
+    {
+        let previous = std::env::var_os("BEEHIVE_WORKER_DEFAULT_CONCURRENCY");
+        match value {
+            Some(value) => std::env::set_var("BEEHIVE_WORKER_DEFAULT_CONCURRENCY", value),
+            None => std::env::remove_var("BEEHIVE_WORKER_DEFAULT_CONCURRENCY"),
+        }
+        run();
+        restore_env_var("BEEHIVE_WORKER_DEFAULT_CONCURRENCY", previous.as_deref());
     }
 
     #[test]
@@ -700,6 +755,111 @@ stages:
             assert_eq!(summary.claimed, 1);
             assert_eq!(summary.succeeded, 1);
             assert_eq!(webhook.request_count.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn worker_start_summary_explains_env_and_yaml_cap() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().join("root");
+        let workdir = root.join("smoke");
+        let registry_path = tempdir.path().join("workspaces.yaml");
+        write_pipeline_with_concurrency(&workdir, "http://127.0.0.1:9999/webhook", 1, 0);
+        write_registry(&registry_path, &workdir);
+
+        with_test_env(&registry_path, &root, || {
+            with_default_worker_env(Some("10"), || {
+                runtime::load_workspace_context("smoke").expect("bootstrap");
+                let summary = start_workers(
+                    "smoke",
+                    &WorkerStartRequest {
+                        default_workers: 3,
+                        local_llm_workers: 0,
+                    },
+                )
+                .expect("start");
+                let default_pool = summary
+                    .pools
+                    .iter()
+                    .find(|pool| pool.resource_class == ResourceClass::Default)
+                    .expect("default pool");
+
+                assert_eq!(default_pool.requested_desired_concurrency, Some(3));
+                assert_eq!(default_pool.desired_concurrency, 1);
+                assert_eq!(default_pool.configured_concurrency, 1);
+                assert_eq!(default_pool.env_concurrency_limit, Some(10));
+                assert_eq!(default_pool.effective_concurrency, 1);
+            });
+        });
+    }
+
+    #[test]
+    fn worker_start_summary_uses_requested_when_env_and_yaml_allow_it() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().join("root");
+        let workdir = root.join("smoke");
+        let registry_path = tempdir.path().join("workspaces.yaml");
+        write_pipeline_with_concurrency(&workdir, "http://127.0.0.1:9999/webhook", 10, 0);
+        write_registry(&registry_path, &workdir);
+
+        with_test_env(&registry_path, &root, || {
+            with_default_worker_env(Some("10"), || {
+                runtime::load_workspace_context("smoke").expect("bootstrap");
+                let summary = start_workers(
+                    "smoke",
+                    &WorkerStartRequest {
+                        default_workers: 3,
+                        local_llm_workers: 0,
+                    },
+                )
+                .expect("start");
+                let default_pool = summary
+                    .pools
+                    .iter()
+                    .find(|pool| pool.resource_class == ResourceClass::Default)
+                    .expect("default pool");
+
+                assert_eq!(default_pool.requested_desired_concurrency, Some(3));
+                assert_eq!(default_pool.desired_concurrency, 3);
+                assert_eq!(default_pool.configured_concurrency, 10);
+                assert_eq!(default_pool.env_concurrency_limit, Some(10));
+                assert_eq!(default_pool.effective_concurrency, 3);
+            });
+        });
+    }
+
+    #[test]
+    fn worker_start_summary_caps_to_yaml_when_env_absent() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().join("root");
+        let workdir = root.join("smoke");
+        let registry_path = tempdir.path().join("workspaces.yaml");
+        write_pipeline_with_concurrency(&workdir, "http://127.0.0.1:9999/webhook", 5, 0);
+        write_registry(&registry_path, &workdir);
+
+        with_test_env(&registry_path, &root, || {
+            with_default_worker_env(None, || {
+                runtime::load_workspace_context("smoke").expect("bootstrap");
+                let summary = start_workers(
+                    "smoke",
+                    &WorkerStartRequest {
+                        default_workers: 10,
+                        local_llm_workers: 0,
+                    },
+                )
+                .expect("start");
+                let default_pool = summary
+                    .pools
+                    .iter()
+                    .find(|pool| pool.resource_class == ResourceClass::Default)
+                    .expect("default pool");
+
+                assert_eq!(default_pool.requested_desired_concurrency, Some(10));
+                assert_eq!(default_pool.desired_concurrency, 5);
+                assert_eq!(default_pool.configured_concurrency, 5);
+                assert_eq!(default_pool.env_concurrency_limit, None);
+                assert_eq!(default_pool.effective_concurrency, 5);
+            });
         });
     }
 }

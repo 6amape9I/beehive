@@ -43,6 +43,7 @@ import type {
   ValidatePipelineConfigDraftResult,
   WorkerLeaseReleaseResult,
   WorkerPoolControlResult,
+  WorkerReconcileStuckResult,
   WorkerSummaryResult,
   WorkspaceExplorerResult,
   WorkspaceMutationResult,
@@ -346,6 +347,10 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
       workspaceId: string,
     ): Promise<RecoverExpiredWorkerLeasesResult> =>
       postJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/workers/recover-expired-leases`),
+    reconcileStuckWorkerStates: (
+      workspaceId: string,
+    ): Promise<WorkerReconcileStuckResult> =>
+      postJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/workers/reconcile-stuck`),
     pauseWorkers: (
       workspaceId: string,
       reason?: string | null,

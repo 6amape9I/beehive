@@ -1,9 +1,14 @@
 import { formatDateTime, shortChecksum } from "../../lib/formatters";
-import type { EntityFileAllowedActions, EntityFileRecord } from "../../types/domain";
+import type {
+  EntityFileAllowedActions,
+  EntityFileRecord,
+  EntityStageStateRecord,
+} from "../../types/domain";
 import { StatusBadge } from "../StatusBadge";
 
 interface EntityFileInstancesProps {
   files: EntityFileRecord[];
+  stageStates: EntityStageStateRecord[];
   fileAllowedActions: EntityFileAllowedActions[];
   selectedFileId: number | null;
   loadingFileAction: string | null;
@@ -14,6 +19,7 @@ interface EntityFileInstancesProps {
 
 export function EntityFileInstances({
   files,
+  stageStates,
   fileAllowedActions,
   selectedFileId,
   loadingFileAction,
@@ -37,7 +43,7 @@ export function EntityFileInstances({
                 <th>Selected</th>
                 <th>Stage</th>
                 <th>Path</th>
-                <th>Status</th>
+                <th>Runtime status</th>
                 <th>Validation</th>
                 <th>Presence</th>
                 <th>Checksum</th>
@@ -51,6 +57,7 @@ export function EntityFileInstances({
             <tbody>
               {files.map((file) => {
                 const busy = loadingFileAction?.endsWith(`:${file.id}`) ?? false;
+                const runtimeStatus = effectiveFileRuntimeStatus(file, stageStates);
                 const actions = fileAllowedActions.find(
                   (item) => item.entity_file_id === file.id,
                 );
@@ -70,7 +77,10 @@ export function EntityFileInstances({
                       <code>{file.file_path}</code>
                     </td>
                     <td>
-                      <StatusBadge status={file.status} />
+                      <StatusBadge status={runtimeStatus} />
+                      {runtimeStatus !== file.status ? (
+                        <span className="muted">Artifact record status: {file.status}</span>
+                      ) : null}
                     </td>
                     <td>
                       <StatusBadge status={file.validation_status} />
@@ -118,4 +128,18 @@ export function EntityFileInstances({
       )}
     </section>
   );
+}
+
+export function effectiveFileRuntimeStatus(
+  file: EntityFileRecord,
+  stageStates: EntityStageStateRecord[],
+) {
+  const byFileInstance = stageStates.find((state) => state.file_instance_id === file.id);
+  if (byFileInstance) {
+    return byFileInstance.status;
+  }
+  const byEntityStage = stageStates.find(
+    (state) => state.entity_id === file.entity_id && state.stage_id === file.stage_id,
+  );
+  return byEntityStage?.status ?? file.status;
 }

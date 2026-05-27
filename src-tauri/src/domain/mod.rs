@@ -782,6 +782,8 @@ pub struct RuntimeSummary {
 pub struct WorkerPoolRuntimeSummary {
     pub resource_class: ResourceClass,
     pub configured_concurrency: u32,
+    pub env_concurrency_limit: Option<u32>,
+    pub requested_desired_concurrency: Option<u32>,
     pub desired_concurrency: u32,
     pub effective_concurrency: u32,
     pub is_started: bool,
@@ -821,6 +823,31 @@ pub struct WorkerLeaseRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerStateAnomalyCount {
+    pub diagnosis: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerStateAnomalyRecord {
+    pub state_id: i64,
+    pub lease_id: Option<String>,
+    pub entity_id: String,
+    pub stage_id: String,
+    pub resource_class: ResourceClass,
+    pub state_status: Option<String>,
+    pub lease_status: Option<String>,
+    pub worker_id: Option<String>,
+    pub run_id: Option<String>,
+    pub lease_until: Option<String>,
+    pub heartbeat_at: Option<String>,
+    pub last_started_at: Option<String>,
+    pub last_finished_at: Option<String>,
+    pub diagnosis: String,
+    pub recommended_action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerSummary {
     pub worker_lease_sec: u64,
     pub worker_heartbeat_sec: u64,
@@ -834,6 +861,8 @@ pub struct WorkerSummary {
     pub expired_leases_total: u64,
     pub last_recovery_at: Option<String>,
     pub recent_leases: Vec<WorkerLeaseRecord>,
+    pub worker_state_anomaly_counts: Vec<WorkerStateAnomalyCount>,
+    pub recent_worker_state_anomalies: Vec<WorkerStateAnomalyRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -845,6 +874,13 @@ pub struct WorkerSummaryResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecoverExpiredWorkerLeasesResult {
     pub recovered: u64,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerReconcileStuckResult {
+    pub reconciled: u64,
+    pub summary: Option<WorkerSummary>,
     pub errors: Vec<CommandErrorInfo>,
 }
 

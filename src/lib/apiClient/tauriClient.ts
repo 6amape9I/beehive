@@ -45,6 +45,7 @@ import type {
   ValidatePipelineConfigDraftResult,
   WorkerLeaseReleaseResult,
   WorkerPoolControlResult,
+  WorkerReconcileStuckResult,
   WorkerSummaryResult,
   WorkspaceExplorerResult,
   WorkspaceMutationResult,
@@ -346,6 +347,19 @@ export const tauriClient: BeehiveApiClient = {
         {
           code: "worker_recovery_http_only",
           message: `Worker lease recovery for '${workspaceId}' is available through the HTTP API.`,
+          path: null,
+        },
+      ],
+    });
+  },
+  reconcileStuckWorkerStates(workspaceId: string): Promise<WorkerReconcileStuckResult> {
+    return Promise.resolve({
+      reconciled: 0,
+      summary: null,
+      errors: [
+        {
+          code: "worker_reconcile_stuck_http_only",
+          message: `Worker stuck-state reconciliation for '${workspaceId}' is available through the HTTP API.`,
           path: null,
         },
       ],

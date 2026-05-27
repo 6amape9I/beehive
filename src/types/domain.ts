@@ -503,6 +503,8 @@ export interface RuntimeSummary {
 export interface WorkerPoolRuntimeSummary {
   resource_class: ResourceClass;
   configured_concurrency: number;
+  env_concurrency_limit: number | null;
+  requested_desired_concurrency: number | null;
   desired_concurrency: number;
   effective_concurrency: number;
   is_started: boolean;
@@ -540,6 +542,29 @@ export interface WorkerLeaseRecord {
   updated_at: string;
 }
 
+export interface WorkerStateAnomalyCount {
+  diagnosis: string;
+  count: number;
+}
+
+export interface WorkerStateAnomalyRecord {
+  state_id: number;
+  lease_id: string | null;
+  entity_id: string;
+  stage_id: string;
+  resource_class: ResourceClass;
+  state_status: string | null;
+  lease_status: string | null;
+  worker_id: string | null;
+  run_id: string | null;
+  lease_until: string | null;
+  heartbeat_at: string | null;
+  last_started_at: string | null;
+  last_finished_at: string | null;
+  diagnosis: string;
+  recommended_action: string;
+}
+
 export interface WorkerSummary {
   worker_lease_sec: number;
   worker_heartbeat_sec: number;
@@ -553,6 +578,8 @@ export interface WorkerSummary {
   expired_leases_total: number;
   last_recovery_at: string | null;
   recent_leases: WorkerLeaseRecord[];
+  worker_state_anomaly_counts: WorkerStateAnomalyCount[];
+  recent_worker_state_anomalies: WorkerStateAnomalyRecord[];
 }
 
 export interface WorkerSummaryResult {
@@ -562,6 +589,12 @@ export interface WorkerSummaryResult {
 
 export interface RecoverExpiredWorkerLeasesResult {
   recovered: number;
+  errors: CommandErrorInfo[];
+}
+
+export interface WorkerReconcileStuckResult {
+  reconciled: number;
+  summary: WorkerSummary | null;
   errors: CommandErrorInfo[];
 }
 

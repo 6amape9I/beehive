@@ -13,6 +13,7 @@ import {
   pauseWorkers,
   releaseWorkerLease,
   recoverExpiredWorkerLeases,
+  reconcileStuckWorkerStates,
   reconcileS3Workspace,
   reconcileS3WorkspaceById,
   resumeWorkerPool,
@@ -295,6 +296,24 @@ export function WorkspaceExplorerPage() {
       setErrors(result.errors);
       setActionMessage(`Worker lease recovery complete: ${result.recovered} recovered.`);
       await handleLoadWorkerSummary();
+      await loadEntities();
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
+  async function handleReconcileStuckWorkerStates() {
+    if (!workspaceId) return;
+    setActiveAction("worker-reconcile-stuck");
+    setActionMessage(null);
+    try {
+      const result = await reconcileStuckWorkerStates(workspaceId);
+      setErrors(result.errors);
+      if (result.summary) {
+        setWorkerSummary(result.summary);
+        syncWorkerDesiredCounts(result.summary);
+      }
+      setActionMessage(`Worker stuck-state reconciliation complete: ${result.reconciled} repaired.`);
       await loadEntities();
     } finally {
       setActiveAction(null);
@@ -627,6 +646,14 @@ export function WorkspaceExplorerPage() {
                   <button
                     type="button"
                     className="button secondary"
+                    disabled={activeAction === "worker-reconcile-stuck"}
+                    onClick={() => void handleReconcileStuckWorkerStates()}
+                  >
+                    {activeAction === "worker-reconcile-stuck" ? "Reconciling..." : "Reconcile stuck"}
+                  </button>
+                  <button
+                    type="button"
+                    className="button secondary"
                     disabled={activeAction !== null}
                     onClick={() => void handlePauseAllWorkers()}
                   >
@@ -652,6 +679,7 @@ export function WorkspaceExplorerPage() {
                   onPausePool={handlePausePool}
                   onResumePool={handleResumePool}
                   onReleaseLease={handleReleaseWorkerLease}
+                  onReconcileStuck={handleReconcileStuckWorkerStates}
                   onOpenEntity={goToEntityById}
                 />
               ) : null}
@@ -898,6 +926,7 @@ function WorkerPoolsSummary({
   onPausePool,
   onResumePool,
   onReleaseLease,
+  onReconcileStuck,
   onOpenEntity,
 }: {
   summary: WorkerSummary;
@@ -908,6 +937,7 @@ function WorkerPoolsSummary({
   onPausePool: (resourceClass: string) => void;
   onResumePool: (resourceClass: string) => void;
   onReleaseLease: (lease: WorkerLeaseRecord) => void;
+  onReconcileStuck: () => void;
   onOpenEntity: (entityId: string) => void;
 }) {
   const localLlmPool = summary.pools.find((pool) => pool.resource_class === "local_llm");
@@ -915,6 +945,10 @@ function WorkerPoolsSummary({
     localLlmPool &&
     localLlmPool.configured_concurrency > 0 &&
     localLlmPool.active_leases >= localLlmPool.configured_concurrency;
+  const anomalyTotal = summary.worker_state_anomaly_counts.reduce(
+    (total, item) => total + item.count,
+    0,
+  );
 
   return (
     <div className="workspace-wave-summary">
@@ -932,6 +966,33 @@ function WorkerPoolsSummary({
         <p className="empty-text">
           Local LLM pool is full. New local LLM tasks will wait in Beehive.
         </p>
+      ) : null}
+      {anomalyTotal > 0 ? (
+        <div className="issue-list">
+          <article className="issue-row">
+            <StatusBadge status="warning" />
+            <div>
+              <strong>Worker state needs attention</strong>
+              <p>
+                {summary.worker_state_anomaly_counts
+                  .map((item) => `${item.count} ${workerAnomalyLabel(item.diagnosis)}`)
+                  .join(", ")}
+              </p>
+              <div className="button-row">
+                <button
+                  type="button"
+                  className="button secondary"
+                  disabled={activeAction !== null}
+                  onClick={onReconcileStuck}
+                >
+                  {activeAction === "worker-reconcile-stuck"
+                    ? "Reconciling..."
+                    : "Reconcile stuck worker states"}
+                </button>
+              </div>
+            </div>
+          </article>
+        </div>
       ) : null}
       <div className="summary-card-grid">
         <SummaryCard label="Runtime status" value={summary.runtime_status} />
@@ -1040,6 +1101,46 @@ function WorkerPoolsSummary({
       ) : (
         <p className="empty-text">No worker leases recorded yet.</p>
       )}
+      {summary.recent_worker_state_anomalies.length > 0 ? (
+        <details className="diagnostics-block">
+          <summary>
+            <strong>Worker state anomalies</strong>
+            <span className="muted">Recent records that can block worker claiming</span>
+          </summary>
+          <div className="table-wrap">
+            <table className="workspace-file-table">
+              <thead>
+                <tr>
+                  <th>Diagnosis</th>
+                  <th>Entity</th>
+                  <th>Stage</th>
+                  <th>Pool</th>
+                  <th>State</th>
+                  <th>Lease</th>
+                  <th>Worker</th>
+                  <th>Run</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {summary.recent_worker_state_anomalies.map((anomaly) => (
+                  <tr key={`${anomaly.diagnosis}-${anomaly.state_id}-${anomaly.lease_id ?? "none"}`}>
+                    <td>{workerAnomalyLabel(anomaly.diagnosis)}</td>
+                    <td>{anomaly.entity_id}</td>
+                    <td>{anomaly.stage_id}</td>
+                    <td>{anomaly.resource_class}</td>
+                    <td>{anomaly.state_status ?? "missing"}</td>
+                    <td>{anomaly.lease_status ?? "none"}</td>
+                    <td>{anomaly.worker_id ? shortId(anomaly.worker_id) : "none"}</td>
+                    <td>{anomaly.run_id ? <code>{shortId(anomaly.run_id)}</code> : "none"}</td>
+                    <td>{anomaly.recommended_action}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      ) : null}
     </div>
   );
 }
@@ -1062,6 +1163,10 @@ function WorkerPoolCard({
   onResumePool: (resourceClass: string) => void;
 }) {
   const pendingTotal = pool.pending_count + pool.retry_wait_due_count;
+  const requested = pool.requested_desired_concurrency ?? desiredCount;
+  const requestWasCapped =
+    pool.requested_desired_concurrency !== null &&
+    pool.requested_desired_concurrency > pool.desired_concurrency;
   return (
     <div className="summary-card">
       <span>{workerPoolLabel(pool.resource_class)}</span>
@@ -1070,8 +1175,16 @@ function WorkerPoolCard({
       </strong>
       <span>{pool.is_started ? "started" : "stopped"}</span>
       <span>{pool.is_paused ? "paused" : "resumed"}</span>
-      <span>{pool.desired_concurrency} desired</span>
+      <span>Requested: {requested}</span>
+      <span>Applied desired: {pool.desired_concurrency}</span>
       <span>{pool.configured_concurrency} YAML limit</span>
+      <span>Env limit: {pool.env_concurrency_limit ?? "not set"}</span>
+      <span>Effective: {pool.effective_concurrency}</span>
+      {requestWasCapped ? (
+        <p className="empty-text">
+          Requested {pool.requested_desired_concurrency} {pool.resource_class} workers, but Beehive applied {pool.desired_concurrency}. Increase runtime.worker_pools.{pool.resource_class}.concurrency in pipeline.yaml or Runtime settings.
+        </p>
+      ) : null}
       <span>{pendingTotal} pending</span>
       <span>{pool.retry_wait_not_due_count} retry wait</span>
       <span>{pool.queued_count} queued</span>
@@ -1134,10 +1247,33 @@ function workerRuntimeSummaryText(summary: WorkerSummary | null) {
   const pools = summary.pools
     .map(
       (pool) =>
-        `${pool.resource_class} ${pool.desired_concurrency} desired/${pool.active_leases} active`,
+        `${pool.resource_class} ${pool.desired_concurrency} desired/${pool.effective_concurrency} effective/${pool.active_leases} active`,
     )
     .join(", ");
   return `${summary.runtime_status}, ${pools}`;
+}
+
+function workerAnomalyLabel(diagnosis: string) {
+  switch (diagnosis) {
+    case "in_progress_without_active_lease":
+      return "in_progress task has no active lease";
+    case "queued_without_active_lease":
+      return "queued task has no active lease";
+    case "active_lease_with_finished_run":
+      return "active lease has a finished run";
+    case "active_lease_expired":
+      return "active lease is expired";
+    case "active_lease_without_recent_heartbeat":
+      return "active lease has no recent heartbeat";
+    case "active_lease_for_missing_state":
+      return "active lease points to a missing state";
+    case "active_lease_for_state_not_running":
+      return "active lease points to a non-running state";
+    case "recent_unleased_in_progress":
+      return "recent in_progress task has no active lease";
+    default:
+      return diagnosis.replaceAll("_", " ");
+  }
 }
 
 function boundedInteger(value: number, min: number, max: number) {

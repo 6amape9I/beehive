@@ -263,6 +263,7 @@ export function EntityDetailPage() {
           />
           <EntityFileInstances
             files={detail.files}
+            stageStates={detail.stage_states}
             fileAllowedActions={detail.file_allowed_actions}
             selectedFileId={selectedFile?.id ?? null}
             loadingFileAction={loadingFileAction}

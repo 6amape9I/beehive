@@ -13,12 +13,13 @@ use uuid::Uuid;
 use crate::database::{
     attach_worker_lease_run, block_stage_state, claim_eligible_runtime_tasks,
     claim_specific_runtime_task, claim_worker_runtime_tasks, find_latest_entity_file_for_stage,
-    find_stage_by_id, finish_stage_run, finish_worker_lease, heartbeat_worker_lease,
-    insert_app_event, load_active_stages_from_connection, load_setting, open_connection,
-    reconcile_orphan_stage_runs_for_queued_state, register_s3_artifact_pointers_best_effort,
-    release_queued_claim, start_claimed_stage_run, update_stage_state_failure,
-    update_stage_state_failure_with_reason, update_stage_state_success, FinishStageRunInput,
-    NewStageRunInput, RegisterS3ArtifactPointerInput, RuntimeTaskRecord, WorkerLeaseClaimInput,
+    find_stage_by_id, finish_stage_run, finish_worker_lease, finish_worker_task_internal_error,
+    heartbeat_worker_lease, insert_app_event, load_active_stages_from_connection, load_setting,
+    open_connection, reconcile_orphan_stage_runs_for_queued_state,
+    register_s3_artifact_pointers_best_effort, release_queued_claim, start_claimed_stage_run,
+    update_stage_state_failure, update_stage_state_failure_with_reason, update_stage_state_success,
+    FinishStageRunInput, NewStageRunInput, RegisterS3ArtifactPointerInput, RuntimeTaskRecord,
+    WorkerLeaseClaimInput,
 };
 use crate::domain::{
     AppEventLevel, ArtifactLocation, CommandErrorInfo, EntityFileRecord, PipelineWaveSummary,
@@ -293,6 +294,7 @@ pub fn run_worker_task(
         )
     });
 
+    let task_for_finalizer = task.clone();
     let outcome = execute_task(
         workdir_path,
         database_path,
@@ -300,6 +302,9 @@ pub fn run_worker_task(
         request_timeout_sec,
         file_stability_delay_ms,
     );
+    if let Err(message) = outcome.as_ref() {
+        let _ = finish_worker_task_internal_error(database_path, &task_for_finalizer, message);
+    }
     let _ = heartbeat_stop_tx.send(());
     if let Some(handle) = heartbeat_handle {
         let _ = handle.join();

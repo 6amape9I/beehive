@@ -101,6 +101,26 @@ pub(crate) fn validate_transition(
         ) | (
             RuntimeTransitionReason::StuckReconciliation,
             StageStatus::InProgress,
+            StageStatus::Done
+        ) | (
+            RuntimeTransitionReason::StuckReconciliation,
+            StageStatus::Queued,
+            StageStatus::Done
+        ) | (
+            RuntimeTransitionReason::StuckReconciliation,
+            StageStatus::Queued,
+            StageStatus::RetryWait
+        ) | (
+            RuntimeTransitionReason::StuckReconciliation,
+            StageStatus::Queued,
+            StageStatus::Failed
+        ) | (
+            RuntimeTransitionReason::StuckReconciliation,
+            StageStatus::Queued,
+            StageStatus::Blocked
+        ) | (
+            RuntimeTransitionReason::StuckReconciliation,
+            StageStatus::InProgress,
             StageStatus::RetryWait
         ) | (
             RuntimeTransitionReason::StuckReconciliation,
