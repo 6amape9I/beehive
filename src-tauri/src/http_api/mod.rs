@@ -4,16 +4,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::domain::{
-    CreateS3StageRequest, CreateWorkspaceRequest, EntityDetailResult, EntityListQuery,
-    EntityListResult, EntityMutationResult, ImportJsonBatchRequest, ImportJsonBatchResult,
-    RecoverExpiredWorkerLeasesResult, RegisterS3SourceArtifactRequest, ResourceClass,
-    RunDueTasksResult, RunPipelineWavesResult, RunSelectedPipelineWavesRequest,
-    RunSelectedPipelineWavesResult, S3ReconciliationResult, S3StageMutationResult,
-    StageRunOutputsResult, UpdateEntityRequest, UpdateS3StageRequest, UpdateStageNextStageResult,
-    UpdateWorkspaceRequest, WorkerLeaseReleaseResult, WorkerPoolControlResult,
-    WorkerPoolUpdateRequest, WorkerReconcileStuckResult, WorkerStartRequest, WorkerStopRequest,
-    WorkerSummaryResult, WorkspaceMutationResult, WorkspaceRegistryEntryResult,
-    WorkspaceRegistryListResult,
+    CreateS3StageRequest, CreateWorkspaceRequest, EntityDetailResult, EntityFileS3JsonResult,
+    EntityListQuery, EntityListResult, EntityMutationResult, ImportJsonBatchRequest,
+    ImportJsonBatchResult, ManualEntityStageActionResult, RecoverExpiredWorkerLeasesResult,
+    RegisterS3SourceArtifactRequest, ResetEntityStageRequest, ResourceClass, RunDueTasksResult,
+    RunPipelineWavesResult, RunSelectedPipelineWavesRequest, RunSelectedPipelineWavesResult,
+    S3ReconciliationResult, S3StageMutationResult, StageRunOutputsResult, UpdateEntityRequest,
+    UpdateS3StageRequest, UpdateStageNextStageResult, UpdateWorkspaceRequest,
+    WorkerLeaseReleaseResult, WorkerPoolControlResult, WorkerPoolUpdateRequest,
+    WorkerReconcileStuckResult, WorkerStartRequest, WorkerStopRequest, WorkerSummaryResult,
+    WorkspaceMutationResult, WorkspaceRegistryEntryResult, WorkspaceRegistryListResult,
 };
 use crate::services::{
     artifacts, entities, pipeline, runtime, selected_runner, workers, workspaces,
@@ -204,6 +204,28 @@ fn route_json_request(
                 };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
             }
+            ("GET", ["api", "workspaces", _, "entity-files", entity_file_id, "s3-json"]) => {
+                let entity_file_id = path_i64(entity_file_id, "entity_file_id")?;
+                match entities::view_entity_file_s3_json_for_workspace(workspace_id, entity_file_id)
+                {
+                    Ok(payload) => Ok(json_response(
+                        200,
+                        serde_json::to_value(EntityFileS3JsonResult {
+                            payload: Some(payload),
+                            errors: Vec::new(),
+                        })
+                        .unwrap(),
+                    )),
+                    Err(error) => Ok(json_response(
+                        error.status_code,
+                        serde_json::to_value(EntityFileS3JsonResult {
+                            payload: None,
+                            errors: vec![command_error(error.code, error.message)],
+                        })
+                        .unwrap(),
+                    )),
+                }
+            }
             ("GET", ["api", "workspaces", _, "entities", entity_id]) => {
                 let result = match entities::get_entity_for_workspace(workspace_id, entity_id) {
                     Ok(detail) => entities::entity_detail_result(
@@ -216,6 +238,37 @@ fn route_json_request(
                     },
                 };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            (
+                "POST",
+                ["api", "workspaces", _, "entities", entity_id, "stages", stage_id, "reset-to-pending"],
+            ) => {
+                let input = parse_body::<ResetEntityStageRequest>(body)?;
+                match entities::reset_entity_stage_to_pending_for_workspace(
+                    workspace_id,
+                    entity_id,
+                    stage_id,
+                    &input,
+                ) {
+                    Ok(detail) => Ok(json_response(
+                        200,
+                        serde_json::to_value(ManualEntityStageActionResult {
+                            detail: Some(detail),
+                            summary: None,
+                            errors: Vec::new(),
+                        })
+                        .unwrap(),
+                    )),
+                    Err(error) => Ok(json_response(
+                        error.status_code,
+                        serde_json::to_value(ManualEntityStageActionResult {
+                            detail: None,
+                            summary: None,
+                            errors: vec![command_error(error.code, error.message)],
+                        })
+                        .unwrap(),
+                    )),
+                }
             }
             ("PATCH", ["api", "workspaces", _, "entities", entity_id]) => {
                 let input = parse_body::<UpdateEntityRequest>(body)?;
@@ -676,6 +729,20 @@ fn query_u64(query: &[(String, String)], key: &str) -> Option<u64> {
     query_param(query, key).and_then(|value| value.parse::<u64>().ok())
 }
 
+fn path_i64(value: &str, name: &'static str) -> Result<i64, (u16, &'static str, String)> {
+    value
+        .parse::<i64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            (
+                400,
+                "request_path_param_invalid",
+                format!("Path parameter '{name}' must be a positive integer."),
+            )
+        })
+}
+
 fn entity_list_query_from_query(query: &[(String, String)]) -> EntityListQuery {
     EntityListQuery {
         search: query_param(query, "search"),
@@ -785,6 +852,97 @@ impl Default for WorkerPauseBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::path::Path;
+
+    use crate::database;
+    use crate::discovery::scan_workspace;
+    use crate::domain::{PipelineConfig, ProjectConfig, RuntimeConfig, StageDefinition};
+    use crate::services::workspaces;
+
+    fn with_test_env<F>(registry_path: &Path, root: &Path, run: F)
+    where
+        F: FnOnce(),
+    {
+        let _guard = workspaces::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_registry = std::env::var_os("BEEHIVE_WORKSPACES_CONFIG");
+        let previous_root = std::env::var_os("BEEHIVE_WORKSPACES_ROOT");
+        std::env::set_var("BEEHIVE_WORKSPACES_CONFIG", registry_path);
+        std::env::set_var("BEEHIVE_WORKSPACES_ROOT", root);
+        run();
+        restore_env_var("BEEHIVE_WORKSPACES_CONFIG", previous_registry.as_deref());
+        restore_env_var("BEEHIVE_WORKSPACES_ROOT", previous_root.as_deref());
+    }
+
+    fn restore_env_var(name: &str, value: Option<&OsStr>) {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+
+    fn write_workspace_registry(registry_path: &Path, workdir: &Path, database_path: &Path) {
+        let workdir_path = yaml_path(workdir);
+        let pipeline_path = yaml_path(&workdir.join("pipeline.yaml"));
+        let database_path = yaml_path(database_path);
+        fs::write(
+            registry_path,
+            format!(
+                r#"workspaces:
+- id: test
+  name: Test
+  provider: s3
+  bucket: steos-s3-data
+  workspace_prefix: test-prefix
+  region: ru-1
+  endpoint: https://s3.example
+  workdir_path: '{workdir_path}'
+  pipeline_path: '{pipeline_path}'
+  database_path: '{database_path}'
+  is_archived: false
+"#
+            ),
+        )
+        .expect("registry");
+    }
+
+    fn yaml_path(path: &Path) -> String {
+        path.to_string_lossy()
+            .replace('\\', "/")
+            .replace('\'', "''")
+    }
+
+    fn test_config(stages: Vec<StageDefinition>) -> PipelineConfig {
+        PipelineConfig {
+            project: ProjectConfig {
+                name: "beehive".to_string(),
+                workdir: ".".to_string(),
+            },
+            storage: None,
+            runtime: RuntimeConfig::default(),
+            stages,
+        }
+    }
+
+    fn stage(id: &str) -> StageDefinition {
+        StageDefinition {
+            id: id.to_string(),
+            input_folder: format!("stages/{id}"),
+            input_uri: None,
+            output_folder: format!("stages/{id}-out"),
+            workflow_url: format!("http://localhost:5678/webhook/{id}"),
+            max_attempts: 3,
+            retry_delay_sec: 10,
+            next_stage: None,
+            save_path_aliases: Vec::new(),
+            resource_class: Default::default(),
+            allow_empty_outputs: false,
+            allow_multiple_outputs: false,
+        }
+    }
 
     #[test]
     fn health_route_returns_ok() {
@@ -941,6 +1099,104 @@ mod tests {
             import.body["errors"][0]["code"].as_str(),
             Some("import_json_batch_failed")
         );
+    }
+
+    #[test]
+    fn s3_json_route_returns_typed_errors_for_missing_and_non_s3_files() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().join("root");
+        let workdir = root.join("test");
+        let registry_path = tempdir.path().join("workspaces.yaml");
+        let database_path = workdir.join("app.db");
+        database::bootstrap_database(&database_path, &test_config(vec![stage("incoming")]))
+            .expect("bootstrap");
+        let source_path = workdir
+            .join("stages")
+            .join("incoming")
+            .join("entity-1.json");
+        fs::create_dir_all(source_path.parent().expect("source parent")).expect("parent");
+        fs::write(&source_path, r#"{"id":"entity-1"}"#).expect("source");
+        scan_workspace(&workdir, &database_path).expect("scan");
+        let file_id = database::list_entity_files(&database_path, Some("entity-1"))
+            .expect("files")
+            .first()
+            .expect("file")
+            .id;
+        write_workspace_registry(&registry_path, &workdir, &database_path);
+
+        with_test_env(&registry_path, &root, || {
+            let missing = handle_json_request(
+                "GET",
+                "/api/workspaces/test/entity-files/9999/s3-json",
+                None,
+            );
+            assert_eq!(missing.status_code, 404);
+            assert_eq!(
+                missing.body["errors"][0]["code"].as_str(),
+                Some("entity_file_not_found")
+            );
+
+            let non_s3 = handle_json_request(
+                "GET",
+                &format!("/api/workspaces/test/entity-files/{file_id}/s3-json"),
+                None,
+            );
+            assert_eq!(non_s3.status_code, 400);
+            assert_eq!(
+                non_s3.body["errors"][0]["code"].as_str(),
+                Some("not_s3_artifact")
+            );
+        });
+    }
+
+    #[test]
+    fn reset_to_pending_route_decodes_cyrillic_entity_id() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().join("root");
+        let workdir = root.join("test");
+        let registry_path = tempdir.path().join("workspaces.yaml");
+        let database_path = workdir.join("app.db");
+        database::bootstrap_database(&database_path, &test_config(vec![stage("incoming")]))
+            .expect("bootstrap");
+        let source_path = workdir
+            .join("stages")
+            .join("incoming")
+            .join("миллиграмм.json");
+        fs::create_dir_all(source_path.parent().expect("source parent")).expect("parent");
+        fs::write(&source_path, r#"{"id":"миллиграмм"}"#).expect("source");
+        scan_workspace(&workdir, &database_path).expect("scan");
+        let connection = database::open_connection(&database_path).expect("open db");
+        connection
+            .execute(
+                "UPDATE entity_stage_states SET status = 'failed', attempts = 2, last_error = 'bad' WHERE entity_id = 'миллиграмм'",
+                [],
+            )
+            .expect("failed");
+        drop(connection);
+        write_workspace_registry(&registry_path, &workdir, &database_path);
+
+        with_test_env(&registry_path, &root, || {
+            let response = handle_json_request(
+                "POST",
+                "/api/workspaces/test/entities/%D0%BC%D0%B8%D0%BB%D0%BB%D0%B8%D0%B3%D1%80%D0%B0%D0%BC%D0%BC/stages/incoming/reset-to-pending",
+                Some(r#"{"confirm":true,"reason":"ручной ретест"}"#),
+            );
+
+            assert_eq!(response.status_code, 200);
+            assert!(response.body["errors"].as_array().unwrap().is_empty());
+            assert_eq!(
+                response.body["detail"]["stage_states"][0]["status"].as_str(),
+                Some("pending")
+            );
+            assert_eq!(
+                response.body["detail"]["stage_states"][0]["attempts"].as_u64(),
+                Some(0)
+            );
+        });
+        let events = database::list_app_events(&database_path, 10).expect("events");
+        assert!(events
+            .iter()
+            .any(|event| event.code == "entity_stage_state_manual_reset"));
     }
 
     #[test]

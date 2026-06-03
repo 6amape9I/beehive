@@ -209,6 +209,32 @@ code {
   padding: 12px 18px;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(20, 28, 36, 0.42);
+}
+
+.modal-panel {
+  width: min(960px, 100%);
+  max-height: min(760px, calc(100vh - 40px));
+  overflow: auto;
+  border: 1px solid #cdd5df;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 18px;
+  box-shadow: 0 20px 60px rgba(18, 28, 38, 0.22);
+}
+
+.compact-modal {
+  width: min(560px, 100%);
+}
+
 .summary-card-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -741,6 +767,11 @@ textarea.compact-textarea {
   color: #d8e0e8;
   font-size: 13px;
   line-height: 1.5;
+}
+
+.modal-json-preview {
+  max-height: 460px;
+  margin-bottom: 14px;
 }
 
 .compact-json {

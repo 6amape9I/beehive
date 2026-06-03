@@ -799,28 +799,27 @@ pub fn reset_entity_stage_to_pending(
         format!("No stage state exists for entity '{entity_id}' on stage '{stage_id}'.")
     })?;
     if active_worker_lease_exists(&connection, state.id)? {
-        return Err(format!(
-            "Cannot reset entity '{entity_id}' on stage '{stage_id}' while an active worker lease exists."
-        ));
+        return Err(
+            "active_worker_lease_exists: This state is currently leased by a worker. Stop/reconcile the worker lease first."
+                .to_string(),
+        );
     }
 
-    if state.status == "pending" {
-        insert_app_event(
-            &connection,
-            AppEventLevel::Info,
-            "manual_reset_noop",
-            &format!("Manual reset requested for already-pending entity '{entity_id}' on stage '{stage_id}'."),
-            Some(json!({
-                "action": "reset_to_pending",
-                "entity_id": entity_id,
-                "stage_id": stage_id,
-                "operator_comment": operator_comment,
-                "previous_status": state.status,
-                "new_status": "pending",
-            })),
-            &now,
-        )?;
-        return Ok(());
+    if state.status == "in_progress" {
+        return Err(
+            "state_in_progress_cannot_reset: Use Reconcile stuck worker states first.".to_string(),
+        );
+    }
+    if state.status == "queued" {
+        return Err(
+            "state_queued_cannot_reset: Use Reconcile stuck worker states first.".to_string(),
+        );
+    }
+    if !matches!(state.status.as_str(), "failed" | "blocked" | "retry_wait") {
+        return Err(format!(
+            "state_not_resettable: Entity '{entity_id}' on stage '{stage_id}' has status '{}' and cannot be reset to pending.",
+            state.status
+        ));
     }
 
     ensure_runtime_transition(
@@ -854,14 +853,16 @@ pub fn reset_entity_stage_to_pending(
     insert_app_event(
         &connection,
         AppEventLevel::Info,
-        "manual_reset_to_pending",
+        "entity_stage_state_manual_reset",
         &format!("Manual reset moved entity '{entity_id}' on stage '{stage_id}' to pending."),
         Some(json!({
             "action": "reset_to_pending",
+            "actor": "operator",
+            "source": "manual",
             "entity_id": entity_id,
             "stage_id": stage_id,
-            "operator_comment": operator_comment,
-            "previous_status": state.status,
+            "reason": operator_comment,
+            "old_status": state.status,
             "new_status": "pending",
         })),
         &now,
@@ -9998,6 +9999,28 @@ mod tests {
                 [],
             )
             .expect("failed state");
+        let file_id: i64 = connection
+            .query_row(
+                "SELECT id FROM entity_files WHERE entity_id = 'entity-1' AND stage_id = 'incoming'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("file id");
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                r#"
+                INSERT INTO stage_runs (
+                    run_id, entity_id, entity_file_id, stage_id, attempt_no, workflow_url,
+                    request_json, response_json, http_status, success, error_type, error_message,
+                    started_at, finished_at, duration_ms
+                )
+                VALUES ('manual-reset-history', 'entity-1', ?1, 'incoming', 2, 'http://localhost/test',
+                    '{}', '{}', 500, 0, 'n8n_error', 'bad', ?2, ?2, 10)
+                "#,
+                params![file_id, &now],
+            )
+            .expect("stage run");
         drop(connection);
 
         reset_entity_stage_to_pending(&database_path, "entity-1", "incoming", Some("retry later"))
@@ -10011,6 +10034,12 @@ mod tests {
         assert_eq!(after_reset.attempts, 0);
         assert!(after_reset.last_error.is_none());
         assert!(after_reset.last_http_status.is_none());
+        assert_eq!(
+            list_stage_runs(&database_path, Some("entity-1"))
+                .expect("runs")
+                .len(),
+            1
+        );
 
         skip_entity_stage(&database_path, "entity-1", "incoming", Some("not needed"))
             .expect("skip");
@@ -10024,8 +10053,114 @@ mod tests {
         assert_eq!(after_skip.status, "skipped");
         assert!(events
             .iter()
-            .any(|event| event.code == "manual_reset_to_pending"));
+            .any(|event| event.code == "entity_stage_state_manual_reset"));
         assert!(events.iter().any(|event| event.code == "manual_skip"));
+    }
+
+    #[test]
+    fn manual_reset_allows_only_failed_blocked_and_retry_wait() {
+        for status in ["failed", "blocked", "retry_wait"] {
+            let tempdir = tempfile::tempdir().expect("tempdir");
+            let workdir = tempdir.path().join("workdir");
+            let database_path = workdir.join("app.db");
+            bootstrap_database(&database_path, &test_config(vec![stage("incoming", None)]))
+                .expect("bootstrap");
+            let source_path = workdir.join("stages/incoming/entity-1.json");
+            fs::create_dir_all(source_path.parent().expect("parent")).expect("parent");
+            fs::write(&source_path, r#"{"id":"entity-1","payload":{"ok":true}}"#).expect("source");
+            scan_workspace(&workdir, &database_path).expect("scan");
+            let connection = Connection::open(&database_path).expect("open db");
+            connection
+                .execute(
+                    r#"
+                    UPDATE entity_stage_states
+                    SET status = ?1,
+                        attempts = 3,
+                        last_error = 'bad',
+                        last_http_status = 500,
+                        next_retry_at = ?2
+                    WHERE entity_id = 'entity-1' AND stage_id = 'incoming'
+                    "#,
+                    params![status, Utc::now().to_rfc3339()],
+                )
+                .expect("set state");
+            drop(connection);
+
+            reset_entity_stage_to_pending(&database_path, "entity-1", "incoming", Some(status))
+                .expect("reset");
+            let state = get_stage_state(&database_path, "entity-1", "incoming")
+                .expect("state")
+                .expect("state exists");
+
+            assert_eq!(state.status, "pending");
+            assert_eq!(state.attempts, 0);
+            assert!(state.last_error.is_none());
+            assert!(state.next_retry_at.is_none());
+        }
+    }
+
+    #[test]
+    fn manual_reset_rejects_queued_and_skipped_states() {
+        for status in ["queued", "skipped"] {
+            let tempdir = tempfile::tempdir().expect("tempdir");
+            let workdir = tempdir.path().join("workdir");
+            let database_path = workdir.join("app.db");
+            bootstrap_database(&database_path, &test_config(vec![stage("incoming", None)]))
+                .expect("bootstrap");
+            let source_path = workdir.join("stages/incoming/entity-1.json");
+            fs::create_dir_all(source_path.parent().expect("parent")).expect("parent");
+            fs::write(&source_path, r#"{"id":"entity-1","payload":{"ok":true}}"#).expect("source");
+            scan_workspace(&workdir, &database_path).expect("scan");
+            let connection = Connection::open(&database_path).expect("open db");
+            connection
+                .execute(
+                    "UPDATE entity_stage_states SET status = ?1 WHERE entity_id = 'entity-1'",
+                    params![status],
+                )
+                .expect("set state");
+            drop(connection);
+
+            let error = reset_entity_stage_to_pending(&database_path, "entity-1", "incoming", None)
+                .expect_err("reset rejected");
+
+            if status == "queued" {
+                assert!(error.contains("state_queued_cannot_reset"));
+            } else {
+                assert!(error.contains("state_not_resettable"));
+            }
+        }
+    }
+
+    #[test]
+    fn manual_reset_rejects_active_worker_lease() {
+        let (_tempdir, _workdir, database_path) =
+            setup_scanned_workdir(vec![stage("incoming", None)], &[("incoming", "entity-1")]);
+        let mut connection = open_connection(&database_path).expect("open");
+        start_test_pool(&connection, ResourceClass::Default, 1);
+        let task = claim_worker_runtime_tasks(
+            &mut connection,
+            &WorkerLeaseClaimInput {
+                worker_id: "worker-1".to_string(),
+                resource_class: ResourceClass::Default,
+                limit: 1,
+                lease_ttl_sec: 300,
+            },
+        )
+        .expect("claim")
+        .pop()
+        .expect("task");
+        connection
+            .execute(
+                "UPDATE entity_stage_states SET status = 'in_progress' WHERE id = ?1",
+                params![task.state_id],
+            )
+            .expect("in progress");
+        drop(connection);
+
+        let error = reset_entity_stage_to_pending(&database_path, "entity-1", "incoming", None)
+            .expect_err("reset rejected");
+
+        assert!(error.contains("active_worker_lease_exists"));
     }
 
     #[test]

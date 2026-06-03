@@ -821,6 +821,21 @@ export interface EntityFilesResult {
   errors: CommandErrorInfo[];
 }
 
+export interface EntityFileS3JsonPayload {
+  entity_file_id: number;
+  entity_id: string;
+  stage_id: string;
+  bucket: string;
+  key: string;
+  s3_uri: string;
+  json: unknown;
+}
+
+export interface EntityFileS3JsonResult {
+  payload: EntityFileS3JsonPayload | null;
+  errors: CommandErrorInfo[];
+}
+
 export interface RegisterS3SourceArtifactRequest {
   stage_id: string;
   entity_id: string;
@@ -926,6 +941,11 @@ export interface EntityDetailPayload {
 export interface EntityDetailResult {
   detail: EntityDetailPayload | null;
   errors: CommandErrorInfo[];
+}
+
+export interface ResetEntityStageRequest {
+  confirm: boolean;
+  reason?: string | null;
 }
 
 export interface UpdateEntityRequest {

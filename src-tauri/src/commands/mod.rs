@@ -8,19 +8,20 @@ use crate::discovery;
 use crate::domain::{
     AppEventsResult, BootstrapResult, CommandErrorInfo, ConfigValidationIssue,
     CreateS3StageRequest, CreateS3StageResult, CreateWorkspaceRequest, DashboardOverviewResult,
-    EntityDetailResult, EntityFilesResult, EntityListQuery, EntityListResult, EntityMutationResult,
-    FileCopyResult, ImportJsonBatchRequest, ImportJsonBatchResult, ManualEntityStageActionResult,
-    OpenEntityPathPayload, OpenEntityPathResult, PipelineConfigDraft, PipelineEditorStateResult,
+    EntityDetailResult, EntityFileS3JsonResult, EntityFilesResult, EntityListQuery,
+    EntityListResult, EntityMutationResult, FileCopyResult, ImportJsonBatchRequest,
+    ImportJsonBatchResult, ManualEntityStageActionResult, OpenEntityPathPayload,
+    OpenEntityPathResult, PipelineConfigDraft, PipelineEditorStateResult,
     ReconcileStuckTasksResult, RegisterS3SourceArtifactPayload, RegisterS3SourceArtifactRequest,
-    RegisterS3SourceArtifactResult, RunDueTasksResult, RunEntityStageResult,
-    RunPipelineWavesResult, RunSelectedPipelineWavesRequest, RunSelectedPipelineWavesResult,
-    RuntimeSummaryResult, S3ReconciliationResult, S3StageMutationResult, SaveEntityFileJsonResult,
-    SavePipelineConfigResult, ScanWorkspaceResult, StageDirectoryProvisionResult, StageListResult,
-    StageRunOutputsResult, StageRunsResult, UpdateEntityRequest, UpdateS3StageRequest,
-    UpdateStageNextStageRequest, UpdateStageNextStageResult, UpdateWorkspaceRequest,
-    ValidatePipelineConfigDraftResult, ValidationSeverity, WorkspaceExplorerResult,
-    WorkspaceExplorerTotals, WorkspaceMutationResult, WorkspaceRegistryEntryResult,
-    WorkspaceRegistryListResult,
+    RegisterS3SourceArtifactResult, ResetEntityStageRequest, RunDueTasksResult,
+    RunEntityStageResult, RunPipelineWavesResult, RunSelectedPipelineWavesRequest,
+    RunSelectedPipelineWavesResult, RuntimeSummaryResult, S3ReconciliationResult,
+    S3StageMutationResult, SaveEntityFileJsonResult, SavePipelineConfigResult, ScanWorkspaceResult,
+    StageDirectoryProvisionResult, StageListResult, StageRunOutputsResult, StageRunsResult,
+    UpdateEntityRequest, UpdateS3StageRequest, UpdateStageNextStageRequest,
+    UpdateStageNextStageResult, UpdateWorkspaceRequest, ValidatePipelineConfigDraftResult,
+    ValidationSeverity, WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceMutationResult,
+    WorkspaceRegistryEntryResult, WorkspaceRegistryListResult,
 };
 use crate::executor;
 use crate::file_open::{self, OpenEntityPathKind};
@@ -517,6 +518,50 @@ pub fn get_workspace_entity(workspace_id: String, entity_id: String) -> EntityDe
         Err(message) => EntityDetailResult {
             detail: None,
             errors: vec![command_error("get_entity_failed", message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn view_workspace_entity_file_s3_json(
+    workspace_id: String,
+    entity_file_id: i64,
+) -> EntityFileS3JsonResult {
+    match services::entities::view_entity_file_s3_json_for_workspace(&workspace_id, entity_file_id)
+    {
+        Ok(payload) => EntityFileS3JsonResult {
+            payload: Some(payload),
+            errors: Vec::new(),
+        },
+        Err(error) => EntityFileS3JsonResult {
+            payload: None,
+            errors: vec![command_error(error.code, error.message, None)],
+        },
+    }
+}
+
+#[tauri::command]
+pub fn reset_workspace_entity_stage_to_pending(
+    workspace_id: String,
+    entity_id: String,
+    stage_id: String,
+    input: ResetEntityStageRequest,
+) -> ManualEntityStageActionResult {
+    match services::entities::reset_entity_stage_to_pending_for_workspace(
+        &workspace_id,
+        &entity_id,
+        &stage_id,
+        &input,
+    ) {
+        Ok(detail) => ManualEntityStageActionResult {
+            detail: Some(detail),
+            summary: None,
+            errors: Vec::new(),
+        },
+        Err(error) => ManualEntityStageActionResult {
+            detail: None,
+            summary: None,
+            errors: vec![command_error(error.code, error.message, None)],
         },
     }
 }

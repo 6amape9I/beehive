@@ -16,16 +16,28 @@ import {
   openEntityFile,
   openEntityFolder,
   resetEntityStageToPending,
+  resetWorkspaceEntityStageToPending,
   retryEntityStageNow,
   runEntityStage,
   saveEntityFileBusinessJson,
   skipEntityStage,
+  viewWorkspaceEntityFileS3Json,
 } from "../lib/runtimeApi";
 import type {
   CommandErrorInfo,
   EntityDetailPayload,
+  EntityFileS3JsonPayload,
   RunDueTasksSummary,
 } from "../types/domain";
+
+const S3_JSON_PREVIEW_LIMIT = 128 * 1024;
+
+interface S3JsonModalState {
+  payload: EntityFileS3JsonPayload;
+  jsonText: string;
+  previewText: string;
+  isTruncated: boolean;
+}
 
 export function EntityDetailPage() {
   const { entityId, workspaceId: routeWorkspaceId } = useParams();
@@ -40,6 +52,8 @@ export function EntityDetailPage() {
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [loadingFileAction, setLoadingFileAction] = useState<string | null>(null);
   const [isSavingJson, setIsSavingJson] = useState(false);
+  const [s3JsonModal, setS3JsonModal] = useState<S3JsonModalState | null>(null);
+  const [resetModal, setResetModal] = useState<{ stageId: string; reason: string } | null>(null);
 
   const workdirPath = state.selected_workdir_path;
   const workspaceId = routeWorkspaceId ?? state.selected_workspace_id;
@@ -115,31 +129,73 @@ export function EntityDetailPage() {
   async function handleManualAction(
     action: "retry" | "reset" | "skip" | "run",
     stageId: string,
+    reason?: string,
   ) {
-    if (!workdirPath || !entityId) return;
+    if (!entityId) return;
+    if (action !== "reset" && !workdirPath) {
+      setErrors([
+        {
+          code: "manual_action_unavailable",
+          message: "This manual action is only available in local workdir mode.",
+          path: null,
+        },
+      ]);
+      return;
+    }
+    if (action === "reset" && !workdirPath && !workspaceId) {
+      setErrors([
+        {
+          code: "manual_reset_unavailable",
+          message: "Reset to pending requires an open workspace.",
+          path: null,
+        },
+      ]);
+      return;
+    }
 
     setLoadingAction(`${action}:${stageId}`);
     setActionMessage(null);
+    const localWorkdirPath = workdirPath ?? "";
     try {
       if (action === "run") {
-        const result = await runEntityStage(workdirPath, entityId, stageId);
+        const result = await runEntityStage(localWorkdirPath, entityId, stageId);
         setRunResult(result.summary);
         setErrors([...result.errors, ...(result.summary?.errors ?? [])]);
         await loadDetail(selectedFileId);
       } else {
         const result =
           action === "retry"
-            ? await retryEntityStageNow(workdirPath, entityId, stageId)
+            ? await retryEntityStageNow(localWorkdirPath, entityId, stageId)
             : action === "reset"
-              ? await resetEntityStageToPending(workdirPath, entityId, stageId)
-              : await skipEntityStage(workdirPath, entityId, stageId);
+              ? workspaceId
+                ? await resetWorkspaceEntityStageToPending(workspaceId, entityId, stageId, {
+                    confirm: true,
+                    reason: reason?.trim() || null,
+                  })
+                : await resetEntityStageToPending(
+                    localWorkdirPath,
+                    entityId,
+                    stageId,
+                    reason?.trim() || null,
+                  )
+              : await skipEntityStage(localWorkdirPath, entityId, stageId);
         await refreshAfterDetailResult(result.detail, [
           ...result.errors,
           ...(result.summary?.errors ?? []),
         ]);
         setRunResult(result.summary);
       }
-      setActionMessage(`${action} completed for stage ${stageId}.`);
+      setActionMessage(
+        action === "reset" ? "State reset to pending." : `${action} completed for stage ${stageId}.`,
+      );
+    } catch (error) {
+      setErrors([
+        {
+          code: "manual_action_failed",
+          message: error instanceof Error ? error.message : "Manual action failed.",
+          path: null,
+        },
+      ]);
     } finally {
       setLoadingAction(null);
     }
@@ -179,6 +235,46 @@ export function EntityDetailPage() {
     }
   }
 
+  async function handleViewS3Json(fileId: number) {
+    if (!workspaceId) {
+      setErrors([
+        {
+          code: "s3_json_workspace_required",
+          message: "View S3 JSON requires a workspace-backed entity file.",
+          path: null,
+        },
+      ]);
+      return;
+    }
+    setLoadingFileAction(`s3:${fileId}`);
+    setActionMessage(null);
+    try {
+      const result = await viewWorkspaceEntityFileS3Json(workspaceId, fileId);
+      setErrors(result.errors);
+      if (!result.payload) return;
+      const jsonText = JSON.stringify(result.payload.json, null, 2);
+      const isTruncated = jsonText.length > S3_JSON_PREVIEW_LIMIT;
+      setS3JsonModal({
+        payload: result.payload,
+        jsonText,
+        previewText: isTruncated
+          ? `${jsonText.slice(0, S3_JSON_PREVIEW_LIMIT)}\n...`
+          : jsonText,
+        isTruncated,
+      });
+    } catch (error) {
+      setErrors([
+        {
+          code: "s3_json_view_failed",
+          message: error instanceof Error ? error.message : "Failed to load S3 JSON.",
+          path: null,
+        },
+      ]);
+    } finally {
+      setLoadingFileAction(null);
+    }
+  }
+
   async function handleSaveJson(payloadJson: string, metaJson: string, comment: string) {
     if (!workdirPath || !selectedFile) return;
     setIsSavingJson(true);
@@ -196,6 +292,31 @@ export function EntityDetailPage() {
     } finally {
       setIsSavingJson(false);
     }
+  }
+
+  async function copyModalText(value: string, label: string) {
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard API is not available.");
+      }
+      await navigator.clipboard.writeText(value);
+      setActionMessage(`${label} copied.`);
+    } catch (error) {
+      setErrors([
+        {
+          code: "clipboard_write_failed",
+          message: error instanceof Error ? error.message : "Clipboard write failed.",
+          path: null,
+        },
+      ]);
+    }
+  }
+
+  async function confirmResetToPending() {
+    if (!resetModal) return;
+    const { stageId, reason } = resetModal;
+    await handleManualAction("reset", stageId, reason);
+    setResetModal(null);
   }
 
   return (
@@ -244,13 +365,17 @@ export function EntityDetailPage() {
               </div>
             </section>
           ) : null}
-          {workdirPath ? (
+          {workdirPath || workspaceId ? (
             <ManualActionsPanel
               stageStates={detail.stage_states}
               allowedActions={detail.allowed_actions}
               loadingAction={loadingAction}
+              canRetry={Boolean(workdirPath)}
+              canReset={Boolean(workdirPath || workspaceId)}
+              canSkip={Boolean(workdirPath)}
+              canRun={Boolean(workdirPath)}
               onRetry={(stageId) => void handleManualAction("retry", stageId)}
-              onReset={(stageId) => void handleManualAction("reset", stageId)}
+              onReset={(stageId) => setResetModal({ stageId, reason: "" })}
               onSkip={(stageId) => void handleManualAction("skip", stageId)}
               onRun={(stageId) => void handleManualAction("run", stageId)}
             />
@@ -270,6 +395,7 @@ export function EntityDetailPage() {
             onSelectFile={(fileId) => void handleSelectFile(fileId)}
             onOpenFile={(fileId) => void handleOpenFile(fileId)}
             onOpenFolder={(fileId) => void handleOpenFolder(fileId)}
+            onViewS3Json={(fileId) => void handleViewS3Json(fileId)}
           />
           <EntityJsonPanel
             selectedFile={selectedFile}
@@ -286,6 +412,95 @@ export function EntityDetailPage() {
           <p className="empty-text">Entity detail is not available for the selected ID.</p>
         </section>
       )}
+
+      {s3JsonModal ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="s3-json-title">
+            <div className="panel-heading">
+              <div>
+                <h2 id="s3-json-title">S3 JSON</h2>
+                <span className="muted">{s3JsonModal.payload.s3_uri}</span>
+              </div>
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => setS3JsonModal(null)}
+              >
+                Close
+              </button>
+            </div>
+            {s3JsonModal.isTruncated ? (
+              <p className="muted">
+                Large JSON preview; showing first {S3_JSON_PREVIEW_LIMIT} characters.
+              </p>
+            ) : null}
+            <pre className="json-preview modal-json-preview">{s3JsonModal.previewText}</pre>
+            <div className="button-row">
+              <button
+                type="button"
+                className="button primary"
+                onClick={() => void copyModalText(s3JsonModal.jsonText, "JSON")}
+              >
+                Copy JSON
+              </button>
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => void copyModalText(s3JsonModal.payload.s3_uri, "S3 URI")}
+              >
+                Copy S3 URI
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {resetModal ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-panel compact-modal" role="dialog" aria-modal="true" aria-labelledby="reset-title">
+            <div className="panel-heading">
+              <div>
+                <h2 id="reset-title">Reset to pending</h2>
+                <span className="muted">Stage {resetModal.stageId}</span>
+              </div>
+            </div>
+            <p className="empty-text">
+              This operation will not delete history or S3 files. It resets attempts to 0 and
+              lets workers claim the task again.
+            </p>
+            <div className="form-row">
+              <label htmlFor="reset-reason">Reason</label>
+              <textarea
+                id="reset-reason"
+                className="compact-textarea"
+                value={resetModal.reason}
+                onChange={(event) =>
+                  setResetModal({ ...resetModal, reason: event.target.value })
+                }
+                placeholder="Optional"
+              />
+            </div>
+            <div className="button-row">
+              <button
+                type="button"
+                className="button primary"
+                disabled={loadingAction === `reset:${resetModal.stageId}`}
+                onClick={() => void confirmResetToPending()}
+              >
+                Confirm
+              </button>
+              <button
+                type="button"
+                className="button secondary"
+                disabled={loadingAction === `reset:${resetModal.stageId}`}
+                onClick={() => setResetModal(null)}
+              >
+                Cancel
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

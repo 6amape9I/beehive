@@ -22,8 +22,7 @@ pub(crate) fn build_stage_allowed_actions(
                 reasons.push(format!("Status '{}' is not manually actionable.", status));
             }
             let can_retry_now = matches!(status, "pending" | "retry_wait");
-            let can_reset_to_pending =
-                matches!(status, "failed" | "blocked" | "skipped" | "retry_wait");
+            let can_reset_to_pending = matches!(status, "failed" | "blocked" | "retry_wait");
             let can_skip = matches!(status, "pending" | "retry_wait");
             let can_run_this_stage = can_retry_now;
 

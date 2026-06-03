@@ -1,14 +1,15 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::database::{self, RegisterS3ArtifactPointerInput};
 use crate::domain::{
-    EntityDetailPayload, EntityDetailResult, EntityListQuery, EntityListResult,
-    EntityMutationPayload, EntityMutationResult, ImportJsonBatchPayload, ImportJsonBatchRequest,
-    ImportJsonFileInput, ImportJsonFileResult, S3StorageConfig, StageStatus, StorageProvider,
-    UpdateEntityRequest,
+    EntityDetailPayload, EntityDetailResult, EntityFileS3JsonPayload, EntityListQuery,
+    EntityListResult, EntityMutationPayload, EntityMutationResult, ImportJsonBatchPayload,
+    ImportJsonBatchRequest, ImportJsonFileInput, ImportJsonFileResult, ResetEntityStageRequest,
+    S3StorageConfig, StageStatus, StorageProvider, UpdateEntityRequest,
 };
 use crate::s3_client::{AwsS3MetadataClient, S3MetadataClient, S3ObjectMetadata};
 use crate::services::workspaces;
@@ -28,6 +29,14 @@ struct AwsJsonObjectUploader {
     client: AwsS3MetadataClient,
 }
 
+trait JsonObjectReader {
+    fn get_object_bytes(&self, bucket: &str, key: &str) -> Result<Option<Vec<u8>>, String>;
+}
+
+struct AwsJsonObjectReader {
+    client: AwsS3MetadataClient,
+}
+
 impl JsonObjectUploader for AwsJsonObjectUploader {
     fn object_exists(&self, bucket: &str, key: &str) -> Result<bool, String> {
         Ok(self.client.head_object(bucket, key)?.is_some())
@@ -41,6 +50,29 @@ impl JsonObjectUploader for AwsJsonObjectUploader {
         metadata: HashMap<String, String>,
     ) -> Result<S3ObjectMetadata, String> {
         self.client.put_json_object(bucket, key, bytes, metadata)
+    }
+}
+
+impl JsonObjectReader for AwsJsonObjectReader {
+    fn get_object_bytes(&self, bucket: &str, key: &str) -> Result<Option<Vec<u8>>, String> {
+        self.client.get_object_bytes(bucket, key)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EntityActionError {
+    pub(crate) status_code: u16,
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
+}
+
+impl EntityActionError {
+    fn new(status_code: u16, code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status_code,
+            code,
+            message: message.into(),
+        }
     }
 }
 
@@ -68,6 +100,126 @@ pub(crate) fn get_entity_for_workspace(
 ) -> Result<Option<EntityDetailPayload>, String> {
     let workspace = workspaces::get_workspace(workspace_id)?;
     database::get_entity_detail(&workspace.database_path, entity_id)
+}
+
+pub(crate) fn view_entity_file_s3_json_for_workspace(
+    workspace_id: &str,
+    entity_file_id: i64,
+) -> Result<EntityFileS3JsonPayload, EntityActionError> {
+    let workspace = workspaces::get_workspace(workspace_id)
+        .map_err(|message| EntityActionError::new(404, "workspace_not_found", message))?;
+    let storage = workspace_s3_storage(&workspace)
+        .map_err(|message| EntityActionError::new(400, "not_s3_artifact", message))?;
+    let reader = AwsJsonObjectReader {
+        client: AwsS3MetadataClient::from_storage_config(&storage)
+            .map_err(|message| EntityActionError::new(500, "s3_read_failed", message))?,
+    };
+    view_entity_file_s3_json_with_reader(&workspace.database_path, entity_file_id, &reader)
+}
+
+fn view_entity_file_s3_json_with_reader(
+    database_path: &Path,
+    entity_file_id: i64,
+    reader: &dyn JsonObjectReader,
+) -> Result<EntityFileS3JsonPayload, EntityActionError> {
+    let connection = database::open_connection(database_path)
+        .map_err(|message| EntityActionError::new(500, "entity_file_lookup_failed", message))?;
+    let file = database::find_entity_file_by_id(&connection, entity_file_id)
+        .map_err(|message| EntityActionError::new(500, "entity_file_lookup_failed", message))?
+        .ok_or_else(|| {
+            EntityActionError::new(
+                404,
+                "entity_file_not_found",
+                format!("Entity file id '{entity_file_id}' was not found."),
+            )
+        })?;
+    if file.storage_provider != StorageProvider::S3 {
+        return Err(EntityActionError::new(
+            400,
+            "not_s3_artifact",
+            format!("Entity file id '{entity_file_id}' is not an S3 artifact."),
+        ));
+    }
+    let bucket = file.bucket.clone().filter(|value| !value.trim().is_empty());
+    let key = file.key.clone().filter(|value| !value.trim().is_empty());
+    let (bucket, key) = match (bucket, key) {
+        (Some(bucket), Some(key)) => (bucket, key),
+        _ => {
+            return Err(EntityActionError::new(
+                400,
+                "not_s3_artifact",
+                format!("Entity file id '{entity_file_id}' has no stored S3 bucket/key."),
+            ));
+        }
+    };
+
+    let bytes = reader
+        .get_object_bytes(&bucket, &key)
+        .map_err(|message| EntityActionError::new(502, "s3_read_failed", message))?
+        .ok_or_else(|| {
+            EntityActionError::new(
+                404,
+                "s3_object_not_found",
+                format!("S3 object s3://{bucket}/{key} was not found."),
+            )
+        })?;
+    let body = std::str::from_utf8(&bytes).map_err(|error| {
+        EntityActionError::new(
+            422,
+            "s3_json_invalid",
+            format!("S3 object s3://{bucket}/{key} is not valid UTF-8 JSON: {error}"),
+        )
+    })?;
+    let json = serde_json::from_str::<Value>(body).map_err(|error| {
+        EntityActionError::new(
+            422,
+            "s3_json_invalid",
+            format!("S3 object s3://{bucket}/{key} is not valid JSON: {error}"),
+        )
+    })?;
+
+    Ok(EntityFileS3JsonPayload {
+        entity_file_id,
+        entity_id: file.entity_id,
+        stage_id: file.stage_id,
+        s3_uri: format!("s3://{bucket}/{key}"),
+        bucket,
+        key,
+        json,
+    })
+}
+
+pub(crate) fn reset_entity_stage_to_pending_for_workspace(
+    workspace_id: &str,
+    entity_id: &str,
+    stage_id: &str,
+    input: &ResetEntityStageRequest,
+) -> Result<EntityDetailPayload, EntityActionError> {
+    if !input.confirm {
+        return Err(EntityActionError::new(
+            400,
+            "reset_confirmation_required",
+            "Reset to pending requires confirm=true.",
+        ));
+    }
+    let workspace = workspaces::get_workspace(workspace_id)
+        .map_err(|message| EntityActionError::new(404, "workspace_not_found", message))?;
+    database::reset_entity_stage_to_pending(
+        &workspace.database_path,
+        entity_id,
+        stage_id,
+        input.reason.as_deref(),
+    )
+    .map_err(reset_error_from_message)?;
+    database::get_entity_detail(&workspace.database_path, entity_id)
+        .map_err(|message| EntityActionError::new(500, "entity_detail_refresh_failed", message))?
+        .ok_or_else(|| {
+            EntityActionError::new(
+                404,
+                "entity_not_found",
+                format!("Entity '{entity_id}' was not found after reset."),
+            )
+        })
 }
 
 pub(crate) fn update_entity_for_workspace(
@@ -328,6 +480,25 @@ fn workspace_s3_storage(
     })
 }
 
+fn reset_error_from_message(message: String) -> EntityActionError {
+    if let Some(message) = message.strip_prefix("active_worker_lease_exists: ") {
+        return EntityActionError::new(409, "active_worker_lease_exists", message);
+    }
+    if let Some(message) = message.strip_prefix("state_in_progress_cannot_reset: ") {
+        return EntityActionError::new(409, "state_in_progress_cannot_reset", message);
+    }
+    if let Some(message) = message.strip_prefix("state_queued_cannot_reset: ") {
+        return EntityActionError::new(409, "state_queued_cannot_reset", message);
+    }
+    if let Some(message) = message.strip_prefix("state_not_resettable: ") {
+        return EntityActionError::new(400, "state_not_resettable", message);
+    }
+    if message.starts_with("No stage state exists") {
+        return EntityActionError::new(404, "entity_stage_state_not_found", message);
+    }
+    EntityActionError::new(400, "manual_reset_failed", message)
+}
+
 fn choose_object_key(
     storage: &S3StorageConfig,
     stage_id: &str,
@@ -482,6 +653,103 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::fs;
+
+    use crate::discovery::scan_workspace;
+    use crate::domain::{PipelineConfig, ProjectConfig, RuntimeConfig, StageDefinition};
+
+    struct MockJsonObjectReader {
+        response: Result<Option<Vec<u8>>, String>,
+        calls: RefCell<Vec<(String, String)>>,
+    }
+
+    impl MockJsonObjectReader {
+        fn with_bytes(bytes: Vec<u8>) -> Self {
+            Self {
+                response: Ok(Some(bytes)),
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn missing() -> Self {
+            Self {
+                response: Ok(None),
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl JsonObjectReader for MockJsonObjectReader {
+        fn get_object_bytes(&self, bucket: &str, key: &str) -> Result<Option<Vec<u8>>, String> {
+            self.calls
+                .borrow_mut()
+                .push((bucket.to_string(), key.to_string()));
+            self.response.clone()
+        }
+    }
+
+    fn test_config(stages: Vec<StageDefinition>) -> PipelineConfig {
+        PipelineConfig {
+            project: ProjectConfig {
+                name: "beehive".to_string(),
+                workdir: ".".to_string(),
+            },
+            storage: None,
+            runtime: RuntimeConfig::default(),
+            stages,
+        }
+    }
+
+    fn stage(id: &str) -> StageDefinition {
+        StageDefinition {
+            id: id.to_string(),
+            input_folder: format!("stages/{id}"),
+            input_uri: None,
+            output_folder: format!("stages/{id}-out"),
+            workflow_url: format!("http://localhost:5678/webhook/{id}"),
+            max_attempts: 3,
+            retry_delay_sec: 10,
+            next_stage: None,
+            save_path_aliases: Vec::new(),
+            resource_class: Default::default(),
+            allow_empty_outputs: false,
+            allow_multiple_outputs: false,
+        }
+    }
+
+    fn s3_stage(id: &str) -> StageDefinition {
+        StageDefinition {
+            input_folder: String::new(),
+            input_uri: Some(format!("s3://steos-s3-data/main_dir/{id}")),
+            output_folder: String::new(),
+            ..stage(id)
+        }
+    }
+
+    fn register_s3_file(database_path: &Path) -> crate::domain::EntityFileRecord {
+        database::register_s3_artifact_pointers(
+            database_path,
+            &[RegisterS3ArtifactPointerInput {
+                entity_id: "entity-alpha".to_string(),
+                artifact_id: "artifact-alpha".to_string(),
+                relation_to_source: Some("source".to_string()),
+                stage_id: "raw_entities".to_string(),
+                bucket: "steos-s3-data".to_string(),
+                key: "main_dir/raw_entities/entity-alpha.json".to_string(),
+                version_id: None,
+                etag: None,
+                checksum_sha256: None,
+                size: Some(42),
+                last_modified: None,
+                source_file_id: None,
+                producer_run_id: None,
+                status: StageStatus::Pending,
+            }],
+        )
+        .expect("register s3 file")
+        .remove(0)
+    }
 
     #[test]
     fn sanitizes_json_file_name_without_losing_cyrillic() {
@@ -513,5 +781,115 @@ mod tests {
             derive_artifact_id(&fallback, "entity_1", "abcdef"),
             "entity_1__source"
         );
+    }
+
+    #[test]
+    fn s3_json_view_reads_registered_bucket_key_and_returns_json() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("app.db");
+        database::bootstrap_database(&database_path, &test_config(vec![s3_stage("raw_entities")]))
+            .expect("bootstrap");
+        let file = register_s3_file(&database_path);
+        let reader =
+            MockJsonObjectReader::with_bytes(br#"{"id":"entity-alpha","value":42}"#.to_vec());
+
+        let payload =
+            view_entity_file_s3_json_with_reader(&database_path, file.id, &reader).expect("json");
+
+        assert_eq!(payload.entity_file_id, file.id);
+        assert_eq!(
+            payload.s3_uri,
+            "s3://steos-s3-data/main_dir/raw_entities/entity-alpha.json"
+        );
+        assert_eq!(payload.json["value"].as_i64(), Some(42));
+        assert_eq!(
+            reader.calls.borrow().as_slice(),
+            &[(
+                "steos-s3-data".to_string(),
+                "main_dir/raw_entities/entity-alpha.json".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn s3_json_view_rejects_missing_and_non_s3_files() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workdir = tempdir.path().join("workdir");
+        let database_path = workdir.join("app.db");
+        database::bootstrap_database(&database_path, &test_config(vec![stage("incoming")]))
+            .expect("bootstrap");
+        let source_path = workdir
+            .join("stages")
+            .join("incoming")
+            .join("entity-1.json");
+        fs::create_dir_all(source_path.parent().expect("source parent")).expect("parent");
+        fs::write(&source_path, r#"{"id":"entity-1"}"#).expect("source");
+        scan_workspace(&workdir, &database_path).expect("scan");
+        let file = database::list_entity_files(&database_path, Some("entity-1"))
+            .expect("files")
+            .remove(0);
+        let reader = MockJsonObjectReader::missing();
+
+        let missing = view_entity_file_s3_json_with_reader(&database_path, 9999, &reader)
+            .expect_err("missing");
+        let non_s3 = view_entity_file_s3_json_with_reader(&database_path, file.id, &reader)
+            .expect_err("non s3");
+
+        assert_eq!(missing.code, "entity_file_not_found");
+        assert_eq!(missing.status_code, 404);
+        assert_eq!(non_s3.code, "not_s3_artifact");
+        assert!(reader.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn s3_json_view_reports_s3_missing_and_invalid_json() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("app.db");
+        database::bootstrap_database(&database_path, &test_config(vec![s3_stage("raw_entities")]))
+            .expect("bootstrap");
+        let file = register_s3_file(&database_path);
+
+        let missing = view_entity_file_s3_json_with_reader(
+            &database_path,
+            file.id,
+            &MockJsonObjectReader::missing(),
+        )
+        .expect_err("missing object");
+        let invalid = view_entity_file_s3_json_with_reader(
+            &database_path,
+            file.id,
+            &MockJsonObjectReader::with_bytes(b"not json".to_vec()),
+        )
+        .expect_err("invalid json");
+
+        assert_eq!(missing.code, "s3_object_not_found");
+        assert_eq!(invalid.code, "s3_json_invalid");
+    }
+
+    #[test]
+    fn s3_json_view_preserves_cyrillic_json() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("app.db");
+        database::bootstrap_database(&database_path, &test_config(vec![s3_stage("raw_entities")]))
+            .expect("bootstrap");
+        let file = register_s3_file(&database_path);
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "name": "Кольца Кайзера-Флейшера",
+            "payload": { "язык": "русский" }
+        }))
+        .expect("json bytes");
+
+        let payload = view_entity_file_s3_json_with_reader(
+            &database_path,
+            file.id,
+            &MockJsonObjectReader::with_bytes(bytes),
+        )
+        .expect("json");
+
+        assert_eq!(
+            payload.json["name"].as_str(),
+            Some("Кольца Кайзера-Флейшера")
+        );
+        assert_eq!(payload.json["payload"]["язык"].as_str(), Some("русский"));
     }
 }

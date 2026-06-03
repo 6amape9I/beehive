@@ -8,6 +8,7 @@ import type {
   CreateWorkspaceRequest,
   DashboardOverviewResult,
   EntityDetailResult,
+  EntityFileS3JsonResult,
   EntityFilesResult,
   EntityListQuery,
   EntityListResult,
@@ -23,6 +24,7 @@ import type {
   ReconcileStuckTasksResult,
   RegisterS3SourceArtifactRequest,
   RegisterS3SourceArtifactResult,
+  ResetEntityStageRequest,
   RunDueTasksResult,
   RunEntityStageResult,
   RunPipelineWavesResult,
@@ -200,6 +202,28 @@ export const tauriClient: BeehiveApiClient = {
   },
   getWorkspaceEntity(workspaceId: string, entityId: string): Promise<EntityDetailResult> {
     return invoke<EntityDetailResult>("get_workspace_entity", { workspaceId, entityId });
+  },
+  viewWorkspaceEntityFileS3Json(
+    workspaceId: string,
+    entityFileId: number,
+  ): Promise<EntityFileS3JsonResult> {
+    return invoke<EntityFileS3JsonResult>("view_workspace_entity_file_s3_json", {
+      workspaceId,
+      entityFileId,
+    });
+  },
+  resetWorkspaceEntityStageToPending(
+    workspaceId: string,
+    entityId: string,
+    stageId: string,
+    input: ResetEntityStageRequest,
+  ): Promise<ManualEntityStageActionResult> {
+    return invoke<ManualEntityStageActionResult>("reset_workspace_entity_stage_to_pending", {
+      workspaceId,
+      entityId,
+      stageId,
+      input,
+    });
   },
   updateWorkspaceEntity(
     workspaceId: string,

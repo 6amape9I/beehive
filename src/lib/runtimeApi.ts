@@ -5,6 +5,7 @@ import type {
   CreateS3StageResult,
   DashboardOverviewResult,
   EntityDetailResult,
+  EntityFileS3JsonResult,
   EntityFilesResult,
   EntityListQuery,
   EntityListResult,
@@ -20,6 +21,7 @@ import type {
   ReconcileStuckTasksResult,
   RegisterS3SourceArtifactRequest,
   RegisterS3SourceArtifactResult,
+  ResetEntityStageRequest,
   RunDueTasksResult,
   RunEntityStageResult,
   RunPipelineWavesResult,
@@ -175,6 +177,22 @@ export function getWorkspaceEntity(
   entityId: string,
 ): Promise<EntityDetailResult> {
   return apiClient.getWorkspaceEntity(workspaceId, entityId);
+}
+
+export function viewWorkspaceEntityFileS3Json(
+  workspaceId: string,
+  entityFileId: number,
+): Promise<EntityFileS3JsonResult> {
+  return apiClient.viewWorkspaceEntityFileS3Json(workspaceId, entityFileId);
+}
+
+export function resetWorkspaceEntityStageToPending(
+  workspaceId: string,
+  entityId: string,
+  stageId: string,
+  input: ResetEntityStageRequest,
+): Promise<ManualEntityStageActionResult> {
+  return apiClient.resetWorkspaceEntityStageToPending(workspaceId, entityId, stageId, input);
 }
 
 export function updateWorkspaceEntity(

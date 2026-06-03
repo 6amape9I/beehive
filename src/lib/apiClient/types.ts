@@ -6,6 +6,7 @@ import type {
   CreateWorkspaceRequest,
   DashboardOverviewResult,
   EntityDetailResult,
+  EntityFileS3JsonResult,
   EntityFilesResult,
   EntityListQuery,
   EntityListResult,
@@ -21,6 +22,7 @@ import type {
   ReconcileStuckTasksResult,
   RegisterS3SourceArtifactRequest,
   RegisterS3SourceArtifactResult,
+  ResetEntityStageRequest,
   RunDueTasksResult,
   RunEntityStageResult,
   RunPipelineWavesResult,
@@ -112,6 +114,16 @@ export interface BeehiveApiClient {
     selectedFileId?: number | null,
   ): Promise<EntityDetailResult>;
   getWorkspaceEntity(workspaceId: string, entityId: string): Promise<EntityDetailResult>;
+  viewWorkspaceEntityFileS3Json(
+    workspaceId: string,
+    entityFileId: number,
+  ): Promise<EntityFileS3JsonResult>;
+  resetWorkspaceEntityStageToPending(
+    workspaceId: string,
+    entityId: string,
+    stageId: string,
+    input: ResetEntityStageRequest,
+  ): Promise<ManualEntityStageActionResult>;
   updateWorkspaceEntity(
     workspaceId: string,
     entityId: string,

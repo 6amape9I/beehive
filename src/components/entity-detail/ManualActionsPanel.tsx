@@ -9,6 +9,10 @@ interface ManualActionsPanelProps {
   stageStates: EntityStageStateRecord[];
   allowedActions: EntityStageAllowedActions[];
   loadingAction: string | null;
+  canRetry?: boolean;
+  canReset?: boolean;
+  canSkip?: boolean;
+  canRun?: boolean;
   onRetry: (stageId: string) => void;
   onReset: (stageId: string) => void;
   onSkip: (stageId: string) => void;
@@ -26,6 +30,10 @@ export function ManualActionsPanel({
   stageStates,
   allowedActions,
   loadingAction,
+  canRetry = true,
+  canReset = true,
+  canSkip = true,
+  canRun = true,
   onRetry,
   onReset,
   onSkip,
@@ -71,23 +79,25 @@ export function ManualActionsPanel({
                         <button
                           type="button"
                           className="button secondary"
-                          disabled={isBusy || !allowed?.can_retry_now}
+                          disabled={isBusy || !canRetry || !allowed?.can_retry_now}
                           onClick={() => onRetry(state.stage_id)}
                         >
                           Retry now
                         </button>
+                        {allowed?.can_reset_to_pending ? (
+                          <button
+                            type="button"
+                            className="button secondary"
+                            disabled={isBusy || !canReset}
+                            onClick={() => onReset(state.stage_id)}
+                          >
+                            Reset to pending
+                          </button>
+                        ) : null}
                         <button
                           type="button"
                           className="button secondary"
-                          disabled={isBusy || !allowed?.can_reset_to_pending}
-                          onClick={() => onReset(state.stage_id)}
-                        >
-                          Reset
-                        </button>
-                        <button
-                          type="button"
-                          className="button secondary"
-                          disabled={isBusy || !allowed?.can_skip}
+                          disabled={isBusy || !canSkip || !allowed?.can_skip}
                           onClick={() => onSkip(state.stage_id)}
                         >
                           Skip
@@ -95,7 +105,7 @@ export function ManualActionsPanel({
                         <button
                           type="button"
                           className="button secondary"
-                          disabled={isBusy || !allowed?.can_run_this_stage}
+                          disabled={isBusy || !canRun || !allowed?.can_run_this_stage}
                           onClick={() => onRun(state.stage_id)}
                         >
                           Run this stage

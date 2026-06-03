@@ -49,6 +49,8 @@ pub fn run() {
             commands::get_entity,
             commands::list_workspace_entities,
             commands::get_workspace_entity,
+            commands::view_workspace_entity_file_s3_json,
+            commands::reset_workspace_entity_stage_to_pending,
             commands::update_workspace_entity,
             commands::archive_workspace_entity,
             commands::restore_workspace_entity,

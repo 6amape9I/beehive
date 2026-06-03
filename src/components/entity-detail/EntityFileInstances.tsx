@@ -15,6 +15,7 @@ interface EntityFileInstancesProps {
   onSelectFile: (fileId: number) => void;
   onOpenFile: (fileId: number) => void;
   onOpenFolder: (fileId: number) => void;
+  onViewS3Json: (fileId: number) => void;
 }
 
 export function EntityFileInstances({
@@ -26,6 +27,7 @@ export function EntityFileInstances({
   onSelectFile,
   onOpenFile,
   onOpenFolder,
+  onViewS3Json,
 }: EntityFileInstancesProps) {
   return (
     <section className="panel">
@@ -52,6 +54,7 @@ export function EntityFileInstances({
                 <th>Managed copy</th>
                 <th>Edit</th>
                 <th>Open</th>
+                <th>S3 JSON</th>
               </tr>
             </thead>
             <tbody>
@@ -118,6 +121,16 @@ export function EntityFileInstances({
                           Folder
                         </button>
                       </div>
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="button secondary"
+                        disabled={busy || file.storage_provider !== "s3"}
+                        onClick={() => onViewS3Json(file.id)}
+                      >
+                        View S3 JSON
+                      </button>
                     </td>
                   </tr>
                 );

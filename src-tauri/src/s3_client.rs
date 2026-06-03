@@ -110,6 +110,38 @@ impl AwsS3MetadataClient {
             metadata,
         })
     }
+
+    pub(crate) fn get_object_bytes(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let output = match self
+            .runtime
+            .block_on(self.client.get_object().bucket(bucket).key(key).send())
+        {
+            Ok(output) => output,
+            Err(error) => {
+                let display_message = error.to_string();
+                let debug_message = format!("{error:?}");
+                if is_not_found_error(&display_message) || is_not_found_error(&debug_message) {
+                    return Ok(None);
+                }
+                return Err(format!(
+                    "Failed to read S3 object s3://{bucket}/{key}: {display_message}; {debug_message}"
+                ));
+            }
+        };
+        let bytes = self
+            .runtime
+            .block_on(output.body.collect())
+            .map_err(|error| {
+                format!("Failed to collect S3 object body s3://{bucket}/{key}: {error}")
+            })?
+            .into_bytes()
+            .to_vec();
+        Ok(Some(bytes))
+    }
 }
 
 impl S3MetadataClient for AwsS3MetadataClient {

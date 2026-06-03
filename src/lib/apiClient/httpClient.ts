@@ -6,6 +6,7 @@ import type {
   CreateWorkspaceRequest,
   DashboardOverviewResult,
   EntityDetailResult,
+  EntityFileS3JsonResult,
   EntityFilesResult,
   EntityListQuery,
   EntityListResult,
@@ -21,6 +22,7 @@ import type {
   ReconcileStuckTasksResult,
   RegisterS3SourceArtifactRequest,
   RegisterS3SourceArtifactResult,
+  ResetEntityStageRequest,
   RunDueTasksResult,
   RunEntityStageResult,
   RunPipelineWavesResult,
@@ -78,10 +80,18 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
       },
     });
     const payload = (await response.json()) as T;
-    if (!response.ok) {
+    if (!response.ok && !hasErrors(payload)) {
       throw new Error(`HTTP ${response.status} for ${path}`);
     }
     return payload;
+  }
+
+  function hasErrors(payload: unknown): payload is { errors: unknown[] } {
+    return (
+      typeof payload === "object" &&
+      payload !== null &&
+      Array.isArray((payload as { errors?: unknown }).errors)
+    );
   }
 
   function postJson<T>(path: string, body?: unknown): Promise<T> {
@@ -235,6 +245,27 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
     getWorkspaceEntity: (workspaceId: string, entityId: string): Promise<EntityDetailResult> =>
       fetchJson(
         `/api/workspaces/${encodeURIComponent(workspaceId)}/entities/${encodeURIComponent(entityId)}`,
+      ),
+    viewWorkspaceEntityFileS3Json: (
+      workspaceId: string,
+      entityFileId: number,
+    ): Promise<EntityFileS3JsonResult> =>
+      fetchJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/entity-files/${encodeURIComponent(
+          String(entityFileId),
+        )}/s3-json`,
+      ),
+    resetWorkspaceEntityStageToPending: (
+      workspaceId: string,
+      entityId: string,
+      stageId: string,
+      input: ResetEntityStageRequest,
+    ): Promise<ManualEntityStageActionResult> =>
+      postJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/entities/${encodeURIComponent(
+          entityId,
+        )}/stages/${encodeURIComponent(stageId)}/reset-to-pending`,
+        input,
       ),
     updateWorkspaceEntity: (
       workspaceId: string,

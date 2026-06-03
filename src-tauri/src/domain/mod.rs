@@ -1156,6 +1156,23 @@ pub struct EntityFilesResult {
     pub errors: Vec<CommandErrorInfo>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EntityFileS3JsonPayload {
+    pub entity_file_id: i64,
+    pub entity_id: String,
+    pub stage_id: String,
+    pub bucket: String,
+    pub key: String,
+    pub s3_uri: String,
+    pub json: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EntityFileS3JsonResult {
+    pub payload: Option<EntityFileS3JsonPayload>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegisterS3SourceArtifactRequest {
     pub stage_id: String,
@@ -1296,6 +1313,12 @@ pub struct EntityDetailPayload {
 pub struct EntityDetailResult {
     pub detail: Option<EntityDetailPayload>,
     pub errors: Vec<CommandErrorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ResetEntityStageRequest {
+    pub confirm: bool,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
