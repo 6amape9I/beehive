@@ -6,10 +6,10 @@ use sha2::{Digest, Sha256};
 
 use crate::database::{self, RegisterS3ArtifactPointerInput};
 use crate::domain::{
-    EntityDetailPayload, EntityDetailResult, EntityFileS3JsonPayload, EntityListQuery,
-    EntityListResult, EntityMutationPayload, EntityMutationResult, ImportJsonBatchPayload,
-    ImportJsonBatchRequest, ImportJsonFileInput, ImportJsonFileResult, ResetEntityStageRequest,
-    S3StorageConfig, StageStatus, StorageProvider, UpdateEntityRequest,
+    BulkResetEntityStagesPayload, EntityDetailPayload, EntityDetailResult, EntityFileS3JsonPayload,
+    EntityListQuery, EntityListResult, EntityMutationPayload, EntityMutationResult,
+    ImportJsonBatchPayload, ImportJsonBatchRequest, ImportJsonFileInput, ImportJsonFileResult,
+    ResetEntityStageRequest, S3StorageConfig, StageStatus, StorageProvider, UpdateEntityRequest,
 };
 use crate::s3_client::{AwsS3MetadataClient, S3MetadataClient, S3ObjectMetadata};
 use crate::services::workspaces;
@@ -222,6 +222,26 @@ pub(crate) fn reset_entity_stage_to_pending_for_workspace(
         })
 }
 
+pub(crate) fn reset_failed_blocked_entity_stages_for_workspace(
+    workspace_id: &str,
+    input: &ResetEntityStageRequest,
+) -> Result<BulkResetEntityStagesPayload, EntityActionError> {
+    if !input.confirm {
+        return Err(EntityActionError::new(
+            400,
+            "bulk_reset_confirmation_required",
+            "Bulk reset to pending requires confirm=true.",
+        ));
+    }
+    let workspace = workspaces::get_workspace(workspace_id)
+        .map_err(|message| EntityActionError::new(404, "workspace_not_found", message))?;
+    database::reset_failed_blocked_entity_stages_to_pending(
+        &workspace.database_path,
+        input.reason.as_deref(),
+    )
+    .map_err(|message| EntityActionError::new(500, "bulk_reset_failed", message))
+}
+
 pub(crate) fn update_entity_for_workspace(
     workspace_id: &str,
     entity_id: &str,
@@ -397,16 +417,14 @@ fn import_one_file(
     file: &ImportJsonFileInput,
     uploader: &dyn JsonObjectUploader,
 ) -> Result<ImportJsonFileResult, String> {
-    if !file.content.is_object() {
-        return Err("invalid: JSON file content must be an object.".to_string());
-    }
+    let identity_content = import_identity_content(&file.content)?;
     let file_name = sanitize_json_file_name(&file.file_name)?;
     let bytes = serde_json::to_vec(&file.content)
         .map_err(|error| format!("Failed to serialize JSON content: {error}"))?;
     let checksum = sha256_hex(&bytes);
     let short_hash = checksum.chars().take(12).collect::<String>();
-    let entity_id = derive_entity_id(&file.content, &file_name, &short_hash);
-    let artifact_id = derive_artifact_id(&file.content, &entity_id, &short_hash);
+    let entity_id = derive_entity_id(identity_content, &file_name, &short_hash);
+    let artifact_id = derive_artifact_id(identity_content, &entity_id, &short_hash);
     let object_key = choose_object_key(
         storage,
         stage_id,
@@ -455,6 +473,20 @@ fn import_one_file(
         object_key: registered.key.clone(),
         error: None,
     })
+}
+
+fn import_identity_content(content: &Value) -> Result<&Value, String> {
+    match content {
+        Value::Object(_) => Ok(content),
+        Value::Array(items) if items.len() == 1 && items[0].is_object() => Ok(&items[0]),
+        Value::Array(items) => Err(format!(
+            "invalid: JSON array imports must contain exactly one object, found {}.",
+            items.len()
+        )),
+        _ => Err(
+            "invalid: JSON file content must be an object or a single-object array.".to_string(),
+        ),
+    }
 }
 
 fn workspace_s3_storage(
@@ -571,23 +603,21 @@ fn sanitize_json_file_name(value: &str) -> Result<String, String> {
 }
 
 fn derive_entity_id(content: &Value, file_name: &str, short_hash: &str) -> String {
-    content
-        .get("entity_id")
-        .and_then(Value::as_str)
-        .or_else(|| content.get("id").and_then(Value::as_str))
-        .map(sanitize_logical_id)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            let stem = file_stem(file_name);
-            let stem = sanitize_logical_id(&stem);
-            format!("{stem}_{short_hash}")
-        })
+    first_string_field(
+        content,
+        &["entity_id", "id", "entity_name", "source_entity_id"],
+    )
+    .map(sanitize_logical_id)
+    .filter(|value| !value.is_empty())
+    .unwrap_or_else(|| {
+        let stem = file_stem(file_name);
+        let stem = sanitize_logical_id(&stem);
+        format!("{stem}_{short_hash}")
+    })
 }
 
 fn derive_artifact_id(content: &Value, entity_id: &str, short_hash: &str) -> String {
-    content
-        .get("artifact_id")
-        .and_then(Value::as_str)
+    first_string_field(content, &["artifact_id"])
         .map(sanitize_logical_id)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| {
@@ -597,6 +627,23 @@ fn derive_artifact_id(content: &Value, entity_id: &str, short_hash: &str) -> Str
                 format!("{entity_id}__source")
             }
         })
+}
+
+fn first_string_field<'a>(content: &'a Value, fields: &[&str]) -> Option<&'a str> {
+    fields
+        .iter()
+        .filter_map(|field| content.get(*field).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|value| is_non_nullish_string(value))
+}
+
+fn is_non_nullish_string(value: &str) -> bool {
+    let normalized = value.trim();
+    !normalized.is_empty()
+        && !matches!(
+            normalized.to_ascii_lowercase().as_str(),
+            "null" | "none" | "undefined"
+        )
 }
 
 fn sanitize_logical_id(value: &str) -> String {
@@ -654,14 +701,31 @@ fn sha256_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::ffi::OsStr;
     use std::fs;
 
     use crate::discovery::scan_workspace;
-    use crate::domain::{PipelineConfig, ProjectConfig, RuntimeConfig, StageDefinition};
+    use crate::domain::{
+        PipelineConfig, ProjectConfig, RuntimeConfig, StageDefinition, StorageConfig,
+    };
 
     struct MockJsonObjectReader {
         response: Result<Option<Vec<u8>>, String>,
         calls: RefCell<Vec<(String, String)>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct UploadedJsonObject {
+        bucket: String,
+        key: String,
+        bytes: Vec<u8>,
+        metadata: HashMap<String, String>,
+    }
+
+    #[derive(Default)]
+    struct MockJsonObjectUploader {
+        existing: RefCell<HashSet<(String, String)>>,
+        uploads: RefCell<Vec<UploadedJsonObject>>,
     }
 
     impl MockJsonObjectReader {
@@ -689,6 +753,61 @@ mod tests {
         }
     }
 
+    impl JsonObjectUploader for MockJsonObjectUploader {
+        fn object_exists(&self, bucket: &str, key: &str) -> Result<bool, String> {
+            Ok(self
+                .existing
+                .borrow()
+                .contains(&(bucket.to_string(), key.to_string())))
+        }
+
+        fn put_json_object(
+            &self,
+            bucket: &str,
+            key: &str,
+            bytes: Vec<u8>,
+            metadata: HashMap<String, String>,
+        ) -> Result<S3ObjectMetadata, String> {
+            let size = bytes.len() as u64;
+            self.uploads.borrow_mut().push(UploadedJsonObject {
+                bucket: bucket.to_string(),
+                key: key.to_string(),
+                bytes,
+                metadata: metadata.clone(),
+            });
+            Ok(S3ObjectMetadata {
+                bucket: bucket.to_string(),
+                key: key.to_string(),
+                size: Some(size),
+                metadata,
+                ..Default::default()
+            })
+        }
+    }
+
+    fn with_workspace_test_env<F>(registry_path: &Path, root: &Path, run: F)
+    where
+        F: FnOnce(),
+    {
+        let _guard = workspaces::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_registry = std::env::var_os("BEEHIVE_WORKSPACES_CONFIG");
+        let previous_root = std::env::var_os("BEEHIVE_WORKSPACES_ROOT");
+        std::env::set_var("BEEHIVE_WORKSPACES_CONFIG", registry_path);
+        std::env::set_var("BEEHIVE_WORKSPACES_ROOT", root);
+        run();
+        restore_env_var("BEEHIVE_WORKSPACES_CONFIG", previous_registry.as_deref());
+        restore_env_var("BEEHIVE_WORKSPACES_ROOT", previous_root.as_deref());
+    }
+
+    fn restore_env_var(name: &str, value: Option<&OsStr>) {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+
     fn test_config(stages: Vec<StageDefinition>) -> PipelineConfig {
         PipelineConfig {
             project: ProjectConfig {
@@ -696,6 +815,27 @@ mod tests {
                 workdir: ".".to_string(),
             },
             storage: None,
+            runtime: RuntimeConfig {
+                file_stability_delay_ms: 0,
+                ..RuntimeConfig::default()
+            },
+            stages,
+        }
+    }
+
+    fn s3_test_config(stages: Vec<StageDefinition>) -> PipelineConfig {
+        PipelineConfig {
+            project: ProjectConfig {
+                name: "Embrio_entities".to_string(),
+                workdir: ".".to_string(),
+            },
+            storage: Some(StorageConfig {
+                provider: StorageProvider::S3,
+                bucket: Some("steos-s3-data".to_string()),
+                workspace_prefix: Some("Embrio_entities".to_string()),
+                region: Some("ru-1".to_string()),
+                endpoint: Some("https://s3.example".to_string()),
+            }),
             runtime: RuntimeConfig::default(),
             stages,
         }
@@ -725,6 +865,52 @@ mod tests {
             output_folder: String::new(),
             ..stage(id)
         }
+    }
+
+    fn embrio_s3_stage(id: &str) -> StageDefinition {
+        StageDefinition {
+            id: id.to_string(),
+            input_folder: format!("stages/{id}"),
+            input_uri: Some(format!("s3://steos-s3-data/Embrio_entities/stages/{id}")),
+            output_folder: format!("stages/{id}_out"),
+            workflow_url: format!("http://localhost:5678/webhook/{id}"),
+            max_attempts: 3,
+            retry_delay_sec: 10,
+            next_stage: None,
+            save_path_aliases: vec![
+                format!("Embrio_entities/stages/{id}"),
+                format!("/Embrio_entities/stages/{id}"),
+                format!("s3://steos-s3-data/Embrio_entities/stages/{id}"),
+            ],
+            resource_class: Default::default(),
+            allow_empty_outputs: false,
+            allow_multiple_outputs: false,
+        }
+    }
+
+    fn write_registry(registry_path: &Path, workdir: &Path, database_path: &Path) {
+        fs::write(
+            registry_path,
+            format!(
+                r#"
+workspaces:
+  - id: embrio_entities
+    name: Embrio_entities
+    provider: s3
+    bucket: steos-s3-data
+    workspace_prefix: Embrio_entities
+    region: ru-1
+    endpoint: https://s3.example
+    workdir_path: {}
+    pipeline_path: {}
+    database_path: {}
+"#,
+                workdir.display(),
+                workdir.join("pipeline.yaml").display(),
+                database_path.display()
+            ),
+        )
+        .expect("registry");
     }
 
     fn register_s3_file(database_path: &Path) -> crate::domain::EntityFileRecord {
@@ -781,6 +967,91 @@ mod tests {
             derive_artifact_id(&fallback, "entity_1", "abcdef"),
             "entity_1__source"
         );
+        let named =
+            serde_json::json!({"source_entity_id": "null", "entity_name": "физический объект"});
+        assert_eq!(
+            derive_entity_id(&named, "009_физический объект.json", "abcdef"),
+            "физический_объект"
+        );
+    }
+
+    #[test]
+    fn import_json_batch_accepts_single_object_array_and_derives_entity_name() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path().join("root");
+        let workdir = root.join("embrio_entities");
+        let database_path = workdir.join("app.db");
+        let registry_path = tempdir.path().join("workspaces.yaml");
+        fs::create_dir_all(&workdir).expect("workdir");
+        let config = s3_test_config(vec![embrio_s3_stage("Stage_3")]);
+        fs::write(
+            workdir.join("pipeline.yaml"),
+            serde_yaml::to_string(&config).expect("pipeline yaml"),
+        )
+        .expect("pipeline");
+        database::bootstrap_database(&database_path, &config).expect("bootstrap");
+        write_registry(&registry_path, &workdir, &database_path);
+        let uploader = MockJsonObjectUploader::default();
+        let content = serde_json::json!([
+            {
+                "entity_name": "глагол",
+                "source_entity_id": "null",
+                "parent_name": "элемент онтологии",
+                "save_path": "itg_workspace/stages/stage_3"
+            }
+        ]);
+        let input = ImportJsonBatchRequest {
+            stage_id: "Stage_3".to_string(),
+            files: vec![ImportJsonFileInput {
+                relative_path: Some("level_2_entities/001_глагол.json".to_string()),
+                file_name: "001_глагол.json".to_string(),
+                content: content.clone(),
+            }],
+            options: Default::default(),
+        };
+
+        with_workspace_test_env(&registry_path, &root, || {
+            let payload = import_json_batch_with_uploader("embrio_entities", &input, &uploader)
+                .expect("import");
+
+            assert_eq!(payload.imported_count, 1);
+            assert_eq!(payload.invalid_count, 0);
+            assert_eq!(payload.files[0].status, "imported");
+            assert_eq!(payload.files[0].entity_id.as_deref(), Some("глагол"));
+            assert_eq!(
+                payload.files[0].artifact_id.as_deref(),
+                Some("глагол__source")
+            );
+            assert_eq!(
+                payload.files[0].key.as_deref(),
+                Some("Embrio_entities/stages/Stage_3/001_глагол.json")
+            );
+
+            let uploads = uploader.uploads.borrow();
+            assert_eq!(uploads.len(), 1);
+            assert_eq!(uploads[0].bucket, "steos-s3-data");
+            assert_eq!(
+                uploads[0].key,
+                "Embrio_entities/stages/Stage_3/001_глагол.json"
+            );
+            assert_eq!(
+                uploads[0]
+                    .metadata
+                    .get("beehive-entity-id")
+                    .map(String::as_str),
+                Some("глагол")
+            );
+            assert_eq!(
+                serde_json::from_slice::<Value>(&uploads[0].bytes).expect("uploaded json"),
+                content
+            );
+
+            let registered = database::list_entity_files(&database_path, Some("глагол"))
+                .expect("registered files");
+            assert_eq!(registered.len(), 1);
+            assert_eq!(registered[0].stage_id, "Stage_3");
+            assert_eq!(registered[0].status, "pending");
+        });
     }
 
     #[test]
@@ -823,7 +1094,7 @@ mod tests {
             .join("incoming")
             .join("entity-1.json");
         fs::create_dir_all(source_path.parent().expect("source parent")).expect("parent");
-        fs::write(&source_path, r#"{"id":"entity-1"}"#).expect("source");
+        fs::write(&source_path, r#"{"id":"entity-1","payload":{"ok":true}}"#).expect("source");
         scan_workspace(&workdir, &database_path).expect("scan");
         let file = database::list_entity_files(&database_path, Some("entity-1"))
             .expect("files")

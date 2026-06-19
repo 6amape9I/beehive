@@ -11,15 +11,16 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::database::{
-    attach_worker_lease_run, block_stage_state, claim_eligible_runtime_tasks,
-    claim_specific_runtime_task, claim_worker_runtime_tasks, find_latest_entity_file_for_stage,
-    find_stage_by_id, finish_stage_run, finish_worker_lease, finish_worker_task_internal_error,
-    heartbeat_worker_lease, insert_app_event, load_active_stages_from_connection, load_setting,
-    open_connection, reconcile_orphan_stage_runs_for_queued_state,
-    register_s3_artifact_pointers_best_effort, release_queued_claim, start_claimed_stage_run,
-    update_stage_state_failure, update_stage_state_failure_with_reason, update_stage_state_success,
-    FinishStageRunInput, NewStageRunInput, RegisterS3ArtifactPointerInput, RuntimeTaskRecord,
-    WorkerLeaseClaimInput,
+    block_stage_state, claim_eligible_runtime_tasks, claim_specific_runtime_task,
+    claim_worker_runtime_tasks, find_latest_entity_file_for_stage, find_stage_by_id,
+    finish_stage_run, finish_worker_lease, finish_worker_task_internal_error,
+    heartbeat_worker_lease_with_gate_timeout, insert_app_event, load_active_stages_from_connection,
+    load_setting, open_connection, reconcile_orphan_stage_runs_for_queued_state,
+    register_s3_artifact_pointers_best_effort, release_queued_claim,
+    start_claimed_stage_run_and_attach_lease, update_stage_state_failure,
+    update_stage_state_failure_with_reason, update_stage_state_success,
+    with_immediate_write_transaction, FinishStageRunInput, NewStageRunInput,
+    RegisterS3ArtifactPointerInput, RuntimeTaskRecord, WorkerLeaseClaimInput,
 };
 use crate::domain::{
     AppEventLevel, ArtifactLocation, CommandErrorInfo, EntityFileRecord, PipelineWaveSummary,
@@ -35,6 +36,8 @@ use crate::s3_manifest::{
 };
 use crate::save_path::parse_s3_uri;
 use crate::state_machine::RuntimeTransitionReason;
+
+const WORKER_HEARTBEAT_WRITE_GATE_TIMEOUT_SEC: u64 = 5;
 
 pub fn run_due_tasks(
     workdir_path: &Path,
@@ -405,6 +408,7 @@ enum TaskOutcome {
     Skipped,
 }
 
+#[derive(Clone)]
 struct AttemptFailure {
     error_type: String,
     message: String,
@@ -434,21 +438,6 @@ fn execute_task(
     }
 
     let mut connection = open_connection(database_path)?;
-    insert_app_event(
-        &connection,
-        AppEventLevel::Info,
-        "task_queued",
-        &format!(
-            "Queued entity '{}' on stage '{}'.",
-            task.entity_id, task.stage_id
-        ),
-        Some(json!({
-            "entity_id": task.entity_id,
-            "stage_id": task.stage_id,
-            "resource_class": task.resource_class.as_str(),
-        })),
-        &Utc::now().to_rfc3339(),
-    )?;
 
     let source_file =
         find_latest_entity_file_for_stage(&connection, &task.entity_id, &task.stage_id)?
@@ -465,31 +454,43 @@ fn execute_task(
     if let Some(message) =
         source_file_preflight_error(workdir_path, &source_file, file_stability_delay_ms)
     {
+        drop(connection);
         let now = Utc::now().to_rfc3339();
-        release_queued_claim(&connection, task.state_id, &now)?;
-        finish_task_lease(
-            &connection,
-            &task,
-            "released",
-            "source_preflight_skipped",
-            &now,
-        )?;
-        insert_app_event(
-            &connection,
-            AppEventLevel::Warning,
-            if message.contains("changed") {
-                "source_file_changed_before_execution"
-            } else {
-                "source_file_unstable_before_execution"
+        let event_code = if message.contains("changed") {
+            "source_file_changed_before_execution"
+        } else {
+            "source_file_unstable_before_execution"
+        };
+        let entity_id = task.entity_id.clone();
+        let stage_id = task.stage_id.clone();
+        let file_path = source_file.file_path.clone();
+        let file_id = source_file.id;
+        with_immediate_write_transaction(
+            database_path,
+            "worker source preflight skip",
+            |connection| {
+                release_queued_claim(connection, task.state_id, &now)?;
+                finish_task_lease(
+                    connection,
+                    &task,
+                    "released",
+                    "source_preflight_skipped",
+                    &now,
+                )?;
+                insert_app_event(
+                    connection,
+                    AppEventLevel::Warning,
+                    event_code,
+                    &message,
+                    Some(json!({
+                        "entity_id": entity_id.clone(),
+                        "stage_id": stage_id.clone(),
+                        "file_path": file_path.clone(),
+                        "file_id": file_id,
+                    })),
+                    &now,
+                )
             },
-            &message,
-            Some(json!({
-                "entity_id": task.entity_id,
-                "stage_id": task.stage_id,
-                "file_path": source_file.file_path,
-                "file_id": source_file.id,
-            })),
-            &now,
         )?;
         return Ok(TaskOutcome::Skipped);
     }
@@ -509,18 +510,11 @@ fn execute_task(
             .map_err(|error| format!("Failed to serialize n8n request JSON: {error}"))?,
         started_at: started_at_text.clone(),
     };
-    start_claimed_stage_run(&mut connection, task.state_id, &stage_run_input)?;
-    attach_task_run_if_leased(&connection, &task, &run_id, &started_at_text)?;
-    insert_app_event(
-        &connection,
-        AppEventLevel::Info,
-        "task_started",
-        &format!(
-            "Started entity '{}' on stage '{}'.",
-            task.entity_id, task.stage_id
-        ),
-        Some(json!({"entity_id": task.entity_id, "stage_id": task.stage_id, "run_id": run_id})),
-        &started_at_text,
+    start_claimed_stage_run_and_attach_lease(
+        &mut connection,
+        task.state_id,
+        &stage_run_input,
+        task.lease_id.as_deref(),
     )?;
     drop(connection);
 
@@ -531,13 +525,10 @@ fn execute_task(
         });
     let finished_at = Utc::now();
     let duration_ms = timer.elapsed().as_millis() as u64;
-    let connection = open_connection(database_path)?;
 
     match http_result {
         Ok(success) => {
             let mut created_child_path = None;
-            let mut created_child_paths = Vec::new();
-            let output_count = success.output_payloads.len();
             if !success.output_payloads.is_empty() {
                 let copy = match file_ops::create_next_stage_copies_from_response(
                     workdir_path,
@@ -550,8 +541,8 @@ fn execute_task(
                 ) {
                     Ok(copy) => copy,
                     Err(message) => {
-                        let outcome = finish_failure(
-                            &connection,
+                        let outcome = finish_failure_transaction(
+                            database_path,
                             &task,
                             &run_id,
                             attempt_no,
@@ -571,11 +562,10 @@ fn execute_task(
                     crate::domain::FileCopyStatus::Created
                     | crate::domain::FileCopyStatus::AlreadyExists => {
                         created_child_path = copy.target_file_paths.first().cloned();
-                        created_child_paths = copy.target_file_paths.clone();
                     }
                     crate::domain::FileCopyStatus::Blocked => {
-                        finish_copy_blocked(
-                            &connection,
+                        finish_copy_blocked_transaction(
+                            database_path,
                             &task,
                             &run_id,
                             copy.message,
@@ -587,8 +577,8 @@ fn execute_task(
                         return Ok(TaskOutcome::Blocked);
                     }
                     crate::domain::FileCopyStatus::Failed => {
-                        let outcome = finish_failure(
-                            &connection,
+                        let outcome = finish_failure_transaction(
+                            database_path,
                             &task,
                             &run_id,
                             attempt_no,
@@ -606,54 +596,20 @@ fn execute_task(
                 }
             }
 
-            finish_stage_run(
-                &connection,
-                &FinishStageRunInput {
-                    run_id: run_id.clone(),
-                    response_json: Some(success.response_json),
-                    http_status: Some(success.http_status),
-                    success: true,
-                    error_type: None,
-                    error_message: None,
-                    finished_at: finished_at.to_rfc3339(),
-                    duration_ms,
-                },
-            )?;
-            update_stage_state_success(
-                &connection,
-                task.state_id,
-                Some(success.http_status),
-                &finished_at.to_rfc3339(),
-                created_child_path.as_deref(),
-            )?;
-            finish_task_lease(
-                &connection,
+            finish_success_transaction(
+                database_path,
                 &task,
-                "done",
-                "task_succeeded",
-                &finished_at.to_rfc3339(),
-            )?;
-            insert_app_event(
-                &connection,
-                AppEventLevel::Info,
-                "task_succeeded",
-                &format!(
-                    "Entity '{}' succeeded on stage '{}'.",
-                    task.entity_id, task.stage_id
-                ),
-                Some(json!({
-                    "entity_id": task.entity_id,
-                    "stage_id": task.stage_id,
-                    "run_id": run_id,
-                    "output_count": output_count,
-                    "created_child_paths": created_child_paths,
-                })),
-                &finished_at.to_rfc3339(),
+                &run_id,
+                Some(success.response_json),
+                Some(success.http_status),
+                finished_at,
+                duration_ms,
+                created_child_path.as_deref(),
             )?;
             Ok(TaskOutcome::Succeeded)
         }
-        Err(failure) => finish_failure(
-            &connection,
+        Err(failure) => finish_failure_transaction(
+            database_path,
             &task,
             &run_id,
             attempt_no,
@@ -756,24 +712,11 @@ fn execute_s3_task(
             .map_err(|error| format!("Failed to serialize S3 n8n request audit JSON: {error}"))?,
         started_at: started_at_text.clone(),
     };
-    start_claimed_stage_run(&mut connection, task.state_id, &stage_run_input)?;
-    attach_task_run_if_leased(&connection, &task, &run_id, &started_at_text)?;
-    insert_app_event(
-        &connection,
-        AppEventLevel::Info,
-        "task_started",
-        &format!(
-            "Started S3 artifact '{}' on stage '{}'.",
-            source_file.file_path, task.stage_id
-        ),
-        Some(json!({
-            "entity_id": task.entity_id.clone(),
-            "stage_id": task.stage_id.clone(),
-            "run_id": run_id.clone(),
-            "source_bucket": source_file.bucket.clone(),
-            "source_key": source_file.key.clone(),
-        })),
-        &started_at_text,
+    start_claimed_stage_run_and_attach_lease(
+        &mut connection,
+        task.state_id,
+        &stage_run_input,
+        task.lease_id.as_deref(),
     )?;
     drop(connection);
 
@@ -782,13 +725,12 @@ fn execute_s3_task(
         call_s3_control_webhook(&task.workflow_url, &control_envelope, request_timeout_sec);
     let finished_at = Utc::now();
     let duration_ms = timer.elapsed().as_millis() as u64;
-    let connection = open_connection(database_path)?;
 
     let response = match http_result {
         Ok(response) => response,
         Err(failure) => {
-            return finish_failure(
-                &connection,
+            return finish_failure_transaction(
+                database_path,
                 &task,
                 &run_id,
                 attempt_no,
@@ -799,8 +741,8 @@ fn execute_s3_task(
         }
     };
     if !(200..=299).contains(&response.status) {
-        return finish_failure(
-            &connection,
+        return finish_failure_transaction(
+            database_path,
             &task,
             &run_id,
             attempt_no,
@@ -845,8 +787,8 @@ fn execute_s3_task(
                     | S3ManifestValidationErrorKind::BlockedContract
             ) =>
         {
-            finish_manifest_blocked(
-                &connection,
+            finish_manifest_blocked_transaction(
+                database_path,
                 &task,
                 &run_id,
                 error.message,
@@ -858,8 +800,8 @@ fn execute_s3_task(
             return Ok(TaskOutcome::Blocked);
         }
         Err(error) => {
-            return finish_failure(
-                &connection,
+            return finish_failure_transaction(
+                database_path,
                 &task,
                 &run_id,
                 attempt_no,
@@ -876,8 +818,8 @@ fn execute_s3_task(
     };
 
     if validated.manifest.status == S3ManifestStatus::Error {
-        return finish_failure(
-            &connection,
+        return finish_failure_transaction(
+            database_path,
             &task,
             &run_id,
             attempt_no,
@@ -932,19 +874,14 @@ fn execute_s3_task(
         register_s3_artifact_pointers_best_effort(database_path, &output_inputs)?;
     let accepted_output_count =
         registration_report.registered_count + registration_report.skipped_count;
-    let report_level = if registration_report.invalid_count > 0
+    let should_record_registration_report = registration_report.invalid_count > 0
         || registration_report.conflict_count > 0
         || registration_report.failed_count > 0
-    {
-        AppEventLevel::Warning
-    } else {
-        AppEventLevel::Info
-    };
-    insert_app_event(
-        &connection,
-        report_level,
-        "output_registration_report",
-        &format!(
+        || registration_report.skipped_count > 0;
+    if should_record_registration_report {
+        let report_context = serde_json::to_value(&registration_report)
+            .map_err(|error| format!("Failed to serialize output registration report: {error}"))?;
+        let report_message = format!(
             "S3 output registration for run '{}' registered {}, skipped {}, invalid {}, conflict {}, failed {}.",
             run_id,
             registration_report.registered_count,
@@ -952,15 +889,25 @@ fn execute_s3_task(
             registration_report.invalid_count,
             registration_report.conflict_count,
             registration_report.failed_count
-        ),
-        Some(serde_json::to_value(&registration_report).map_err(|error| {
-            format!("Failed to serialize output registration report: {error}")
-        })?),
-        &finished_at.to_rfc3339(),
-    )?;
+        );
+        with_immediate_write_transaction(
+            database_path,
+            "S3 output registration report",
+            |connection| {
+                insert_app_event(
+                    connection,
+                    AppEventLevel::Warning,
+                    "output_registration_report",
+                    &report_message,
+                    Some(report_context.clone()),
+                    &finished_at.to_rfc3339(),
+                )
+            },
+        )?;
+    }
     if accepted_output_count == 0 && !validated.outputs.is_empty() {
-        finish_manifest_blocked(
-            &connection,
+        finish_manifest_blocked_transaction(
+            database_path,
             &task,
             &run_id,
             "No manifest outputs could be registered; see output_registration_report app event for per-output errors."
@@ -977,52 +924,147 @@ fn execute_s3_task(
         .map(|file| file.file_path.clone())
         .collect::<Vec<_>>();
 
-    finish_stage_run(
-        &connection,
-        &FinishStageRunInput {
-            run_id: run_id.clone(),
-            response_json: Some(response.body),
-            http_status: Some(response.status),
-            success: true,
-            error_type: None,
-            error_message: None,
-            finished_at: finished_at.to_rfc3339(),
-            duration_ms,
-        },
-    )?;
-    update_stage_state_success(
-        &connection,
-        task.state_id,
+    finish_success_transaction(
+        database_path,
+        &task,
+        &run_id,
+        Some(response.body),
         Some(response.status),
-        &finished_at.to_rfc3339(),
+        finished_at,
+        duration_ms,
         created_child_paths.first().map(String::as_str),
     )?;
-    finish_task_lease(
-        &connection,
-        &task,
-        "done",
-        "task_succeeded",
-        &finished_at.to_rfc3339(),
-    )?;
-    insert_app_event(
-        &connection,
-        AppEventLevel::Info,
-        "task_succeeded",
-        &format!(
-            "S3 artifact '{}' succeeded on stage '{}'.",
-            source_file.file_path, task.stage_id
-        ),
-        Some(json!({
-            "entity_id": task.entity_id,
-            "stage_id": task.stage_id,
-            "run_id": run_id,
-            "output_count": created_child_paths.len(),
-            "output_registration_report": registration_report,
-            "created_child_paths": created_child_paths,
-        })),
-        &finished_at.to_rfc3339(),
-    )?;
     Ok(TaskOutcome::Succeeded)
+}
+
+fn finish_success_transaction(
+    database_path: &Path,
+    task: &RuntimeTaskRecord,
+    run_id: &str,
+    response_json: Option<String>,
+    http_status: Option<i64>,
+    finished_at: DateTime<Utc>,
+    duration_ms: u64,
+    created_child_path: Option<&str>,
+) -> Result<(), String> {
+    let run_id = run_id.to_string();
+    let finished_at_text = finished_at.to_rfc3339();
+    let created_child_path = created_child_path.map(ToOwned::to_owned);
+    with_immediate_write_transaction(
+        database_path,
+        "worker task success finalization",
+        |connection| {
+            finish_stage_run(
+                connection,
+                &FinishStageRunInput {
+                    run_id: run_id.clone(),
+                    response_json: response_json.clone(),
+                    http_status,
+                    success: true,
+                    error_type: None,
+                    error_message: None,
+                    finished_at: finished_at_text.clone(),
+                    duration_ms,
+                },
+            )?;
+            update_stage_state_success(
+                connection,
+                task.state_id,
+                http_status,
+                &finished_at_text,
+                created_child_path.as_deref(),
+            )?;
+            finish_task_lease(
+                connection,
+                task,
+                "done",
+                "task_succeeded",
+                &finished_at_text,
+            )
+        },
+    )
+}
+
+fn finish_copy_blocked_transaction(
+    database_path: &Path,
+    task: &RuntimeTaskRecord,
+    run_id: &str,
+    message: String,
+    http_status: i64,
+    response_json: String,
+    finished_at: DateTime<Utc>,
+    duration_ms: u64,
+) -> Result<(), String> {
+    with_immediate_write_transaction(
+        database_path,
+        "worker copy blocked finalization",
+        |connection| {
+            finish_copy_blocked(
+                connection,
+                task,
+                run_id,
+                message.clone(),
+                http_status,
+                response_json.clone(),
+                finished_at,
+                duration_ms,
+            )
+        },
+    )
+}
+
+fn finish_manifest_blocked_transaction(
+    database_path: &Path,
+    task: &RuntimeTaskRecord,
+    run_id: &str,
+    message: String,
+    http_status: i64,
+    response_json: String,
+    finished_at: DateTime<Utc>,
+    duration_ms: u64,
+) -> Result<(), String> {
+    with_immediate_write_transaction(
+        database_path,
+        "worker manifest blocked finalization",
+        |connection| {
+            finish_manifest_blocked(
+                connection,
+                task,
+                run_id,
+                message.clone(),
+                http_status,
+                response_json.clone(),
+                finished_at,
+                duration_ms,
+            )
+        },
+    )
+}
+
+fn finish_failure_transaction(
+    database_path: &Path,
+    task: &RuntimeTaskRecord,
+    run_id: &str,
+    attempt_no: u64,
+    failure: AttemptFailure,
+    finished_at: DateTime<Utc>,
+    duration_ms: u64,
+) -> Result<TaskOutcome, String> {
+    with_immediate_write_transaction(
+        database_path,
+        "worker task failure finalization",
+        |connection| {
+            finish_failure(
+                connection,
+                task,
+                run_id,
+                attempt_no,
+                failure.clone(),
+                finished_at,
+                duration_ms,
+            )
+        },
+    )
 }
 
 fn finish_copy_blocked(
@@ -1273,31 +1315,26 @@ fn block_task(
     task: &RuntimeTaskRecord,
     message: &str,
 ) -> Result<TaskOutcome, String> {
-    let connection = open_connection(database_path)?;
     let now = Utc::now().to_rfc3339();
-    block_stage_state(&connection, task.state_id, message, &now)?;
-    finish_task_lease(&connection, task, "failed", "task_blocked", &now)?;
-    insert_app_event(
-        &connection,
-        AppEventLevel::Error,
-        "task_blocked",
-        message,
-        Some(json!({"entity_id": task.entity_id, "stage_id": task.stage_id})),
-        &now,
+    let entity_id = task.entity_id.clone();
+    let stage_id = task.stage_id.clone();
+    with_immediate_write_transaction(
+        database_path,
+        "worker task block finalization",
+        |connection| {
+            block_stage_state(connection, task.state_id, message, &now)?;
+            finish_task_lease(connection, task, "failed", "task_blocked", &now)?;
+            insert_app_event(
+                connection,
+                AppEventLevel::Error,
+                "task_blocked",
+                message,
+                Some(json!({"entity_id": entity_id.clone(), "stage_id": stage_id.clone()})),
+                &now,
+            )
+        },
     )?;
     Ok(TaskOutcome::Blocked)
-}
-
-fn attach_task_run_if_leased(
-    connection: &rusqlite::Connection,
-    task: &RuntimeTaskRecord,
-    run_id: &str,
-    updated_at: &str,
-) -> Result<(), String> {
-    if let Some(lease_id) = task.lease_id.as_deref() {
-        attach_worker_lease_run(connection, lease_id, run_id, updated_at)?;
-    }
-    Ok(())
 }
 
 fn finish_task_lease(
@@ -1322,11 +1359,41 @@ fn start_lease_heartbeat(
     stop: mpsc::Receiver<()>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let interval = heartbeat_interval_sec.max(1);
+        let interval = effective_heartbeat_interval_sec(heartbeat_interval_sec, lease_ttl_sec);
+        let mut consecutive_failures = 0_u64;
         while stop.recv_timeout(StdDuration::from_secs(interval)).is_err() {
-            let _ = heartbeat_worker_lease(&database_path, &lease_id, &worker_id, lease_ttl_sec);
+            match heartbeat_worker_lease_with_gate_timeout(
+                &database_path,
+                &lease_id,
+                &worker_id,
+                lease_ttl_sec,
+                StdDuration::from_secs(WORKER_HEARTBEAT_WRITE_GATE_TIMEOUT_SEC),
+            ) {
+                Ok(()) => consecutive_failures = 0,
+                Err(message) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures == 1 || consecutive_failures % 10 == 0 {
+                        eprintln!(
+                            "{}",
+                            json!({
+                                "event": "worker_lifecycle",
+                                "code": "worker_heartbeat_failed",
+                                "worker_id": worker_id,
+                                "lease_id": lease_id,
+                                "consecutive_failures": consecutive_failures,
+                                "message": message,
+                            })
+                        );
+                    }
+                }
+            }
         }
     })
+}
+
+fn effective_heartbeat_interval_sec(configured_interval_sec: u64, lease_ttl_sec: u64) -> u64 {
+    let max_safe_interval = (lease_ttl_sec / 2).max(1);
+    configured_interval_sec.max(30).min(max_safe_interval)
 }
 
 fn call_webhook(

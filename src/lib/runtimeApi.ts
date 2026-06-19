@@ -1,6 +1,7 @@
 import { apiClient } from "./apiClient";
 import type {
   AppEventsResult,
+  BulkResetEntityStagesResult,
   CreateS3StageRequest,
   CreateS3StageResult,
   DashboardOverviewResult,
@@ -195,6 +196,13 @@ export function resetWorkspaceEntityStageToPending(
   return apiClient.resetWorkspaceEntityStageToPending(workspaceId, entityId, stageId, input);
 }
 
+export function resetWorkspaceFailedBlockedEntityStagesToPending(
+  workspaceId: string,
+  input: ResetEntityStageRequest,
+): Promise<BulkResetEntityStagesResult> {
+  return apiClient.resetWorkspaceFailedBlockedEntityStagesToPending(workspaceId, input);
+}
+
 export function updateWorkspaceEntity(
   workspaceId: string,
   entityId: string,
@@ -322,6 +330,10 @@ export function reconcileStuckWorkerStates(
   return apiClient.reconcileStuckWorkerStates(workspaceId);
 }
 
+export function repairWorkers(workspaceId: string): Promise<WorkerReconcileStuckResult> {
+  return apiClient.repairWorkers(workspaceId);
+}
+
 export function pauseWorkers(
   workspaceId: string,
   reason?: string | null,
@@ -446,4 +458,10 @@ export function getWorkspaceExplorer(path: string): Promise<WorkspaceExplorerRes
 
 export function getWorkspaceExplorerById(workspaceId: string): Promise<WorkspaceExplorerResult> {
   return apiClient.getWorkspaceExplorerById(workspaceId);
+}
+
+export function getWorkspaceStageOverviewById(
+  workspaceId: string,
+): Promise<WorkspaceExplorerResult> {
+  return apiClient.getWorkspaceStageOverviewById(workspaceId);
 }

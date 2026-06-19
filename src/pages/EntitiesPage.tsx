@@ -12,6 +12,7 @@ import {
   listEntities,
   listWorkspaceEntities,
   restoreWorkspaceEntity,
+  resetWorkspaceFailedBlockedEntityStagesToPending,
   runSelectedPipelineWavesById,
   scanWorkspace,
 } from "../lib/runtimeApi";
@@ -85,6 +86,7 @@ export function EntitiesPage() {
   const [isScanning, setIsScanning] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isRunningSelected, setIsRunningSelected] = useState(false);
+  const [isBulkResetting, setIsBulkResetting] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [uploadSummary, setUploadSummary] = useState<UploadSummary | null>(null);
 
@@ -179,7 +181,7 @@ export function EntitiesPage() {
     setActionMessage(null);
     setUploadSummary(null);
     const files = Array.from(fileList).filter((file) => file.name.toLowerCase().endsWith(".json"));
-    const parsed: Array<{ relative_path: string; file_name: string; content: Record<string, unknown> }> = [];
+    const parsed: Array<{ relative_path: string; file_name: string; content: unknown }> = [];
     let invalid = 0;
     const localFailures: ImportJsonFileResult[] = [];
 
@@ -187,7 +189,7 @@ export function EntitiesPage() {
       const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
       try {
         const content = JSON.parse(await file.text()) as unknown;
-        if (!content || typeof content !== "object" || Array.isArray(content)) {
+        if (!isImportableJsonContent(content)) {
           invalid += 1;
           localFailures.push({
             file_name: file.name,
@@ -197,14 +199,14 @@ export function EntitiesPage() {
             bucket: null,
             key: null,
             object_key: null,
-            error: "JSON content must be an object.",
+            error: "JSON content must be an object or a single-object array.",
           });
           continue;
         }
         parsed.push({
           relative_path: relativePath,
           file_name: file.name,
-          content: content as Record<string, unknown>,
+          content,
         });
       } catch (error) {
         invalid += 1;
@@ -270,6 +272,32 @@ export function EntitiesPage() {
     }
   }
 
+
+  async function handleBulkResetFailedBlocked() {
+    if (!workspaceId) return;
+    const confirmed = window.confirm(
+      "Reset all failed and blocked entity stages in this workspace to pending? Active worker leases will be skipped.",
+    );
+    if (!confirmed) return;
+    setIsBulkResetting(true);
+    setActionMessage(null);
+    try {
+      const result = await resetWorkspaceFailedBlockedEntityStagesToPending(workspaceId, {
+        confirm: true,
+        reason: "bulk reset failed/blocked from Entities page",
+      });
+      setErrors(result.errors);
+      if (result.payload) {
+        setActionMessage(
+          `Bulk reset finished: ${result.payload.reset_count} reset to pending, ${result.payload.skipped_active_lease_count} skipped because of active leases. Failed before: ${result.payload.failed_before}, blocked before: ${result.payload.blocked_before}.`,
+        );
+        await loadEntities();
+      }
+    } finally {
+      setIsBulkResetting(false);
+    }
+  }
+
   async function handleRunSelected() {
     if (!workspaceId || selectedFileIds.length === 0) return;
     setIsRunningSelected(true);
@@ -320,6 +348,14 @@ export function EntitiesPage() {
           <button
             type="button"
             className="button secondary"
+            disabled={!canUseWorkspaceActions || isLoading || isScanning || isUploading || isBulkResetting}
+            onClick={() => void handleBulkResetFailedBlocked()}
+          >
+            {isBulkResetting ? "Resetting..." : "Reset failed/blocked to pending"}
+          </button>
+          <button
+            type="button"
+            className="button secondary"
             disabled={!canQueryRuntime || isLoading || isScanning || isUploading}
             onClick={() => void loadEntities()}
           >
@@ -341,7 +377,9 @@ export function EntitiesPage() {
           <div className="panel-heading">
             <div>
               <h2>Upload entities</h2>
-              <span className="muted">JSON object files are uploaded to the selected stage.</span>
+              <span className="muted">
+                JSON object files and single-object JSON arrays are uploaded to the selected stage.
+              </span>
             </div>
           </div>
           <div className="stage-editor-form-grid">
@@ -450,4 +488,14 @@ export function EntitiesPage() {
       </section>
     </div>
   );
+}
+
+function isImportableJsonContent(value: unknown): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.length === 1 && Boolean(value[0]) && typeof value[0] === "object" && !Array.isArray(value[0]);
+  }
+  return true;
 }

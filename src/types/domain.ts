@@ -962,6 +962,18 @@ export interface EntityMutationResult {
   errors: CommandErrorInfo[];
 }
 
+export interface BulkResetEntityStagesPayload {
+  reset_count: number;
+  failed_before: number;
+  blocked_before: number;
+  skipped_active_lease_count: number;
+}
+
+export interface BulkResetEntityStagesResult {
+  payload: BulkResetEntityStagesPayload | null;
+  errors: CommandErrorInfo[];
+}
+
 export interface ImportJsonFileInput {
   relative_path?: string | null;
   file_name: string;

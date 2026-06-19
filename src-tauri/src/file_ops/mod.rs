@@ -11,9 +11,9 @@ use crate::database::{
     ensure_entity_stub, evaluate_entity_file_allowed_actions, find_entity_file_by_id,
     find_latest_entity_file_for_stage, find_stage_by_id, get_entity_detail_with_selection,
     insert_app_event, load_active_stages_from_connection, open_connection,
-    recompute_entity_summaries, record_entity_file_json_edit_rejected, system_time_to_rfc3339,
-    upsert_entity_file, upsert_entity_stage_state, PersistEntityFileInput,
-    PersistEntityStageStateInput,
+    recompute_entity_summary_for_entity_id, record_entity_file_json_edit_rejected,
+    system_time_to_rfc3339, upsert_entity_file, upsert_entity_stage_state,
+    with_immediate_write_transaction, PersistEntityFileInput, PersistEntityStageStateInput,
 };
 use crate::discovery::ensure_stage_directories_for_stage_ids;
 use crate::domain::{
@@ -861,7 +861,7 @@ pub fn save_entity_file_business_json(
             updated_at: now.clone(),
         },
     )?;
-    recompute_entity_summaries(&transaction)?;
+    recompute_entity_summary_for_entity_id(&transaction, &file.entity_id)?;
     insert_app_event(
         &transaction,
         AppEventLevel::Info,
@@ -1408,12 +1408,6 @@ fn register_target_file(
     copy_source_file_id: Option<i64>,
     now: &str,
 ) -> Result<crate::domain::EntityFileRecord, String> {
-    let mut connection = open_connection(database_path)?;
-    let transaction = connection.transaction().map_err(|error| {
-        format!("Failed to start target file registration transaction: {error}")
-    })?;
-    ensure_entity_stub(&transaction, entity_id, now)?;
-
     let metadata = fs::metadata(target_path).map_err(|error| {
         format!(
             "Failed to read target file metadata '{}': {error}",
@@ -1448,67 +1442,68 @@ fn register_target_file(
         .map_err(|error| format!("Failed to serialize managed copy payload JSON: {error}"))?;
     let meta_json = serde_json::to_string(&meta_value)
         .map_err(|error| format!("Failed to serialize managed copy meta JSON: {error}"))?;
+    let file_path = path_string(target_path);
 
-    let (_outcome, file_id) = upsert_entity_file(
-        &transaction,
-        &PersistEntityFileInput {
-            entity_id: entity_id.to_string(),
-            stage_id: target_stage_id.to_string(),
-            file_path: path_string(target_path),
-            file_name: file_name.to_string(),
-            artifact_id: None,
-            relation_to_source: None,
-            storage_provider: StorageProvider::Local,
-            bucket: None,
-            key: None,
-            version_id: None,
-            etag: None,
-            checksum_sha256: None,
-            checksum: checksum.to_string(),
-            file_mtime,
-            file_size,
-            artifact_size: None,
-            payload_json,
-            meta_json,
-            current_stage: Some(target_stage_id.to_string()),
-            next_stage: target_stage_next_stage.clone(),
-            status: StageStatus::Pending,
-            validation_status: EntityValidationStatus::Valid,
-            validation_errors: Vec::new(),
-            is_managed_copy: true,
-            copy_source_file_id,
-            producer_run_id: None,
-            first_seen_at: now.to_string(),
-            last_seen_at: now.to_string(),
-            updated_at: now.to_string(),
-        },
-    )?;
+    with_immediate_write_transaction(database_path, "target file registration", |transaction| {
+        ensure_entity_stub(transaction, entity_id, now)?;
+        let (_outcome, file_id) = upsert_entity_file(
+            transaction,
+            &PersistEntityFileInput {
+                entity_id: entity_id.to_string(),
+                stage_id: target_stage_id.to_string(),
+                file_path: file_path.clone(),
+                file_name: file_name.to_string(),
+                artifact_id: None,
+                relation_to_source: None,
+                storage_provider: StorageProvider::Local,
+                bucket: None,
+                key: None,
+                version_id: None,
+                etag: None,
+                checksum_sha256: None,
+                checksum: checksum.to_string(),
+                file_mtime: file_mtime.clone(),
+                file_size,
+                artifact_size: None,
+                payload_json: payload_json.clone(),
+                meta_json: meta_json.clone(),
+                current_stage: Some(target_stage_id.to_string()),
+                next_stage: target_stage_next_stage.clone(),
+                status: StageStatus::Pending,
+                validation_status: EntityValidationStatus::Valid,
+                validation_errors: Vec::new(),
+                is_managed_copy: true,
+                copy_source_file_id,
+                producer_run_id: None,
+                first_seen_at: now.to_string(),
+                last_seen_at: now.to_string(),
+                updated_at: now.to_string(),
+            },
+        )?;
 
-    let stage = find_stage_by_id(&transaction, target_stage_id)?.ok_or_else(|| {
-        format!(
-            "Target stage '{}' disappeared during registration.",
-            target_stage_id
-        )
+        let stage = find_stage_by_id(transaction, target_stage_id)?.ok_or_else(|| {
+            format!(
+                "Target stage '{}' disappeared during registration.",
+                target_stage_id
+            )
+        })?;
+        upsert_entity_stage_state(
+            transaction,
+            &PersistEntityStageStateInput {
+                entity_id: entity_id.to_string(),
+                stage_id: target_stage_id.to_string(),
+                file_path: file_path.clone(),
+                file_instance_id: Some(file_id),
+                file_exists: true,
+                status: StageStatus::Pending,
+                max_attempts: stage.max_attempts,
+                discovered_at: now.to_string(),
+                last_seen_at: now.to_string(),
+                updated_at: now.to_string(),
+            },
+        )?;
+        recompute_entity_summary_for_entity_id(transaction, entity_id)
     })?;
-    upsert_entity_stage_state(
-        &transaction,
-        &PersistEntityStageStateInput {
-            entity_id: entity_id.to_string(),
-            stage_id: target_stage_id.to_string(),
-            file_path: path_string(target_path),
-            file_instance_id: Some(file_id),
-            file_exists: true,
-            status: StageStatus::Pending,
-            max_attempts: stage.max_attempts,
-            discovered_at: now.to_string(),
-            last_seen_at: now.to_string(),
-            updated_at: now.to_string(),
-        },
-    )?;
-    recompute_entity_summaries(&transaction)?;
-    transaction
-        .commit()
-        .map_err(|error| format!("Failed to commit target file registration: {error}"))?;
 
     let connection = open_connection(database_path)?;
     find_latest_entity_file_for_stage(&connection, entity_id, target_stage_id)?

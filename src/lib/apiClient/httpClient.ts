@@ -1,6 +1,7 @@
 import type {
   AppEventsResult,
   BootstrapResult,
+  BulkResetEntityStagesResult,
   CreateS3StageRequest,
   CreateS3StageResult,
   CreateWorkspaceRequest,
@@ -267,6 +268,14 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
         )}/stages/${encodeURIComponent(stageId)}/reset-to-pending`,
         input,
       ),
+    resetWorkspaceFailedBlockedEntityStagesToPending: (
+      workspaceId: string,
+      input: ResetEntityStageRequest,
+    ): Promise<BulkResetEntityStagesResult> =>
+      postJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/entities/reset-failed-blocked-to-pending`,
+        input,
+      ),
     updateWorkspaceEntity: (
       workspaceId: string,
       entityId: string,
@@ -382,6 +391,8 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
       workspaceId: string,
     ): Promise<WorkerReconcileStuckResult> =>
       postJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/workers/reconcile-stuck`),
+    repairWorkers: (workspaceId: string): Promise<WorkerReconcileStuckResult> =>
+      postJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/workers/repair`),
     pauseWorkers: (
       workspaceId: string,
       reason?: string | null,
@@ -465,5 +476,7 @@ export function createHttpClient(apiBaseUrl: string): BeehiveApiClient {
       fetchJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/workspace-explorer`),
     getWorkspaceExplorerById: (workspaceId: string): Promise<WorkspaceExplorerResult> =>
       fetchJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/workspace-explorer`),
+    getWorkspaceStageOverviewById: (workspaceId: string): Promise<WorkspaceExplorerResult> =>
+      fetchJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/stages`),
   };
 }

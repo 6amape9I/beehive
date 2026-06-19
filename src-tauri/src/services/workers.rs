@@ -11,6 +11,8 @@ use crate::services::{runtime, workspaces};
 
 const DEFAULT_IDLE_SLEEP_MS: u64 = 1000;
 const DEFAULT_RECOVERY_INTERVAL_SEC: u64 = 30;
+const DEFAULT_RETENTION_INTERVAL_SEC: u64 = 300;
+const OPERATOR_REPAIR_WRITE_GATE_TIMEOUT_SEC: u64 = 5;
 const WORKER_CONTEXT_LOG_INTERVAL_SEC: u64 = 60;
 const WORKER_IDLE_LOG_INTERVAL_SEC: u64 = 60;
 pub(crate) const BROAD_RUN_DISABLED_CODE: &str = "workers_enabled_broad_run_disabled";
@@ -25,6 +27,7 @@ struct WorkerEnvConfig {
     local_llm_concurrency: Option<u32>,
     idle_sleep_ms: u64,
     recovery_interval_sec: u64,
+    retention_interval_sec: u64,
 }
 
 pub(crate) fn worker_summary(workspace_id: &str) -> Result<WorkerSummary, String> {
@@ -154,6 +157,19 @@ pub(crate) fn reconcile_stuck(workspace_id: &str) -> Result<(u64, WorkerSummary)
     Ok((reconciled, summary))
 }
 
+pub(crate) fn repair_workers(workspace_id: &str) -> Result<(u64, WorkerSummary), String> {
+    let context = runtime::load_worker_runtime_context(workspace_id)?;
+    let repaired = database::repair_worker_leases_with_gate_timeout(
+        &context.database_path,
+        workspace_id,
+        std::process::id(),
+        context.config.runtime.worker_lease_sec,
+        Duration::from_secs(OPERATOR_REPAIR_WRITE_GATE_TIMEOUT_SEC),
+    )?;
+    let summary = worker_summary(workspace_id)?;
+    Ok((repaired, summary))
+}
+
 pub(crate) fn workspace_workers_enabled(workspace_id: &str) -> bool {
     let enabled = env_flag("BEEHIVE_WORKERS_ENABLED");
     let scope = parse_workspace_scope(std::env::var("BEEHIVE_WORKER_WORKSPACES").ok());
@@ -204,15 +220,27 @@ fn start_workspace_workers(workspace_id: String, config: WorkerEnvConfig) -> Res
         config.local_llm_concurrency,
     );
 
+    let mut maintenance_owner_assigned = false;
     for index in 0..default_concurrency {
-        spawn_worker_loop(&workspace_id, ResourceClass::Default, index, config.clone())?;
+        let maintenance_owner = !maintenance_owner_assigned;
+        maintenance_owner_assigned = true;
+        spawn_worker_loop(
+            &workspace_id,
+            ResourceClass::Default,
+            index,
+            config.clone(),
+            maintenance_owner,
+        )?;
     }
     for index in 0..local_llm_concurrency {
+        let maintenance_owner = !maintenance_owner_assigned;
+        maintenance_owner_assigned = true;
         spawn_worker_loop(
             &workspace_id,
             ResourceClass::LocalLlm,
             index,
             config.clone(),
+            maintenance_owner,
         )?;
     }
     log_worker_manager(
@@ -229,12 +257,21 @@ fn spawn_worker_loop(
     resource_class: ResourceClass,
     index: u32,
     config: WorkerEnvConfig,
+    maintenance_owner: bool,
 ) -> Result<(), String> {
     let workspace_id = workspace_id.to_string();
     let worker_id = worker_id(&workspace_id, resource_class, index);
     thread::Builder::new()
         .name(worker_id.clone())
-        .spawn(move || worker_loop(workspace_id, resource_class, worker_id, config))
+        .spawn(move || {
+            worker_loop(
+                workspace_id,
+                resource_class,
+                worker_id,
+                config,
+                maintenance_owner,
+            )
+        })
         .map(|_| ())
         .map_err(|error| format!("Failed to spawn worker thread: {error}"))
 }
@@ -244,10 +281,13 @@ fn worker_loop(
     resource_class: ResourceClass,
     worker_id: String,
     config: WorkerEnvConfig,
+    maintenance_owner: bool,
 ) {
     let idle_sleep = Duration::from_millis(config.idle_sleep_ms.max(100));
     let recovery_interval = Duration::from_secs(config.recovery_interval_sec.max(1));
+    let retention_interval = Duration::from_secs(config.retention_interval_sec.max(60));
     let mut last_recovery = Instant::now() - recovery_interval;
+    let mut last_retention = Instant::now();
     let context_log_interval = Duration::from_secs(WORKER_CONTEXT_LOG_INTERVAL_SEC);
     let idle_log_interval = Duration::from_secs(WORKER_IDLE_LOG_INTERVAL_SEC);
     let mut last_context_log = Instant::now() - context_log_interval;
@@ -264,6 +304,9 @@ fn worker_loop(
     );
 
     loop {
+        if maintenance_owner && last_retention.elapsed() >= retention_interval {
+            run_retention_prune(&workspace_id, &worker_id, &mut last_retention);
+        }
         let log_context_loaded = last_context_log.elapsed() >= context_log_interval;
         let summary = match run_worker_loop_once(
             &workspace_id,
@@ -309,6 +352,37 @@ fn worker_loop(
             thread::sleep(idle_sleep);
         }
     }
+}
+
+fn run_retention_prune(workspace_id: &str, worker_id: &str, last_retention: &mut Instant) {
+    match runtime::load_worker_runtime_context(workspace_id)
+        .and_then(|context| database::prune_runtime_history(&context.database_path))
+    {
+        Ok(summary) => {
+            if summary.app_events_deleted > 0 || summary.worker_leases_deleted > 0 {
+                log_worker_event(
+                    "runtime_retention_pruned",
+                    Some(worker_id),
+                    Some(json!({
+                        "workspace_id": workspace_id,
+                        "app_events_deleted": summary.app_events_deleted,
+                        "worker_leases_deleted": summary.worker_leases_deleted,
+                    })),
+                );
+            }
+        }
+        Err(message) => {
+            log_worker_event(
+                "runtime_retention_prune_failed",
+                Some(worker_id),
+                Some(json!({
+                    "workspace_id": workspace_id,
+                    "message": message,
+                })),
+            );
+        }
+    }
+    *last_retention = Instant::now();
 }
 
 fn run_worker_loop_once(
@@ -487,6 +561,8 @@ impl WorkerEnvConfig {
                 .unwrap_or(DEFAULT_IDLE_SLEEP_MS),
             recovery_interval_sec: parse_optional_u64("BEEHIVE_WORKER_RECOVERY_INTERVAL_SEC")?
                 .unwrap_or(DEFAULT_RECOVERY_INTERVAL_SEC),
+            retention_interval_sec: parse_optional_u64("BEEHIVE_RUNTIME_RETENTION_INTERVAL_SEC")?
+                .unwrap_or(DEFAULT_RETENTION_INTERVAL_SEC),
         })
     }
 }

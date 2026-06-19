@@ -7,6 +7,7 @@ use chrono::Utc;
 use rusqlite::Connection;
 use serde_json::json;
 
+use crate::backup_retention;
 use crate::config;
 use crate::database;
 use crate::discovery;
@@ -714,6 +715,7 @@ fn write_pipeline_yaml_atomic(pipeline_path: &Path, yaml_text: &str) -> Result<P
         });
     }
 
+    backup_retention::prune_sibling_backups(&backup_path, "pipeline.yaml.bak.")?;
     Ok(backup_path)
 }
 

@@ -1,3 +1,4 @@
+mod backup_retention;
 mod bootstrap;
 mod commands;
 mod config;
@@ -51,6 +52,7 @@ pub fn run() {
             commands::get_workspace_entity,
             commands::view_workspace_entity_file_s3_json,
             commands::reset_workspace_entity_stage_to_pending,
+            commands::reset_workspace_failed_blocked_entity_stages_to_pending,
             commands::update_workspace_entity,
             commands::archive_workspace_entity,
             commands::restore_workspace_entity,
@@ -65,6 +67,7 @@ pub fn run() {
             commands::list_app_events,
             commands::get_workspace_explorer,
             commands::get_workspace_explorer_by_id,
+            commands::get_workspace_stage_overview_by_id,
             commands::reconcile_s3_workspace,
             commands::reconcile_s3_workspace_by_id,
             commands::register_s3_source_artifact,

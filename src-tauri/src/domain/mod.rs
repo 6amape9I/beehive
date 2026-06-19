@@ -1338,6 +1338,20 @@ pub struct EntityMutationResult {
     pub errors: Vec<CommandErrorInfo>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BulkResetEntityStagesPayload {
+    pub reset_count: u64,
+    pub failed_before: u64,
+    pub blocked_before: u64,
+    pub skipped_active_lease_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BulkResetEntityStagesResult {
+    pub payload: Option<BulkResetEntityStagesPayload>,
+    pub errors: Vec<CommandErrorInfo>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ImportJsonFileInput {
     pub relative_path: Option<String>,

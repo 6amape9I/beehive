@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppEventsResult,
   BootstrapResult,
+  BulkResetEntityStagesResult,
   CreateS3StageRequest,
   CreateS3StageResult,
   CreateWorkspaceRequest,
@@ -225,6 +226,18 @@ export const tauriClient: BeehiveApiClient = {
       input,
     });
   },
+  resetWorkspaceFailedBlockedEntityStagesToPending(
+    workspaceId: string,
+    input: ResetEntityStageRequest,
+  ): Promise<BulkResetEntityStagesResult> {
+    return invoke<BulkResetEntityStagesResult>(
+      "reset_workspace_failed_blocked_entity_stages_to_pending",
+      {
+        workspaceId,
+        input,
+      },
+    );
+  },
   updateWorkspaceEntity(
     workspaceId: string,
     entityId: string,
@@ -389,6 +402,19 @@ export const tauriClient: BeehiveApiClient = {
       ],
     });
   },
+  repairWorkers(workspaceId: string): Promise<WorkerReconcileStuckResult> {
+    return Promise.resolve({
+      reconciled: 0,
+      summary: null,
+      errors: [
+        {
+          code: "worker_repair_http_only",
+          message: `Worker repair for '${workspaceId}' is available through the HTTP API.`,
+          path: null,
+        },
+      ],
+    });
+  },
   pauseWorkers(workspaceId: string, _reason?: string | null): Promise<WorkerPoolControlResult> {
     return Promise.resolve({
       summary: null,
@@ -540,5 +566,8 @@ export const tauriClient: BeehiveApiClient = {
   },
   getWorkspaceExplorerById(workspaceId: string): Promise<WorkspaceExplorerResult> {
     return invoke<WorkspaceExplorerResult>("get_workspace_explorer_by_id", { workspaceId });
+  },
+  getWorkspaceStageOverviewById(workspaceId: string): Promise<WorkspaceExplorerResult> {
+    return invoke<WorkspaceExplorerResult>("get_workspace_stage_overview_by_id", { workspaceId });
   },
 };

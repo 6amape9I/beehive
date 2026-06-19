@@ -96,6 +96,13 @@ pub(crate) fn workspace_explorer(workspace_id: &str) -> Result<WorkspaceExplorer
     database::get_workspace_explorer(&context.workdir_path, &context.database_path)
 }
 
+pub(crate) fn workspace_stage_overview(
+    workspace_id: &str,
+) -> Result<WorkspaceExplorerResult, String> {
+    let (workdir_path, database_path, _config) = load_workspace_context_parts(workspace_id)?;
+    database::get_workspace_stage_overview(&workdir_path, &database_path)
+}
+
 pub(crate) fn reconcile_s3_workspace(
     workspace_id: &str,
 ) -> Result<S3ReconciliationSummary, String> {

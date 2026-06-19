@@ -6,12 +6,12 @@ use crate::dashboard;
 use crate::database;
 use crate::discovery;
 use crate::domain::{
-    AppEventsResult, BootstrapResult, CommandErrorInfo, ConfigValidationIssue,
-    CreateS3StageRequest, CreateS3StageResult, CreateWorkspaceRequest, DashboardOverviewResult,
-    EntityDetailResult, EntityFileS3JsonResult, EntityFilesResult, EntityListQuery,
-    EntityListResult, EntityMutationResult, FileCopyResult, ImportJsonBatchRequest,
-    ImportJsonBatchResult, ManualEntityStageActionResult, OpenEntityPathPayload,
-    OpenEntityPathResult, PipelineConfigDraft, PipelineEditorStateResult,
+    AppEventsResult, BootstrapResult, BulkResetEntityStagesResult, CommandErrorInfo,
+    ConfigValidationIssue, CreateS3StageRequest, CreateS3StageResult, CreateWorkspaceRequest,
+    DashboardOverviewResult, EntityDetailResult, EntityFileS3JsonResult, EntityFilesResult,
+    EntityListQuery, EntityListResult, EntityMutationResult, FileCopyResult,
+    ImportJsonBatchRequest, ImportJsonBatchResult, ManualEntityStageActionResult,
+    OpenEntityPathPayload, OpenEntityPathResult, PipelineConfigDraft, PipelineEditorStateResult,
     ReconcileStuckTasksResult, RegisterS3SourceArtifactPayload, RegisterS3SourceArtifactRequest,
     RegisterS3SourceArtifactResult, ResetEntityStageRequest, RunDueTasksResult,
     RunEntityStageResult, RunPipelineWavesResult, RunSelectedPipelineWavesRequest,
@@ -567,6 +567,26 @@ pub fn reset_workspace_entity_stage_to_pending(
 }
 
 #[tauri::command]
+pub fn reset_workspace_failed_blocked_entity_stages_to_pending(
+    workspace_id: String,
+    input: ResetEntityStageRequest,
+) -> BulkResetEntityStagesResult {
+    match services::entities::reset_failed_blocked_entity_stages_for_workspace(
+        &workspace_id,
+        &input,
+    ) {
+        Ok(payload) => BulkResetEntityStagesResult {
+            payload: Some(payload),
+            errors: Vec::new(),
+        },
+        Err(error) => BulkResetEntityStagesResult {
+            payload: None,
+            errors: vec![command_error(error.code, error.message, None)],
+        },
+    }
+}
+
+#[tauri::command]
 pub fn update_workspace_entity(
     workspace_id: String,
     entity_id: String,
@@ -1058,6 +1078,18 @@ pub fn get_workspace_explorer_by_id(workspace_id: String) -> WorkspaceExplorerRe
         Ok(result) => result,
         Err(message) => empty_workspace_explorer_result(vec![command_error(
             "workspace_explorer_failed",
+            message,
+            None,
+        )]),
+    }
+}
+
+#[tauri::command]
+pub fn get_workspace_stage_overview_by_id(workspace_id: String) -> WorkspaceExplorerResult {
+    match services::runtime::workspace_stage_overview(&workspace_id) {
+        Ok(result) => result,
+        Err(message) => empty_workspace_explorer_result(vec![command_error(
+            "workspace_stage_overview_failed",
             message,
             None,
         )]),

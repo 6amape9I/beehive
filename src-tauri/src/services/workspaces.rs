@@ -9,6 +9,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+use crate::backup_retention;
 use crate::config;
 use crate::database;
 use crate::domain::{
@@ -597,6 +598,14 @@ fn write_text_file_atomic(
     let temp_path = parent.join(format!(".{label}.tmp.{timestamp}.{unique_suffix}"));
     let backup_path = parent.join(format!("{label}.bak.{timestamp}.{unique_suffix}"));
 
+    if target_path.exists() {
+        if let Ok(existing) = fs::read_to_string(target_path) {
+            if existing == content {
+                return Ok(None);
+            }
+        }
+    }
+
     {
         let mut file = File::create(&temp_path).map_err(|error| {
             format!(
@@ -642,6 +651,7 @@ fn write_text_file_atomic(
                 ),
             });
         }
+        backup_retention::prune_sibling_backups(&backup_path, &format!("{label}.bak."))?;
         Ok(Some(backup_path))
     } else {
         fs::rename(&temp_path, target_path).map_err(|error| {

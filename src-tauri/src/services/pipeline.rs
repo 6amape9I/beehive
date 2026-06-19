@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::backup_retention;
 use crate::config;
 use crate::database;
 use crate::domain::{
@@ -585,6 +586,14 @@ fn write_pipeline_yaml_atomic(
     let temp_path = parent.join(format!(".pipeline.yaml.tmp.{timestamp}.{unique_suffix}"));
     let backup_path = parent.join(format!("pipeline.yaml.bak.{timestamp}.{unique_suffix}"));
 
+    if pipeline_path.exists() {
+        if let Ok(existing) = fs::read_to_string(pipeline_path) {
+            if existing == yaml_text {
+                return Ok(None);
+            }
+        }
+    }
+
     {
         let mut file = File::create(&temp_path).map_err(|error| {
             format!(
@@ -628,6 +637,7 @@ fn write_pipeline_yaml_atomic(
                 ),
             });
         }
+        backup_retention::prune_sibling_backups(&backup_path, "pipeline.yaml.bak.")?;
         Ok(Some(backup_path))
     } else {
         fs::rename(&temp_path, pipeline_path).map_err(|error| {

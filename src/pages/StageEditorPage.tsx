@@ -11,7 +11,7 @@ import { StageValidationPanel } from "../components/stage-editor/StageValidation
 import {
   createS3Stage,
   deleteS3Stage,
-  getWorkspaceExplorerById,
+  getWorkspaceStageOverviewById,
   getPipelineEditorState,
   restoreS3Stage,
   savePipelineConfig,
@@ -153,7 +153,7 @@ export function StageEditorPage() {
       setIsLoading(true);
       setActionMessage(null);
       try {
-        const result = await getWorkspaceExplorerById(workspaceId);
+        const result = await getWorkspaceStageOverviewById(workspaceId);
         setWorkspaceStages(result.stages);
         setErrors(result.errors);
         setEditorState(null);

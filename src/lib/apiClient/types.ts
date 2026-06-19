@@ -1,6 +1,7 @@
 import type {
   AppEventsResult,
   BootstrapResult,
+  BulkResetEntityStagesResult,
   CreateS3StageRequest,
   CreateS3StageResult,
   CreateWorkspaceRequest,
@@ -124,6 +125,10 @@ export interface BeehiveApiClient {
     stageId: string,
     input: ResetEntityStageRequest,
   ): Promise<ManualEntityStageActionResult>;
+  resetWorkspaceFailedBlockedEntityStagesToPending(
+    workspaceId: string,
+    input: ResetEntityStageRequest,
+  ): Promise<BulkResetEntityStagesResult>;
   updateWorkspaceEntity(
     workspaceId: string,
     entityId: string,
@@ -176,6 +181,7 @@ export interface BeehiveApiClient {
   ): Promise<WorkerPoolControlResult>;
   recoverExpiredWorkerLeases(workspaceId: string): Promise<RecoverExpiredWorkerLeasesResult>;
   reconcileStuckWorkerStates(workspaceId: string): Promise<WorkerReconcileStuckResult>;
+  repairWorkers(workspaceId: string): Promise<WorkerReconcileStuckResult>;
   pauseWorkers(workspaceId: string, reason?: string | null): Promise<WorkerPoolControlResult>;
   resumeWorkers(workspaceId: string): Promise<WorkerPoolControlResult>;
   pauseWorkerPool(
@@ -223,4 +229,5 @@ export interface BeehiveApiClient {
   listAppEvents(path: string, limit?: number): Promise<AppEventsResult>;
   getWorkspaceExplorer(path: string): Promise<WorkspaceExplorerResult>;
   getWorkspaceExplorerById(workspaceId: string): Promise<WorkspaceExplorerResult>;
+  getWorkspaceStageOverviewById(workspaceId: string): Promise<WorkspaceExplorerResult>;
 }

@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::thread;
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::types::Value as SqlValue;
@@ -14,15 +15,16 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::domain::{
-    AppEventLevel, AppEventRecord, ConfigValidationIssue, DatabaseState, EntityDetailPayload,
-    EntityFileRecord, EntityFilters, EntityListQuery, EntityRecord, EntityStageStateRecord,
-    EntityTableRow, EntityTimelineItem, EntityValidationStatus, InvalidDiscoveryRecord,
-    OutputRegistrationReport, OutputRegistrationReportItem, PipelineConfig, ResourceClass,
-    RuntimeSummary, SchedulingPolicy, StageDefinition, StageRecord, StageRunRecord, StageStatus,
-    StatusCount, StorageProvider, UpdateEntityRequest, WorkerLeaseRecord, WorkerPoolRuntimeSummary,
-    WorkerStateAnomalyCount, WorkerStateAnomalyRecord, WorkerSummary, WorkspaceEntityTrail,
-    WorkspaceEntityTrailEdge, WorkspaceEntityTrailNode, WorkspaceExplorerResult,
-    WorkspaceExplorerTotals, WorkspaceFileNode, WorkspaceStageTree, WorkspaceStageTreeCounters,
+    AppEventLevel, AppEventRecord, BulkResetEntityStagesPayload, ConfigValidationIssue,
+    DatabaseState, EntityDetailPayload, EntityFileRecord, EntityFilters, EntityListQuery,
+    EntityRecord, EntityStageStateRecord, EntityTableRow, EntityTimelineItem,
+    EntityValidationStatus, InvalidDiscoveryRecord, OutputRegistrationReport,
+    OutputRegistrationReportItem, PipelineConfig, ResourceClass, RuntimeSummary, SchedulingPolicy,
+    StageDefinition, StageRecord, StageRunRecord, StageStatus, StatusCount, StorageProvider,
+    UpdateEntityRequest, WorkerLeaseRecord, WorkerPoolRuntimeSummary, WorkerStateAnomalyCount,
+    WorkerStateAnomalyRecord, WorkerSummary, WorkspaceEntityTrail, WorkspaceEntityTrailEdge,
+    WorkspaceEntityTrailNode, WorkspaceExplorerResult, WorkspaceExplorerTotals, WorkspaceFileNode,
+    WorkspaceStageTree, WorkspaceStageTreeCounters,
 };
 use crate::state_machine::{
     parse_status as parse_runtime_status, status_value as runtime_status_value,
@@ -35,9 +37,42 @@ pub(crate) use entities::{
     evaluate_entity_file_allowed_actions, record_entity_file_json_edit_rejected,
 };
 
-const SCHEMA_VERSION: u32 = 12;
+const SCHEMA_VERSION: u32 = 13;
 const DEFAULT_SQLITE_BUSY_TIMEOUT_MS: u64 = 30_000;
 const SQLITE_WRITE_RETRY_BACKOFF_MS: [u64; 5] = [50, 100, 200, 400, 800];
+const DEFAULT_APP_EVENTS_MAX_ROWS: u64 = 100_000;
+const DEFAULT_APP_EVENTS_RETENTION_DAYS: u64 = 14;
+const DEFAULT_WORKER_LEASES_MAX_ROWS: u64 = 100_000;
+const DEFAULT_WORKER_LEASES_RETENTION_DAYS: u64 = 14;
+const DEFAULT_RUNTIME_RETENTION_DELETE_BATCH: u64 = 1_000;
+const RUNTIME_RETENTION_WRITE_GATE_TIMEOUT_MS: u64 = 1_000;
+const DEFAULT_S3_REGISTRATION_WRITE_BATCH_SIZE: u64 = 1;
+
+static SQLITE_WRITE_GATES: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+static SQLITE_WRITE_GATE_OWNERS: OnceLock<Mutex<HashMap<String, SqliteWriteGateOwner>>> =
+    OnceLock::new();
+
+#[derive(Clone)]
+struct SqliteWriteGateOwner {
+    context: String,
+    thread_name: Option<String>,
+    started_at: Instant,
+}
+
+struct SqliteWriteGateOwnerGuard {
+    key: String,
+}
+
+impl Drop for SqliteWriteGateOwnerGuard {
+    fn drop(&mut self) {
+        if let Some(owners) = SQLITE_WRITE_GATE_OWNERS.get() {
+            owners
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.key);
+        }
+    }
+}
 
 pub(crate) struct PersistEntityFileInput {
     pub entity_id: String,
@@ -118,6 +153,12 @@ pub(crate) struct WorkerLeaseClaimInput {
     pub lease_ttl_sec: u64,
     pub scheduling_policy: SchedulingPolicy,
     pub now: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RuntimeRetentionPruneSummary {
+    pub app_events_deleted: u64,
+    pub worker_leases_deleted: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -370,6 +411,223 @@ where
     }
 }
 
+fn sqlite_write_gate_for_key(key: String) -> Result<Arc<Mutex<()>>, String> {
+    let gates = SQLITE_WRITE_GATES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut gates = gates
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Ok(gates
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone())
+}
+
+fn sqlite_write_gate_key_for_path(path: &Path) -> Result<String, String> {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return Ok(canonical.to_string_lossy().to_string());
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                format!("Failed to resolve current directory for SQLite gate: {error}")
+            })?
+            .join(path)
+    };
+    Ok(absolute.to_string_lossy().to_string())
+}
+
+fn sqlite_write_gate_key_for_connection(connection: &Connection) -> Result<String, String> {
+    let mut statement = connection
+        .prepare("PRAGMA database_list")
+        .map_err(|error| format!("Failed to inspect SQLite database path: {error}"))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| format!("Failed to query SQLite database path: {error}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("Failed to read SQLite database path: {error}"))?
+    {
+        let name: String = row
+            .get(1)
+            .map_err(|error| format!("Failed to read SQLite database name: {error}"))?;
+        let file: String = row
+            .get(2)
+            .map_err(|error| format!("Failed to read SQLite database file: {error}"))?;
+        if name == "main" && !file.trim().is_empty() {
+            return sqlite_write_gate_key_for_path(Path::new(&file));
+        }
+    }
+    Ok(format!("sqlite-memory:{:p}", connection))
+}
+
+fn set_sqlite_write_gate_owner(key: &str, context: &str) -> SqliteWriteGateOwnerGuard {
+    let current_thread = thread::current();
+    let owner = SqliteWriteGateOwner {
+        context: context.to_string(),
+        thread_name: current_thread.name().map(ToOwned::to_owned),
+        started_at: Instant::now(),
+    };
+    SQLITE_WRITE_GATE_OWNERS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key.to_string(), owner);
+    SqliteWriteGateOwnerGuard {
+        key: key.to_string(),
+    }
+}
+
+fn sqlite_write_gate_owner_message(key: &str) -> Option<String> {
+    SQLITE_WRITE_GATE_OWNERS.get().and_then(|owners| {
+        owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key)
+            .cloned()
+            .map(|owner| {
+                let thread_name = owner.thread_name.unwrap_or_else(|| "unnamed".to_string());
+                format!(
+                    " Current holder: context='{}', thread='{}', held_for_ms={}.",
+                    owner.context,
+                    thread_name,
+                    owner.started_at.elapsed().as_millis()
+                )
+            })
+    })
+}
+
+fn with_sqlite_write_gate<T, F>(
+    gate: &Arc<Mutex<()>>,
+    gate_key: &str,
+    context: &str,
+    operation: F,
+) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String>,
+{
+    let _guard = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _owner = set_sqlite_write_gate_owner(gate_key, context);
+    operation()
+}
+
+fn with_sqlite_write_gate_timeout<T, F>(
+    gate: &Arc<Mutex<()>>,
+    gate_key: &str,
+    context: &str,
+    timeout: StdDuration,
+    operation: F,
+) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String>,
+{
+    let started_at = Instant::now();
+    loop {
+        match gate.try_lock() {
+            Ok(_guard) => {
+                let _owner = set_sqlite_write_gate_owner(gate_key, context);
+                return operation();
+            }
+            Err(TryLockError::Poisoned(poisoned)) => {
+                let _guard = poisoned.into_inner();
+                let _owner = set_sqlite_write_gate_owner(gate_key, context);
+                return operation();
+            }
+            Err(TryLockError::WouldBlock) => {
+                if started_at.elapsed() >= timeout {
+                    return Err(format!(
+                        "Timed out waiting {}ms for SQLite worker write gate while running '{}'.{}",
+                        timeout.as_millis(),
+                        context,
+                        sqlite_write_gate_owner_message(gate_key).unwrap_or_default()
+                    ));
+                }
+                thread::sleep(StdDuration::from_millis(25));
+            }
+        }
+    }
+}
+
+fn immediate_transaction<'a>(
+    connection: &'a mut Connection,
+    context: &str,
+) -> Result<Transaction<'a>, String> {
+    connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| {
+            if sqlite_error_is_busy(&error) {
+                format!("Failed to start {context} transaction: database is locked/busy: {error}")
+            } else {
+                format!("Failed to start {context} transaction: {error}")
+            }
+        })
+}
+
+pub(crate) fn with_immediate_write_transaction<T, F>(
+    path: &Path,
+    context: &str,
+    mut operation: F,
+) -> Result<T, String>
+where
+    F: FnMut(&Transaction<'_>) -> Result<T, String>,
+{
+    let gate_key = sqlite_write_gate_key_for_path(path)?;
+    let gate = sqlite_write_gate_for_key(gate_key.clone())?;
+    retry_sqlite_busy_operation(|| {
+        with_sqlite_write_gate(&gate, &gate_key, context, || {
+            let mut connection = open_connection(path)?;
+            let transaction = immediate_transaction(&mut connection, context)?;
+            let value = operation(&transaction)?;
+            transaction
+                .commit()
+                .map_err(|error| format!("Failed to commit {context} transaction: {error}"))?;
+            Ok(value)
+        })
+    })
+}
+
+pub(crate) fn with_immediate_write_transaction_timeout<T, F>(
+    path: &Path,
+    context: &str,
+    gate_timeout: StdDuration,
+    mut operation: F,
+) -> Result<T, String>
+where
+    F: FnMut(&Transaction<'_>) -> Result<T, String>,
+{
+    let gate_key = sqlite_write_gate_key_for_path(path)?;
+    let gate = sqlite_write_gate_for_key(gate_key.clone())?;
+    with_sqlite_write_gate_timeout(&gate, &gate_key, context, gate_timeout, || {
+        let mut connection = open_connection(path)?;
+        let transaction = immediate_transaction(&mut connection, context)?;
+        let value = operation(&transaction)?;
+        transaction
+            .commit()
+            .map_err(|error| format!("Failed to commit {context} transaction: {error}"))?;
+        Ok(value)
+    })
+}
+
+fn env_flag_enabled(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "0" | "false" | "no" | "off" => false,
+            "1" | "true" | "yes" | "on" => true,
+            _ => default,
+        },
+        Err(_) => default,
+    }
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
 fn open_readonly_connection(path: &Path) -> Result<Connection, String> {
     if !path.exists() {
         return Err(format!(
@@ -389,7 +647,7 @@ fn open_readonly_connection(path: &Path) -> Result<Connection, String> {
 }
 
 pub fn get_runtime_summary(path: &Path) -> Result<RuntimeSummary, String> {
-    let connection = open_connection(path)?;
+    let connection = open_readonly_connection(path)?;
     let schema_version = current_schema_version(&connection)?;
     let active_stage_count = query_count(
         &connection,
@@ -440,13 +698,13 @@ pub fn get_runtime_summary(path: &Path) -> Result<RuntimeSummary, String> {
 }
 
 pub fn list_stages(path: &Path) -> Result<Vec<StageRecord>, String> {
-    let connection = open_connection(path)?;
+    let connection = open_readonly_connection(path)?;
     load_stage_records_from_connection(&connection)
 }
 
 #[allow(dead_code)]
 pub fn list_entities(path: &Path, filters: &EntityFilters) -> Result<Vec<EntityRecord>, String> {
-    let connection = open_connection(path)?;
+    let connection = open_readonly_connection(path)?;
     let mut entities = load_entities_from_connection(&connection)?;
 
     if let Some(stage_id) = filters.stage_id.as_ref().filter(|value| !value.is_empty()) {
@@ -483,7 +741,7 @@ pub fn list_entity_table_page(
     path: &Path,
     query: &EntityListQuery,
 ) -> Result<EntityTablePage, String> {
-    let connection = open_connection(path)?;
+    let connection = open_readonly_connection(path)?;
     let page_size = query.limit.or(query.page_size).unwrap_or(50).clamp(1, 200);
     let offset = query
         .offset
@@ -642,7 +900,7 @@ pub fn list_entity_files(
     path: &Path,
     entity_id: Option<&str>,
 ) -> Result<Vec<EntityFileRecord>, String> {
-    let connection = open_connection(path)?;
+    let connection = open_readonly_connection(path)?;
     load_entity_files_from_connection(&connection, entity_id)
 }
 
@@ -659,7 +917,7 @@ pub fn get_entity_detail_with_selection(
     entity_id: &str,
     selected_file_id: Option<i64>,
 ) -> Result<Option<EntityDetailPayload>, String> {
-    let connection = open_connection(path)?;
+    let connection = open_readonly_connection(path)?;
     let Some(entity) = find_entity_by_id(&connection, entity_id)? else {
         return Ok(None);
     };
@@ -699,7 +957,7 @@ pub fn get_entity_detail_with_selection(
 }
 
 pub fn list_app_events(path: &Path, limit: u32) -> Result<Vec<AppEventRecord>, String> {
-    let connection = open_connection(path)?;
+    let connection = open_readonly_connection(path)?;
     load_app_events_from_connection(&connection, limit)
 }
 
@@ -707,7 +965,7 @@ pub fn list_stage_runs(
     path: &Path,
     entity_id: Option<&str>,
 ) -> Result<Vec<StageRunRecord>, String> {
-    let connection = open_connection(path)?;
+    let connection = open_readonly_connection(path)?;
     load_stage_runs_from_connection(&connection, entity_id, 100)
 }
 
@@ -716,7 +974,7 @@ pub fn get_stage_state_status(
     entity_id: &str,
     stage_id: &str,
 ) -> Result<Option<String>, String> {
-    let connection = open_connection(path)?;
+    let connection = open_readonly_connection(path)?;
     find_stage_state_identity(&connection, entity_id, stage_id).map(|state| state.map(|s| s.status))
 }
 
@@ -725,7 +983,7 @@ pub fn get_stage_state(
     entity_id: &str,
     stage_id: &str,
 ) -> Result<Option<EntityStageStateRecord>, String> {
-    let connection = open_connection(path)?;
+    let connection = open_readonly_connection(path)?;
     connection
         .query_row(
             r#"
@@ -867,6 +1125,153 @@ pub fn reset_entity_stage_to_pending(
         })),
         &now,
     )
+}
+
+pub fn reset_failed_blocked_entity_stages_to_pending(
+    path: &Path,
+    operator_comment: Option<&str>,
+) -> Result<BulkResetEntityStagesPayload, String> {
+    retry_sqlite_busy_operation(|| {
+        reset_failed_blocked_entity_stages_to_pending_once(path, operator_comment)
+    })
+}
+
+fn reset_failed_blocked_entity_stages_to_pending_once(
+    path: &Path,
+    operator_comment: Option<&str>,
+) -> Result<BulkResetEntityStagesPayload, String> {
+    let mut connection = open_connection(path)?;
+    let now = Utc::now().to_rfc3339();
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| {
+            if sqlite_error_is_busy(&error) {
+                format!("Failed to start bulk reset transaction: database is locked/busy: {error}")
+            } else {
+                format!("Failed to start bulk reset transaction: {error}")
+            }
+        })?;
+    let failed_before = query_count(
+        &transaction,
+        "SELECT COUNT(*) FROM entity_stage_states WHERE status = 'failed'",
+        [],
+    )?;
+    let blocked_before = query_count(
+        &transaction,
+        "SELECT COUNT(*) FROM entity_stage_states WHERE status = 'blocked'",
+        [],
+    )?;
+    let skipped_active_lease_count = query_count(
+        &transaction,
+        r#"
+        SELECT COUNT(*)
+        FROM entity_stage_states state
+        WHERE state.status IN ('failed', 'blocked')
+          AND EXISTS (
+                SELECT 1
+                FROM worker_leases lease
+                WHERE lease.state_id = state.id
+                  AND lease.status = 'active'
+          )
+        "#,
+        [],
+    )?;
+    let mut statement = transaction
+        .prepare(
+            r#"
+            SELECT id, entity_id, stage_id, status
+            FROM entity_stage_states state
+            WHERE state.status IN ('failed', 'blocked')
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM worker_leases lease
+                    WHERE lease.state_id = state.id
+                      AND lease.status = 'active'
+              )
+            ORDER BY updated_at ASC, id ASC
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare bulk reset candidate query: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| format!("Failed to query bulk reset candidates: {error}"))?;
+    let mut candidates = Vec::new();
+    for row in rows {
+        candidates
+            .push(row.map_err(|error| format!("Failed to read bulk reset candidate: {error}"))?);
+    }
+    drop(statement);
+
+    for (state_id, entity_id, stage_id, status) in &candidates {
+        ensure_runtime_transition(
+            status,
+            &StageStatus::Pending,
+            RuntimeTransitionReason::ManualReset,
+            Some(*state_id),
+            Some(entity_id),
+            Some(stage_id),
+        )?;
+        transaction
+            .execute(
+                r#"
+                UPDATE entity_stage_states
+                SET status = 'pending',
+                    attempts = 0,
+                    last_error = NULL,
+                    last_http_status = NULL,
+                    next_retry_at = NULL,
+                    updated_at = ?2
+                WHERE id = ?1
+                "#,
+                params![state_id, now],
+            )
+            .map_err(|error| {
+                format!(
+                    "Failed to bulk reset entity '{entity_id}' on stage '{stage_id}' to pending: {error}"
+                )
+            })?;
+        update_entity_summary_from_state(&transaction, *state_id, StageStatus::Pending, &now)?;
+    }
+
+    if !candidates.is_empty() {
+        insert_app_event(
+            &transaction,
+            AppEventLevel::Info,
+            "entity_stage_states_bulk_reset",
+            &format!(
+                "Bulk reset moved {} failed/blocked entity stage state(s) to pending.",
+                candidates.len()
+            ),
+            Some(json!({
+                "action": "bulk_reset_failed_blocked_to_pending",
+                "actor": "operator",
+                "source": "manual",
+                "reason": operator_comment,
+                "reset_count": candidates.len() as u64,
+                "failed_before": failed_before,
+                "blocked_before": blocked_before,
+                "skipped_active_lease_count": skipped_active_lease_count,
+            })),
+            &now,
+        )?;
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| format!("Failed to commit bulk reset transaction: {error}"))?;
+    Ok(BulkResetEntityStagesPayload {
+        reset_count: candidates.len() as u64,
+        failed_before,
+        blocked_before,
+        skipped_active_lease_count,
+    })
 }
 
 pub fn skip_entity_stage(
@@ -1107,6 +1512,178 @@ pub fn get_workspace_explorer(
         totals,
         errors: Vec::new(),
     })
+}
+
+pub fn get_workspace_stage_overview(
+    workdir_path: &Path,
+    database_path: &Path,
+) -> Result<WorkspaceExplorerResult, String> {
+    let connection = open_readonly_connection(database_path)?;
+    let generated_at = Utc::now().to_rfc3339();
+    let stages = load_stage_records_from_connection(&connection)?;
+    let last_scan_at = load_setting(&connection, "last_scan_completed_at")?;
+    let mut counters_by_stage = load_workspace_stage_file_counters(&connection)?;
+    for (stage_id, state_counters) in load_workspace_stage_state_counters(&connection)? {
+        let counters = counters_by_stage.entry(stage_id).or_default();
+        counters.pending += state_counters.pending;
+        counters.queued += state_counters.queued;
+        counters.in_progress += state_counters.in_progress;
+        counters.retry_wait += state_counters.retry_wait;
+        counters.done += state_counters.done;
+        counters.failed += state_counters.failed;
+        counters.blocked += state_counters.blocked;
+        counters.skipped += state_counters.skipped;
+    }
+
+    let mut totals = WorkspaceExplorerTotals {
+        stages_total: stages.len() as u64,
+        active_stages_total: stages.iter().filter(|stage| stage.is_active).count() as u64,
+        inactive_stages_total: stages.iter().filter(|stage| !stage.is_active).count() as u64,
+        entities_total: query_count(&connection, "SELECT COUNT(*) FROM entities", [])?,
+        ..WorkspaceExplorerTotals::default()
+    };
+
+    let stage_trees = stages
+        .into_iter()
+        .map(|stage| {
+            let counters = counters_by_stage.remove(&stage.id).unwrap_or_default();
+            totals.registered_files_total += counters.registered_files;
+            totals.present_files_total += counters.present_files;
+            totals.missing_files_total += counters.missing_files;
+            totals.invalid_files_total += counters.invalid_files;
+            totals.managed_copies_total += counters.managed_copies;
+
+            let is_s3_stage = stage
+                .input_uri
+                .as_deref()
+                .is_some_and(|uri| uri.starts_with("s3://"));
+            let uses_local_llm = stage.resource_class.uses_local_llm();
+            let folder_path = workdir_path.join(&stage.input_folder);
+            WorkspaceStageTree {
+                stage_id: stage.id,
+                input_folder: stage.input_folder,
+                input_uri: stage.input_uri.clone(),
+                storage_provider: if is_s3_stage {
+                    StorageProvider::S3
+                } else {
+                    StorageProvider::Local
+                },
+                output_folder: non_empty_string(stage.output_folder),
+                workflow_url: non_empty_string(stage.workflow_url),
+                max_attempts: stage.max_attempts,
+                retry_delay_sec: stage.retry_delay_sec,
+                next_stage: stage.next_stage,
+                save_path_aliases: stage.save_path_aliases,
+                resource_class: stage.resource_class,
+                uses_local_llm,
+                allow_empty_outputs: stage.allow_empty_outputs,
+                allow_multiple_outputs: stage.allow_multiple_outputs,
+                is_active: stage.is_active,
+                archived_at: stage.archived_at,
+                folder_path: stage
+                    .input_uri
+                    .clone()
+                    .unwrap_or_else(|| path_string(&folder_path)),
+                folder_exists: is_s3_stage || folder_path.exists(),
+                files: Vec::new(),
+                invalid_files: Vec::new(),
+                counters,
+            }
+        })
+        .collect();
+
+    Ok(WorkspaceExplorerResult {
+        generated_at,
+        workdir_path: path_string(workdir_path),
+        last_scan_at,
+        stages: stage_trees,
+        entity_trails: Vec::new(),
+        totals,
+        errors: Vec::new(),
+    })
+}
+
+fn load_workspace_stage_file_counters(
+    connection: &Connection,
+) -> Result<HashMap<String, WorkspaceStageTreeCounters>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT
+                stage_id,
+                COUNT(*) AS registered_files,
+                COALESCE(SUM(CASE WHEN file_exists = 1 THEN 1 ELSE 0 END), 0) AS present_files,
+                COALESCE(SUM(CASE WHEN file_exists = 0 THEN 1 ELSE 0 END), 0) AS missing_files,
+                COALESCE(SUM(CASE WHEN is_managed_copy = 1 THEN 1 ELSE 0 END), 0) AS managed_copies
+            FROM entity_files
+            GROUP BY stage_id
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare workspace stage file counters: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                WorkspaceStageTreeCounters {
+                    registered_files: row.get::<_, i64>(1)? as u64,
+                    present_files: row.get::<_, i64>(2)? as u64,
+                    missing_files: row.get::<_, i64>(3)? as u64,
+                    managed_copies: row.get::<_, i64>(4)? as u64,
+                    ..WorkspaceStageTreeCounters::default()
+                },
+            ))
+        })
+        .map_err(|error| format!("Failed to query workspace stage file counters: {error}"))?;
+
+    let mut counters = HashMap::new();
+    for row in rows {
+        let (stage_id, stage_counters) =
+            row.map_err(|error| format!("Failed to read workspace stage file counters: {error}"))?;
+        counters.insert(stage_id, stage_counters);
+    }
+    Ok(counters)
+}
+
+fn load_workspace_stage_state_counters(
+    connection: &Connection,
+) -> Result<HashMap<String, WorkspaceStageTreeCounters>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT stage_id, status, COUNT(*)
+            FROM entity_stage_states
+            GROUP BY stage_id, status
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare workspace stage state counters: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as u64,
+            ))
+        })
+        .map_err(|error| format!("Failed to query workspace stage state counters: {error}"))?;
+
+    let mut counters = HashMap::<String, WorkspaceStageTreeCounters>::new();
+    for row in rows {
+        let (stage_id, status, count) =
+            row.map_err(|error| format!("Failed to read workspace stage state counters: {error}"))?;
+        let stage_counters = counters.entry(stage_id).or_default();
+        match status.as_str() {
+            "pending" => stage_counters.pending += count,
+            "queued" => stage_counters.queued += count,
+            "in_progress" => stage_counters.in_progress += count,
+            "retry_wait" => stage_counters.retry_wait += count,
+            "done" => stage_counters.done += count,
+            "failed" => stage_counters.failed += count,
+            "blocked" => stage_counters.blocked += count,
+            "skipped" => stage_counters.skipped += count,
+            _ => {}
+        }
+    }
+    Ok(counters)
 }
 
 fn non_empty_string(value: String) -> Option<String> {
@@ -1597,7 +2174,7 @@ pub(crate) fn list_eligible_runtime_tasks(
                 stage.retry_delay_sec,
                 stage.next_stage,
                 stage.resource_class
-            FROM entity_stage_states state
+            FROM entity_stage_states state INDEXED BY idx_entity_stage_states_worker_claim
             JOIN stages stage ON stage.stage_id = state.stage_id
             JOIN entity_files file ON file.id = state.file_instance_id
             JOIN entities entity ON entity.entity_id = state.entity_id
@@ -1708,9 +2285,21 @@ pub(crate) fn claim_eligible_runtime_tasks(
     now: &str,
     limit: u64,
 ) -> Result<Vec<RuntimeTaskRecord>, String> {
-    let transaction = connection
-        .transaction()
-        .map_err(|error| format!("Failed to start runtime claim transaction: {error}"))?;
+    let gate_key = sqlite_write_gate_key_for_connection(connection)?;
+    let gate = sqlite_write_gate_for_key(gate_key.clone())?;
+    retry_sqlite_busy_operation(|| {
+        with_sqlite_write_gate(&gate, &gate_key, "runtime task claim", || {
+            claim_eligible_runtime_tasks_once(connection, now, limit)
+        })
+    })
+}
+
+fn claim_eligible_runtime_tasks_once(
+    connection: &mut Connection,
+    now: &str,
+    limit: u64,
+) -> Result<Vec<RuntimeTaskRecord>, String> {
+    let transaction = immediate_transaction(connection, "runtime claim")?;
     let candidates = list_eligible_runtime_tasks(&transaction, now, limit)?;
     let mut claimed = Vec::new();
 
@@ -1785,9 +2374,22 @@ pub(crate) fn claim_specific_runtime_task(
     stage_id: &str,
     now: &str,
 ) -> Result<Option<RuntimeTaskRecord>, String> {
-    let transaction = connection
-        .transaction()
-        .map_err(|error| format!("Failed to start runtime claim transaction: {error}"))?;
+    let gate_key = sqlite_write_gate_key_for_connection(connection)?;
+    let gate = sqlite_write_gate_for_key(gate_key.clone())?;
+    retry_sqlite_busy_operation(|| {
+        with_sqlite_write_gate(&gate, &gate_key, "specific runtime task claim", || {
+            claim_specific_runtime_task_once(connection, entity_id, stage_id, now)
+        })
+    })
+}
+
+fn claim_specific_runtime_task_once(
+    connection: &mut Connection,
+    entity_id: &str,
+    stage_id: &str,
+    now: &str,
+) -> Result<Option<RuntimeTaskRecord>, String> {
+    let transaction = immediate_transaction(connection, "runtime claim")?;
     let Some(candidate) = find_runtime_task(&transaction, entity_id, stage_id)? else {
         transaction
             .commit()
@@ -1869,7 +2471,13 @@ pub(crate) fn claim_worker_runtime_tasks(
     connection: &mut Connection,
     input: &WorkerLeaseClaimInput,
 ) -> Result<Vec<RuntimeTaskRecord>, String> {
-    retry_sqlite_busy_operation(|| claim_worker_runtime_tasks_once(connection, input))
+    let gate_key = sqlite_write_gate_key_for_connection(connection)?;
+    let gate = sqlite_write_gate_for_key(gate_key.clone())?;
+    retry_sqlite_busy_operation(|| {
+        with_sqlite_write_gate(&gate, &gate_key, "worker lease claim", || {
+            claim_worker_runtime_tasks_once(connection, input)
+        })
+    })
 }
 
 fn claim_worker_runtime_tasks_once(
@@ -1881,17 +2489,7 @@ fn claim_worker_runtime_tasks_once(
     }
     let now = input.now.to_rfc3339();
     let lease_until = (input.now + Duration::seconds(input.lease_ttl_sec as i64)).to_rfc3339();
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| {
-            if sqlite_error_is_busy(&error) {
-                format!(
-                    "Failed to start worker lease claim transaction: database is locked/busy: {error}"
-                )
-            } else {
-                format!("Failed to start worker lease claim transaction: {error}")
-            }
-        })?;
+    let transaction = immediate_transaction(connection, "worker lease claim")?;
     let control = worker_pool_control_state(&transaction, input.resource_class)?;
     if !control.is_started || control.is_paused || control.desired_concurrency == 0 {
         transaction
@@ -2276,7 +2874,7 @@ fn list_eligible_worker_runtime_tasks(
                 stage.retry_delay_sec,
                 stage.next_stage,
                 stage.resource_class
-            FROM entity_stage_states state
+            FROM entity_stage_states state INDEXED BY idx_entity_stage_states_worker_claim
             JOIN stages stage ON stage.stage_id = state.stage_id
             JOIN entity_files file ON file.id = state.file_instance_id
             JOIN entities entity ON entity.entity_id = state.entity_id
@@ -2366,15 +2964,50 @@ pub(crate) fn attach_worker_lease_run(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn heartbeat_worker_lease(
     path: &Path,
     lease_id: &str,
     worker_id: &str,
     lease_ttl_sec: u64,
 ) -> Result<(), String> {
-    let connection = open_connection(path)?;
-    let now = Utc::now();
-    heartbeat_worker_lease_with_connection(&connection, lease_id, worker_id, lease_ttl_sec, &now)
+    let gate_key = sqlite_write_gate_key_for_path(path)?;
+    let gate = sqlite_write_gate_for_key(gate_key.clone())?;
+    retry_sqlite_busy_operation(|| {
+        with_sqlite_write_gate(&gate, &gate_key, "worker heartbeat", || {
+            let connection = open_connection(path)?;
+            let now = Utc::now();
+            heartbeat_worker_lease_with_connection(
+                &connection,
+                lease_id,
+                worker_id,
+                lease_ttl_sec,
+                &now,
+            )
+        })
+    })
+}
+
+pub(crate) fn heartbeat_worker_lease_with_gate_timeout(
+    path: &Path,
+    lease_id: &str,
+    worker_id: &str,
+    lease_ttl_sec: u64,
+    gate_timeout: StdDuration,
+) -> Result<(), String> {
+    let gate_key = sqlite_write_gate_key_for_path(path)?;
+    let gate = sqlite_write_gate_for_key(gate_key.clone())?;
+    with_sqlite_write_gate_timeout(&gate, &gate_key, "worker heartbeat", gate_timeout, || {
+        let connection = open_connection(path)?;
+        let now = Utc::now();
+        heartbeat_worker_lease_with_connection(
+            &connection,
+            lease_id,
+            worker_id,
+            lease_ttl_sec,
+            &now,
+        )
+    })
 }
 
 pub(crate) fn heartbeat_worker_lease_with_connection(
@@ -2440,9 +3073,10 @@ pub(crate) fn finish_worker_lease(
 }
 
 pub fn recover_expired_worker_leases(path: &Path) -> Result<u64, String> {
-    let connection = open_connection(path)?;
-    let now = Utc::now().to_rfc3339();
-    recover_expired_worker_leases_with_connection(&connection, &now)
+    with_immediate_write_transaction(path, "worker lease recovery", |connection| {
+        let now = Utc::now().to_rfc3339();
+        recover_expired_worker_leases_with_connection(connection, &now)
+    })
 }
 
 pub(crate) fn recover_expired_worker_leases_with_connection(
@@ -2566,9 +3200,183 @@ pub(crate) fn recover_expired_worker_leases_with_connection(
     Ok(recovered)
 }
 
+#[allow(dead_code)]
+pub fn recover_orphaned_worker_process_leases(
+    path: &Path,
+    workspace_id: &str,
+    current_process_id: u32,
+) -> Result<u64, String> {
+    let current_worker_marker = format!("-{current_process_id}-{workspace_id}-");
+    with_immediate_write_transaction(path, "worker process lease recovery", |connection| {
+        let now = Utc::now().to_rfc3339();
+        recover_orphaned_worker_process_leases_with_connection(
+            connection,
+            &current_worker_marker,
+            &now,
+        )
+    })
+}
+
+pub(crate) fn repair_worker_leases_with_gate_timeout(
+    path: &Path,
+    workspace_id: &str,
+    current_process_id: u32,
+    worker_lease_sec: u64,
+    gate_timeout: StdDuration,
+) -> Result<u64, String> {
+    let current_worker_marker = format!("-{current_process_id}-{workspace_id}-");
+    with_immediate_write_transaction_timeout(
+        path,
+        "operator worker repair",
+        gate_timeout,
+        |connection| {
+            let now = Utc::now().to_rfc3339();
+            let mut repaired = recover_orphaned_worker_process_leases_with_connection(
+                connection,
+                &current_worker_marker,
+                &now,
+            )?;
+            repaired += recover_expired_worker_leases_with_connection(connection, &now)?;
+            repaired += reconcile_active_finished_worker_leases(connection, &now)?;
+            repaired +=
+                reconcile_in_progress_without_active_lease(connection, worker_lease_sec, &now)?;
+            repaired += reconcile_queued_without_active_lease(connection, &now)?;
+            for resource_class in [ResourceClass::Default, ResourceClass::LocalLlm] {
+                set_worker_pool_paused_with_connection(connection, resource_class, false, None)?;
+            }
+            Ok(repaired)
+        },
+    )
+}
+
+fn recover_orphaned_worker_process_leases_with_connection(
+    connection: &Connection,
+    current_worker_marker: &str,
+    now: &str,
+) -> Result<u64, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT
+                lease_id,
+                state_id,
+                entity_id,
+                entity_file_id,
+                stage_id,
+                resource_class,
+                worker_id,
+                status,
+                run_id,
+                leased_at,
+                lease_until,
+                heartbeat_at,
+                released_at,
+                release_reason,
+                updated_at
+            FROM worker_leases
+            WHERE status = 'active'
+              AND instr(worker_id, ?1) = 0
+            ORDER BY leased_at ASC, id ASC
+            "#,
+        )
+        .map_err(|error| format!("Failed to prepare orphaned worker lease query: {error}"))?;
+    let rows = statement
+        .query_map(params![current_worker_marker], worker_lease_from_row)
+        .map_err(|error| format!("Failed to query orphaned worker leases: {error}"))?;
+    let mut leases = Vec::new();
+    for row in rows {
+        leases.push(
+            row.map_err(|error| format!("Failed to read orphaned worker lease row: {error}"))?,
+        );
+    }
+    drop(statement);
+
+    let mut recovered = 0_u64;
+    for lease in leases {
+        if lease_run_finished(connection, lease.run_id.as_deref())? {
+            continue;
+        }
+        let affected = connection
+            .execute(
+                r#"
+                UPDATE worker_leases
+                SET status = 'expired',
+                    released_at = ?2,
+                    release_reason = 'worker_process_restarted',
+                    updated_at = ?2
+                WHERE lease_id = ?1 AND status = 'active'
+                "#,
+                params![lease.lease_id, now],
+            )
+            .map_err(|error| {
+                format!(
+                    "Failed to mark orphaned worker lease '{}' expired: {error}",
+                    lease.lease_id
+                )
+            })?;
+        if affected != 1 {
+            continue;
+        }
+
+        let state = find_stage_state_by_id(connection, lease.state_id)?;
+        if let Some(state) = state {
+            match state.status.as_str() {
+                "queued" => {
+                    release_queued_claim(connection, lease.state_id, now)?;
+                }
+                "in_progress" => {
+                    let next_status = if state.attempts < state.max_attempts {
+                        StageStatus::RetryWait
+                    } else {
+                        StageStatus::Failed
+                    };
+                    let next_retry_at = if matches!(next_status, StageStatus::RetryWait) {
+                        Some(now)
+                    } else {
+                        None
+                    };
+                    update_stage_state_failure_with_reason(
+                        connection,
+                        lease.state_id,
+                        next_status,
+                        "Worker process restarted before task completion.",
+                        None,
+                        next_retry_at,
+                        now,
+                        RuntimeTransitionReason::StuckReconciliation,
+                    )?;
+                }
+                _ => {}
+            }
+        }
+        insert_app_event(
+            connection,
+            AppEventLevel::Warning,
+            "worker_lease_orphaned_process_recovered",
+            &format!(
+                "Worker lease '{}' belonged to a previous worker process and was recovered for entity '{}' on stage '{}'.",
+                lease.lease_id, lease.entity_id, lease.stage_id
+            ),
+            Some(json!({
+                "lease_id": lease.lease_id,
+                "state_id": lease.state_id,
+                "entity_id": lease.entity_id,
+                "stage_id": lease.stage_id,
+                "resource_class": lease.resource_class.as_str(),
+                "worker_id": lease.worker_id,
+                "current_worker_marker": current_worker_marker,
+            })),
+            now,
+        )?;
+        recovered += 1;
+    }
+    Ok(recovered)
+}
+
 pub fn release_worker_lease(path: &Path, lease_id: &str, reason: &str) -> Result<bool, String> {
-    let connection = open_connection(path)?;
-    release_worker_lease_with_connection(&connection, lease_id, reason, &Utc::now().to_rfc3339())
+    with_immediate_write_transaction(path, "manual worker lease release", |connection| {
+        release_worker_lease_with_connection(connection, lease_id, reason, &Utc::now().to_rfc3339())
+    })
 }
 
 pub(crate) fn release_worker_lease_with_connection(
@@ -2645,7 +3453,7 @@ pub(crate) fn release_worker_lease_with_connection(
 }
 
 pub fn get_worker_summary(path: &Path, config: &PipelineConfig) -> Result<WorkerSummary, String> {
-    let connection = open_connection(path)?;
+    let connection = open_readonly_connection(path)?;
     let now = Utc::now().to_rfc3339();
     let default_pool = worker_pool_summary(
         &connection,
@@ -2698,13 +3506,15 @@ pub fn get_worker_summary(path: &Path, config: &PipelineConfig) -> Result<Worker
 }
 
 pub fn reconcile_stuck_worker_states(path: &Path, worker_lease_sec: u64) -> Result<u64, String> {
-    let connection = open_connection(path)?;
-    let now = Utc::now().to_rfc3339();
-    let mut reconciled = recover_expired_worker_leases_with_connection(&connection, &now)?;
-    reconciled += reconcile_active_finished_worker_leases(&connection, &now)?;
-    reconciled += reconcile_in_progress_without_active_lease(&connection, worker_lease_sec, &now)?;
-    reconciled += reconcile_queued_without_active_lease(&connection, &now)?;
-    Ok(reconciled)
+    with_immediate_write_transaction(path, "worker state reconciliation", |connection| {
+        let now = Utc::now().to_rfc3339();
+        let mut reconciled = recover_expired_worker_leases_with_connection(connection, &now)?;
+        reconciled += reconcile_active_finished_worker_leases(connection, &now)?;
+        reconciled +=
+            reconcile_in_progress_without_active_lease(connection, worker_lease_sec, &now)?;
+        reconciled += reconcile_queued_without_active_lease(connection, &now)?;
+        Ok(reconciled)
+    })
 }
 
 pub(crate) fn finish_worker_task_internal_error(
@@ -2712,7 +3522,16 @@ pub(crate) fn finish_worker_task_internal_error(
     task: &RuntimeTaskRecord,
     message: &str,
 ) -> Result<(), String> {
-    let connection = open_connection(path)?;
+    with_immediate_write_transaction(path, "worker internal error reconciliation", |connection| {
+        finish_worker_task_internal_error_with_connection(connection, task, message)
+    })
+}
+
+fn finish_worker_task_internal_error_with_connection(
+    connection: &Connection,
+    task: &RuntimeTaskRecord,
+    message: &str,
+) -> Result<(), String> {
     let now = Utc::now().to_rfc3339();
     let lease = match task.lease_id.as_deref() {
         Some(lease_id) => match find_worker_lease_by_id(&connection, lease_id)? {
@@ -4120,14 +4939,37 @@ pub(crate) fn insert_stage_run(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn start_claimed_stage_run(
     connection: &mut Connection,
     state_id: i64,
     input: &NewStageRunInput,
 ) -> Result<(), String> {
-    let transaction = connection
-        .transaction()
-        .map_err(|error| format!("Failed to start stage-run transaction: {error}"))?;
+    start_claimed_stage_run_and_attach_lease(connection, state_id, input, None)
+}
+
+pub(crate) fn start_claimed_stage_run_and_attach_lease(
+    connection: &mut Connection,
+    state_id: i64,
+    input: &NewStageRunInput,
+    lease_id: Option<&str>,
+) -> Result<(), String> {
+    let gate_key = sqlite_write_gate_key_for_connection(connection)?;
+    let gate = sqlite_write_gate_for_key(gate_key.clone())?;
+    retry_sqlite_busy_operation(|| {
+        with_sqlite_write_gate(&gate, &gate_key, "start claimed stage run", || {
+            start_claimed_stage_run_once(connection, state_id, input, lease_id)
+        })
+    })
+}
+
+fn start_claimed_stage_run_once(
+    connection: &mut Connection,
+    state_id: i64,
+    input: &NewStageRunInput,
+    lease_id: Option<&str>,
+) -> Result<(), String> {
+    let transaction = immediate_transaction(connection, "stage-run start")?;
     ensure_state_transition(
         &transaction,
         state_id,
@@ -4150,6 +4992,9 @@ pub(crate) fn start_claimed_stage_run(
             params![state_id, input.attempt_no as i64, input.started_at],
         )
         .map_err(|error| format!("Failed to mark stage state '{state_id}' in_progress: {error}"))?;
+    if let Some(lease_id) = lease_id {
+        attach_worker_lease_run(&transaction, lease_id, &input.run_id, &input.started_at)?;
+    }
     transaction
         .commit()
         .map_err(|error| format!("Failed to commit stage-run start transaction: {error}"))?;
@@ -4504,20 +5349,33 @@ pub(crate) fn register_s3_artifact_pointers(
     path: &Path,
     inputs: &[RegisterS3ArtifactPointerInput],
 ) -> Result<Vec<EntityFileRecord>, String> {
+    let gate_key = sqlite_write_gate_key_for_path(path)?;
+    let gate = sqlite_write_gate_for_key(gate_key.clone())?;
+    retry_sqlite_busy_operation(|| {
+        with_sqlite_write_gate(&gate, &gate_key, "S3 artifact pointer registration", || {
+            register_s3_artifact_pointers_once(path, inputs)
+        })
+    })
+}
+
+fn register_s3_artifact_pointers_once(
+    path: &Path,
+    inputs: &[RegisterS3ArtifactPointerInput],
+) -> Result<Vec<EntityFileRecord>, String> {
     let mut connection = open_connection(path)?;
-    let transaction = connection.transaction().map_err(|error| {
-        format!("Failed to start S3 artifact registration transaction: {error}")
-    })?;
+    let transaction = immediate_transaction(&mut connection, "S3 artifact registration")?;
     validate_s3_artifact_registration_batch(&transaction, inputs)?;
 
     let mut file_ids = Vec::new();
+    let mut affected_entity_ids = HashSet::new();
     for input in inputs {
         file_ids.push(register_s3_artifact_pointer_in_transaction(
             &transaction,
             input,
         )?);
+        affected_entity_ids.insert(input.entity_id.clone());
     }
-    recompute_entity_summaries(&transaction)?;
+    recompute_entity_summaries_for_entity_ids(&transaction, &affected_entity_ids)?;
 
     let mut files = Vec::new();
     for file_id in file_ids {
@@ -4538,10 +5396,51 @@ pub(crate) fn register_s3_artifact_pointers_best_effort(
     path: &Path,
     inputs: &[RegisterS3ArtifactPointerInput],
 ) -> Result<(Vec<EntityFileRecord>, OutputRegistrationReport), String> {
+    let gate_key = sqlite_write_gate_key_for_path(path)?;
+    let gate = sqlite_write_gate_for_key(gate_key.clone())?;
+    let batch_size = s3_registration_write_batch_size();
+    let mut registered_files = Vec::new();
+    let mut report = OutputRegistrationReport::default();
+
+    for chunk in inputs.chunks(batch_size) {
+        let (chunk_files, chunk_report) = retry_sqlite_busy_operation(|| {
+            with_sqlite_write_gate(&gate, &gate_key, "partial S3 artifact registration", || {
+                register_s3_artifact_pointers_best_effort_once(path, chunk)
+            })
+        })?;
+        registered_files.extend(chunk_files);
+        merge_output_registration_report(&mut report, chunk_report);
+    }
+
+    Ok((registered_files, report))
+}
+
+fn s3_registration_write_batch_size() -> usize {
+    env_u64(
+        "BEEHIVE_S3_REGISTRATION_WRITE_BATCH_SIZE",
+        DEFAULT_S3_REGISTRATION_WRITE_BATCH_SIZE,
+    )
+    .clamp(1, 1_000) as usize
+}
+
+fn merge_output_registration_report(
+    target: &mut OutputRegistrationReport,
+    source: OutputRegistrationReport,
+) {
+    target.registered_count += source.registered_count;
+    target.skipped_count += source.skipped_count;
+    target.invalid_count += source.invalid_count;
+    target.conflict_count += source.conflict_count;
+    target.failed_count += source.failed_count;
+    target.outputs.extend(source.outputs);
+}
+
+fn register_s3_artifact_pointers_best_effort_once(
+    path: &Path,
+    inputs: &[RegisterS3ArtifactPointerInput],
+) -> Result<(Vec<EntityFileRecord>, OutputRegistrationReport), String> {
     let mut connection = open_connection(path)?;
-    let transaction = connection.transaction().map_err(|error| {
-        format!("Failed to start partial S3 artifact registration transaction: {error}")
-    })?;
+    let transaction = immediate_transaction(&mut connection, "partial S3 artifact registration")?;
 
     let mut registered_files = Vec::new();
     let mut report = OutputRegistrationReport::default();
@@ -4603,7 +5502,6 @@ pub(crate) fn register_s3_artifact_pointers_best_effort(
         }
     }
 
-    recompute_entity_summaries(&transaction)?;
     transaction
         .commit()
         .map_err(|error| format!("Failed to commit partial S3 artifact registration: {error}"))?;
@@ -5113,103 +6011,119 @@ pub(crate) fn mark_missing_s3_files_for_active_stages(
 
 pub(crate) fn recompute_entity_summaries(transaction: &Transaction<'_>) -> Result<(), String> {
     let entity_ids = load_entity_ids(transaction)?;
+    let entity_ids = entity_ids.into_iter().collect::<HashSet<_>>();
+    recompute_entity_summaries_for_entity_ids(transaction, &entity_ids)
+}
 
+pub(crate) fn recompute_entity_summary_for_entity_id(
+    transaction: &Transaction<'_>,
+    entity_id: &str,
+) -> Result<(), String> {
+    recompute_entity_summary(transaction, entity_id)
+}
+
+fn recompute_entity_summaries_for_entity_ids(
+    transaction: &Transaction<'_>,
+    entity_ids: &HashSet<String>,
+) -> Result<(), String> {
     for entity_id in entity_ids {
-        let files = load_entity_files_from_connection(transaction, Some(&entity_id))?;
-        if files.is_empty() {
-            continue;
-        }
+        recompute_entity_summary(transaction, entity_id)?;
+    }
+    Ok(())
+}
 
-        let latest_present = files
-            .iter()
-            .filter(|file| file.file_exists)
-            .max_by(|left, right| compare_file_records(left, right));
-        let latest_any = files
-            .iter()
-            .max_by(|left, right| compare_file_records(left, right));
-        let latest = latest_present.or(latest_any).expect("files is not empty");
-
-        let validation_status = files
-            .iter()
-            .map(|file| validation_rank(&file.validation_status))
-            .max()
-            .map(validation_status_from_rank)
-            .unwrap_or(EntityValidationStatus::Valid);
-
-        let validation_errors = latest.validation_errors.clone();
-        let file_count = files.len() as u64;
-        let first_seen_at = files
-            .iter()
-            .map(|file| file.first_seen_at.as_str())
-            .min()
-            .unwrap_or(latest.first_seen_at.as_str())
-            .to_string();
-        let last_seen_at = files
-            .iter()
-            .map(|file| file.last_seen_at.as_str())
-            .max()
-            .unwrap_or(latest.last_seen_at.as_str())
-            .to_string();
-        let updated_at = files
-            .iter()
-            .map(|file| file.updated_at.as_str())
-            .max()
-            .unwrap_or(latest.updated_at.as_str())
-            .to_string();
-        let runtime_status = transaction
-            .query_row(
-                r#"
-                SELECT status FROM entity_stage_states
-                WHERE entity_id = ?1 AND stage_id = ?2
-                "#,
-                params![entity_id, latest.stage_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|error| {
-                format!(
-                    "Failed to load runtime status for entity '{}' on stage '{}': {error}",
-                    entity_id, latest.stage_id
-                )
-            })?
-            .unwrap_or_else(|| latest.status.clone());
-
-        transaction
-            .execute(
-                r#"
-                UPDATE entities
-                SET
-                    current_stage_id = ?2,
-                    current_status = ?3,
-                    latest_file_path = ?4,
-                    latest_file_id = ?5,
-                    file_count = ?6,
-                    validation_status = ?7,
-                    validation_errors_json = ?8,
-                    first_seen_at = ?9,
-                    last_seen_at = ?10,
-                    updated_at = ?11
-                WHERE entity_id = ?1
-                "#,
-                params![
-                    entity_id,
-                    latest.stage_id,
-                    runtime_status,
-                    latest.file_path,
-                    latest.id,
-                    file_count as i64,
-                    validation_status_value(&validation_status),
-                    serialize_json(&validation_errors)?,
-                    first_seen_at,
-                    last_seen_at,
-                    updated_at,
-                ],
-            )
-            .map_err(|error| {
-                format!("Failed to recompute entity summary '{entity_id}': {error}")
-            })?;
+fn recompute_entity_summary(connection: &Connection, entity_id: &str) -> Result<(), String> {
+    let files = load_entity_files_from_connection(connection, Some(entity_id))?;
+    if files.is_empty() {
+        return Ok(());
     }
 
+    let latest_present = files
+        .iter()
+        .filter(|file| file.file_exists)
+        .max_by(|left, right| compare_file_records(left, right));
+    let latest_any = files
+        .iter()
+        .max_by(|left, right| compare_file_records(left, right));
+    let latest = latest_present.or(latest_any).expect("files is not empty");
+
+    let validation_status = files
+        .iter()
+        .map(|file| validation_rank(&file.validation_status))
+        .max()
+        .map(validation_status_from_rank)
+        .unwrap_or(EntityValidationStatus::Valid);
+
+    let validation_errors = latest.validation_errors.clone();
+    let file_count = files.len() as u64;
+    let first_seen_at = files
+        .iter()
+        .map(|file| file.first_seen_at.as_str())
+        .min()
+        .unwrap_or(latest.first_seen_at.as_str())
+        .to_string();
+    let last_seen_at = files
+        .iter()
+        .map(|file| file.last_seen_at.as_str())
+        .max()
+        .unwrap_or(latest.last_seen_at.as_str())
+        .to_string();
+    let updated_at = files
+        .iter()
+        .map(|file| file.updated_at.as_str())
+        .max()
+        .unwrap_or(latest.updated_at.as_str())
+        .to_string();
+    let runtime_status = connection
+        .query_row(
+            r#"
+            SELECT status FROM entity_stage_states
+            WHERE entity_id = ?1 AND stage_id = ?2
+            "#,
+            params![entity_id, latest.stage_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| {
+            format!(
+                "Failed to load runtime status for entity '{}' on stage '{}': {error}",
+                entity_id, latest.stage_id
+            )
+        })?
+        .unwrap_or_else(|| latest.status.clone());
+
+    connection
+        .execute(
+            r#"
+            UPDATE entities
+            SET
+                current_stage_id = ?2,
+                current_status = ?3,
+                latest_file_path = ?4,
+                latest_file_id = ?5,
+                file_count = ?6,
+                validation_status = ?7,
+                validation_errors_json = ?8,
+                first_seen_at = ?9,
+                last_seen_at = ?10,
+                updated_at = ?11
+            WHERE entity_id = ?1
+            "#,
+            params![
+                entity_id,
+                latest.stage_id,
+                runtime_status,
+                latest.file_path,
+                latest.id,
+                file_count as i64,
+                validation_status_value(&validation_status),
+                serialize_json(&validation_errors)?,
+                first_seen_at,
+                last_seen_at,
+                updated_at,
+            ],
+        )
+        .map_err(|error| format!("Failed to recompute entity summary '{entity_id}': {error}"))?;
     Ok(())
 }
 
@@ -5221,6 +6135,10 @@ pub(crate) fn insert_app_event(
     context: Option<Value>,
     created_at: &str,
 ) -> Result<(), String> {
+    if repeated_app_event_should_be_suppressed(connection, code, created_at)? {
+        return Ok(());
+    }
+
     let context_json = match context {
         Some(context) => Some(serialize_json(&context)?),
         None => None,
@@ -5243,6 +6161,183 @@ pub(crate) fn insert_app_event(
         .map_err(|error| format!("Failed to insert app event '{code}': {error}"))?;
 
     Ok(())
+}
+
+pub(crate) fn prune_runtime_history(path: &Path) -> Result<RuntimeRetentionPruneSummary, String> {
+    if !env_flag_enabled("BEEHIVE_RUNTIME_RETENTION_ENABLED", true) {
+        return Ok(RuntimeRetentionPruneSummary::default());
+    }
+    with_immediate_write_transaction_timeout(
+        path,
+        "runtime retention prune",
+        StdDuration::from_millis(RUNTIME_RETENTION_WRITE_GATE_TIMEOUT_MS),
+        |transaction| {
+            let mut summary = RuntimeRetentionPruneSummary::default();
+            summary.app_events_deleted += prune_app_events_by_age(transaction)?;
+            summary.app_events_deleted += prune_app_events_by_count(transaction)?;
+            summary.worker_leases_deleted += prune_worker_leases_by_age(transaction)?;
+            summary.worker_leases_deleted += prune_worker_leases_by_count(transaction)?;
+            Ok(summary)
+        },
+    )
+}
+
+fn repeated_app_event_should_be_suppressed(
+    connection: &Connection,
+    code: &str,
+    created_at: &str,
+) -> Result<bool, String> {
+    let Some(window_sec) = app_event_throttle_window_sec(code) else {
+        return Ok(false);
+    };
+    let Ok(created_at) = DateTime::parse_from_rfc3339(created_at) else {
+        return Ok(false);
+    };
+    let cutoff = (created_at.with_timezone(&Utc) - Duration::seconds(window_sec)).to_rfc3339();
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM app_events WHERE code = ?1 AND created_at >= ?2 LIMIT 1)",
+            params![code, cutoff],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|exists| exists != 0)
+        .map_err(|error| format!("Failed to check app event throttle for '{code}': {error}"))
+}
+
+fn app_event_throttle_window_sec(code: &str) -> Option<i64> {
+    match code {
+        "worker_internal_error_reconciled" => Some(30),
+        "worker_lease_expired" => Some(10),
+        "active_lease_with_finished_run_reconciled" => Some(10),
+        _ => None,
+    }
+}
+
+fn runtime_retention_delete_batch_limit() -> u64 {
+    env_u64(
+        "BEEHIVE_RUNTIME_RETENTION_DELETE_BATCH",
+        DEFAULT_RUNTIME_RETENTION_DELETE_BATCH,
+    )
+}
+
+fn prune_app_events_by_age(connection: &Connection) -> Result<u64, String> {
+    let days = env_u64(
+        "BEEHIVE_APP_EVENTS_RETENTION_DAYS",
+        DEFAULT_APP_EVENTS_RETENTION_DAYS,
+    );
+    let cutoff = (Utc::now() - Duration::days(days as i64)).to_rfc3339();
+    let batch_limit = runtime_retention_delete_batch_limit();
+    connection
+        .execute(
+            r#"
+            DELETE FROM app_events
+            WHERE id IN (
+                SELECT id FROM app_events
+                WHERE created_at < ?1
+                ORDER BY id ASC
+                LIMIT ?2
+            )
+            "#,
+            params![cutoff, batch_limit as i64],
+        )
+        .map(|deleted| deleted as u64)
+        .map_err(|error| format!("Failed to prune app_events by age: {error}"))
+}
+
+fn prune_app_events_by_count(connection: &Connection) -> Result<u64, String> {
+    let max_rows = env_u64("BEEHIVE_APP_EVENTS_MAX_ROWS", DEFAULT_APP_EVENTS_MAX_ROWS);
+    let cutoff_id = connection
+        .query_row(
+            "SELECT id FROM app_events ORDER BY id DESC LIMIT 1 OFFSET ?1",
+            params![max_rows as i64],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("Failed to find app_events prune cutoff: {error}"))?;
+    let Some(cutoff_id) = cutoff_id else {
+        return Ok(0);
+    };
+    let batch_limit = runtime_retention_delete_batch_limit();
+    connection
+        .execute(
+            r#"
+            DELETE FROM app_events
+            WHERE id IN (
+                SELECT id FROM app_events
+                WHERE id <= ?1
+                ORDER BY id ASC
+                LIMIT ?2
+            )
+            "#,
+            params![cutoff_id, batch_limit as i64],
+        )
+        .map(|deleted| deleted as u64)
+        .map_err(|error| format!("Failed to prune app_events by count: {error}"))
+}
+
+fn prune_worker_leases_by_age(connection: &Connection) -> Result<u64, String> {
+    let days = env_u64(
+        "BEEHIVE_WORKER_LEASES_RETENTION_DAYS",
+        DEFAULT_WORKER_LEASES_RETENTION_DAYS,
+    );
+    let cutoff = (Utc::now() - Duration::days(days as i64)).to_rfc3339();
+    let batch_limit = runtime_retention_delete_batch_limit();
+    connection
+        .execute(
+            r#"
+            DELETE FROM worker_leases
+            WHERE id IN (
+                SELECT id FROM worker_leases
+                WHERE status <> 'active'
+                  AND COALESCE(released_at, updated_at, lease_until, heartbeat_at, leased_at) < ?1
+                ORDER BY id ASC
+                LIMIT ?2
+            )
+            "#,
+            params![cutoff, batch_limit as i64],
+        )
+        .map(|deleted| deleted as u64)
+        .map_err(|error| format!("Failed to prune worker_leases by age: {error}"))
+}
+
+fn prune_worker_leases_by_count(connection: &Connection) -> Result<u64, String> {
+    let max_rows = env_u64(
+        "BEEHIVE_WORKER_LEASES_MAX_ROWS",
+        DEFAULT_WORKER_LEASES_MAX_ROWS,
+    );
+    let cutoff_id = connection
+        .query_row(
+            r#"
+            SELECT id
+            FROM worker_leases
+            WHERE status <> 'active'
+            ORDER BY id DESC
+            LIMIT 1 OFFSET ?1
+            "#,
+            params![max_rows as i64],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("Failed to find worker_leases prune cutoff: {error}"))?;
+    let Some(cutoff_id) = cutoff_id else {
+        return Ok(0);
+    };
+    let batch_limit = runtime_retention_delete_batch_limit();
+    connection
+        .execute(
+            r#"
+            DELETE FROM worker_leases
+            WHERE id IN (
+                SELECT id FROM worker_leases
+                WHERE status <> 'active' AND id <= ?1
+                ORDER BY id ASC
+                LIMIT ?2
+            )
+            "#,
+            params![cutoff_id, batch_limit as i64],
+        )
+        .map(|deleted| deleted as u64)
+        .map_err(|error| format!("Failed to prune worker_leases by count: {error}"))
 }
 
 pub(crate) fn set_setting(
@@ -5293,6 +6388,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
             migrate_v11_to_v12(connection)?;
+            migrate_v12_to_v13(connection)?;
         }
         2 => {
             migrate_v2_to_v3(connection)?;
@@ -5305,6 +6401,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
             migrate_v11_to_v12(connection)?;
+            migrate_v12_to_v13(connection)?;
         }
         3 => {
             migrate_v3_to_v4(connection)?;
@@ -5316,6 +6413,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
             migrate_v11_to_v12(connection)?;
+            migrate_v12_to_v13(connection)?;
         }
         4 => {
             migrate_v4_to_v5(connection)?;
@@ -5326,6 +6424,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
             migrate_v11_to_v12(connection)?;
+            migrate_v12_to_v13(connection)?;
         }
         5 => {
             migrate_v5_to_v6(connection)?;
@@ -5335,6 +6434,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
             migrate_v11_to_v12(connection)?;
+            migrate_v12_to_v13(connection)?;
         }
         6 => {
             migrate_v6_to_v7(connection)?;
@@ -5343,6 +6443,7 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
             migrate_v11_to_v12(connection)?;
+            migrate_v12_to_v13(connection)?;
         }
         7 => {
             migrate_v7_to_v8(connection)?;
@@ -5350,27 +6451,35 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), String> {
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
             migrate_v11_to_v12(connection)?;
+            migrate_v12_to_v13(connection)?;
         }
         8 => {
             migrate_v8_to_v9(connection)?;
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
             migrate_v11_to_v12(connection)?;
+            migrate_v12_to_v13(connection)?;
         }
         9 => {
             migrate_v9_to_v10(connection)?;
             migrate_v10_to_v11(connection)?;
             migrate_v11_to_v12(connection)?;
+            migrate_v12_to_v13(connection)?;
         }
         10 => {
             migrate_v10_to_v11(connection)?;
             migrate_v11_to_v12(connection)?;
+            migrate_v12_to_v13(connection)?;
         }
-        11 => migrate_v11_to_v12(connection)?,
-        12 => {}
+        11 => {
+            migrate_v11_to_v12(connection)?;
+            migrate_v12_to_v13(connection)?;
+        }
+        12 => migrate_v12_to_v13(connection)?,
+        13 => {}
         version => {
             return Err(format!(
-            "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, or 12."
+            "Unsupported SQLite schema version '{version}'. Expected 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, or 13."
         ))
         }
     }
@@ -5392,6 +6501,8 @@ fn ensure_query_indexes(connection: &Connection) -> Result<(), String> {
             r#"
             CREATE INDEX IF NOT EXISTS idx_entity_stage_states_stage_status ON entity_stage_states(stage_id, status);
             CREATE INDEX IF NOT EXISTS idx_entity_stage_states_status_retry ON entity_stage_states(status, next_retry_at);
+            CREATE INDEX IF NOT EXISTS idx_entity_stage_states_worker_claim ON entity_stage_states(status, file_exists, updated_at, id);
+            CREATE INDEX IF NOT EXISTS idx_entity_stage_states_worker_retry_claim ON entity_stage_states(status, next_retry_at, file_exists, updated_at, id);
             CREATE INDEX IF NOT EXISTS idx_entity_stage_states_entity_stage ON entity_stage_states(entity_id, stage_id);
             CREATE INDEX IF NOT EXISTS idx_entities_updated_at ON entities(updated_at);
             CREATE INDEX IF NOT EXISTS idx_entities_current_stage_status ON entities(current_stage_id, current_status);
@@ -5598,6 +6709,8 @@ fn create_schema_v12(connection: &Connection) -> Result<(), String> {
             CREATE INDEX IF NOT EXISTS idx_stage_runs_entity_id ON stage_runs(entity_id);
             CREATE INDEX IF NOT EXISTS idx_stage_runs_run_id ON stage_runs(run_id);
             CREATE INDEX IF NOT EXISTS idx_entity_stage_states_status_retry ON entity_stage_states(status, next_retry_at);
+            CREATE INDEX IF NOT EXISTS idx_entity_stage_states_worker_claim ON entity_stage_states(status, file_exists, updated_at, id);
+            CREATE INDEX IF NOT EXISTS idx_entity_stage_states_worker_retry_claim ON entity_stage_states(status, next_retry_at, file_exists, updated_at, id);
             CREATE INDEX IF NOT EXISTS idx_worker_leases_status_until ON worker_leases(status, lease_until);
             CREATE INDEX IF NOT EXISTS idx_worker_leases_resource_status ON worker_leases(resource_class, status);
             CREATE INDEX IF NOT EXISTS idx_worker_leases_state_status ON worker_leases(state_id, status);
@@ -5606,10 +6719,10 @@ fn create_schema_v12(connection: &Connection) -> Result<(), String> {
             CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_files_s3_producer_artifact ON entity_files(producer_run_id, artifact_id)
                 WHERE storage_provider = 's3' AND producer_run_id IS NOT NULL AND artifact_id IS NOT NULL;
 
-            PRAGMA user_version = 12;
+            PRAGMA user_version = 13;
             "#,
         )
-        .map_err(|error| format!("Failed to create SQLite schema v12: {error}"))?;
+        .map_err(|error| format!("Failed to create SQLite schema v13: {error}"))?;
     Ok(())
 }
 
@@ -6358,15 +7471,46 @@ fn migrate_v11_to_v12(connection: &mut Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_v12_to_v13(connection: &mut Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_entity_stage_states_worker_claim
+                ON entity_stage_states(status, file_exists, updated_at, id);
+            CREATE INDEX IF NOT EXISTS idx_entity_stage_states_worker_retry_claim
+                ON entity_stage_states(status, next_retry_at, file_exists, updated_at, id);
+
+            PRAGMA user_version = 13;
+            "#,
+        )
+        .map_err(|error| format!("Failed to migrate schema from v12 to v13: {error}"))?;
+
+    let now = Utc::now().to_rfc3339();
+    insert_app_event(
+        connection,
+        AppEventLevel::Info,
+        "schema_migrated_to_v13",
+        "SQLite schema migrated from version 12 to version 13.",
+        None,
+        &now,
+    )?;
+    set_setting(connection, "schema_version", "13", &now)?;
+    Ok(())
+}
+
 fn sync_stages(connection: &mut Connection, stages: &[StageDefinition]) -> Result<(), String> {
-    retry_sqlite_busy_operation(|| sync_stages_once(connection, stages))
+    let gate_key = sqlite_write_gate_key_for_connection(connection)?;
+    let gate = sqlite_write_gate_for_key(gate_key.clone())?;
+    retry_sqlite_busy_operation(|| {
+        with_sqlite_write_gate(&gate, &gate_key, "stage sync", || {
+            sync_stages_once(connection, stages)
+        })
+    })
 }
 
 fn sync_stages_once(connection: &mut Connection, stages: &[StageDefinition]) -> Result<(), String> {
     let now = Utc::now().to_rfc3339();
-    let transaction = connection
-        .transaction()
-        .map_err(|error| format!("Failed to start stage sync transaction: {error}"))?;
+    let transaction = immediate_transaction(connection, "stage sync")?;
 
     let incoming_ids = stages
         .iter()
@@ -8096,7 +9240,7 @@ mod tests {
         let table_names = load_table_names(&connection).expect("table names");
 
         assert!(database_path.exists());
-        assert_eq!(result.schema_version, 12);
+        assert_eq!(result.schema_version, 13);
         assert!(table_names.contains(&"entity_files".to_string()));
         assert!(table_names.contains(&"entities".to_string()));
         assert!(table_names.contains(&"entity_stage_states".to_string()));
@@ -8166,7 +9310,7 @@ mod tests {
             load_entity_files_from_connection(&connection, Some("entity-1")).expect("load files");
         let events = load_app_events_from_connection(&connection, 20).expect("events");
 
-        assert_eq!(result.schema_version, 12);
+        assert_eq!(result.schema_version, 13);
         assert_eq!(entity.file_count, 1);
         assert_eq!(files.len(), 1);
         assert!(events
@@ -8200,7 +9344,7 @@ mod tests {
         let result = bootstrap_database(&database_path, &test_config(vec![stage("ingest", None)]))
             .expect("bootstrap");
 
-        assert_eq!(result.schema_version, 12);
+        assert_eq!(result.schema_version, 13);
     }
 
     #[test]
@@ -9978,6 +11122,66 @@ mod tests {
     }
 
     #[test]
+    fn bulk_reset_failed_blocked_entity_stages_to_pending_updates_counts_and_states() {
+        let (_tempdir, _workdir, database_path) = setup_scanned_workdir(
+            vec![stage("incoming", None)],
+            &[
+                ("incoming", "failed-entity"),
+                ("incoming", "blocked-entity"),
+            ],
+        );
+        let connection = open_connection(&database_path).expect("open");
+        connection
+            .execute(
+                r#"
+                UPDATE entity_stage_states
+                SET status = 'failed', attempts = 2, last_error = 'bad', last_http_status = 500
+                WHERE entity_id = 'failed-entity'
+                "#,
+                [],
+            )
+            .expect("failed state");
+        connection
+            .execute(
+                r#"
+                UPDATE entity_stage_states
+                SET status = 'blocked', attempts = 1, last_error = 'blocked', last_http_status = 400
+                WHERE entity_id = 'blocked-entity'
+                "#,
+                [],
+            )
+            .expect("blocked state");
+        drop(connection);
+
+        let result = reset_failed_blocked_entity_stages_to_pending(
+            &database_path,
+            Some("retry all failed and blocked"),
+        )
+        .expect("bulk reset");
+        let failed_state = get_stage_state(&database_path, "failed-entity", "incoming")
+            .expect("failed lookup")
+            .expect("failed state exists");
+        let blocked_state = get_stage_state(&database_path, "blocked-entity", "incoming")
+            .expect("blocked lookup")
+            .expect("blocked state exists");
+        let events = list_app_events(&database_path, 10).expect("events");
+
+        assert_eq!(result.reset_count, 2);
+        assert_eq!(result.failed_before, 1);
+        assert_eq!(result.blocked_before, 1);
+        assert_eq!(result.skipped_active_lease_count, 0);
+        assert_eq!(failed_state.status, "pending");
+        assert_eq!(failed_state.attempts, 0);
+        assert!(failed_state.last_error.is_none());
+        assert_eq!(blocked_state.status, "pending");
+        assert_eq!(blocked_state.attempts, 0);
+        assert!(blocked_state.last_error.is_none());
+        assert!(events
+            .iter()
+            .any(|event| event.code == "entity_stage_states_bulk_reset"));
+    }
+
+    #[test]
     fn manual_reset_and_skip_use_state_machine_and_write_events() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let workdir = tempdir.path().join("workdir");
@@ -10144,6 +11348,8 @@ mod tests {
                 resource_class: ResourceClass::Default,
                 limit: 1,
                 lease_ttl_sec: 300,
+                scheduling_policy: SchedulingPolicy::DepthFirst,
+                now: Utc::now(),
             },
         )
         .expect("claim")

@@ -4,16 +4,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::domain::{
-    CreateS3StageRequest, CreateWorkspaceRequest, EntityDetailResult, EntityFileS3JsonResult,
-    EntityListQuery, EntityListResult, EntityMutationResult, ImportJsonBatchRequest,
-    ImportJsonBatchResult, ManualEntityStageActionResult, RecoverExpiredWorkerLeasesResult,
-    RegisterS3SourceArtifactRequest, ResetEntityStageRequest, ResourceClass, RunDueTasksResult,
-    RunPipelineWavesResult, RunSelectedPipelineWavesRequest, RunSelectedPipelineWavesResult,
-    S3ReconciliationResult, S3StageMutationResult, StageRunOutputsResult, UpdateEntityRequest,
-    UpdateS3StageRequest, UpdateStageNextStageResult, UpdateWorkspaceRequest,
-    WorkerLeaseReleaseResult, WorkerPoolControlResult, WorkerPoolUpdateRequest,
-    WorkerReconcileStuckResult, WorkerStartRequest, WorkerStopRequest, WorkerSummaryResult,
-    WorkspaceMutationResult, WorkspaceRegistryEntryResult, WorkspaceRegistryListResult,
+    BulkResetEntityStagesResult, CreateS3StageRequest, CreateWorkspaceRequest, EntityDetailResult,
+    EntityFileS3JsonResult, EntityListQuery, EntityListResult, EntityMutationResult,
+    ImportJsonBatchRequest, ImportJsonBatchResult, ManualEntityStageActionResult,
+    RecoverExpiredWorkerLeasesResult, RegisterS3SourceArtifactRequest, ResetEntityStageRequest,
+    ResourceClass, RunDueTasksResult, RunPipelineWavesResult, RunSelectedPipelineWavesRequest,
+    RunSelectedPipelineWavesResult, S3ReconciliationResult, S3StageMutationResult,
+    StageRunOutputsResult, UpdateEntityRequest, UpdateS3StageRequest, UpdateStageNextStageResult,
+    UpdateWorkspaceRequest, WorkerLeaseReleaseResult, WorkerPoolControlResult,
+    WorkerPoolUpdateRequest, WorkerReconcileStuckResult, WorkerStartRequest, WorkerStopRequest,
+    WorkerSummaryResult, WorkspaceMutationResult, WorkspaceRegistryEntryResult,
+    WorkspaceRegistryListResult,
 };
 use crate::services::{
     artifacts, entities, pipeline, runtime, selected_runner, workers, workspaces,
@@ -203,6 +204,30 @@ fn route_json_request(
                     },
                 };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("POST", ["api", "workspaces", _, "entities", "reset-failed-blocked-to-pending"]) => {
+                let input = parse_body::<ResetEntityStageRequest>(body)?;
+                match entities::reset_failed_blocked_entity_stages_for_workspace(
+                    workspace_id,
+                    &input,
+                ) {
+                    Ok(payload) => Ok(json_response(
+                        200,
+                        serde_json::to_value(BulkResetEntityStagesResult {
+                            payload: Some(payload),
+                            errors: Vec::new(),
+                        })
+                        .unwrap(),
+                    )),
+                    Err(error) => Ok(json_response(
+                        error.status_code,
+                        serde_json::to_value(BulkResetEntityStagesResult {
+                            payload: None,
+                            errors: vec![command_error(error.code, error.message)],
+                        })
+                        .unwrap(),
+                    )),
+                }
             }
             ("GET", ["api", "workspaces", _, "entity-files", entity_file_id, "s3-json"]) => {
                 let entity_file_id = path_i64(entity_file_id, "entity_file_id")?;
@@ -413,6 +438,21 @@ fn route_json_request(
                 };
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
             }
+            ("POST", ["api", "workspaces", _, "workers", "repair"]) => {
+                let result = match workers::repair_workers(workspace_id) {
+                    Ok((reconciled, summary)) => WorkerReconcileStuckResult {
+                        reconciled,
+                        summary: Some(summary),
+                        errors: Vec::new(),
+                    },
+                    Err(message) => WorkerReconcileStuckResult {
+                        reconciled: 0,
+                        summary: None,
+                        errors: vec![command_error("worker_repair_failed", message)],
+                    },
+                };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
             ("POST", ["api", "workspaces", _, "workers", "start"]) => {
                 let input = parse_body::<WorkerStartRequest>(body)?;
                 let result = match workers::start_workers(workspace_id, &input) {
@@ -531,6 +571,11 @@ fn route_json_request(
                         errors: vec![command_error("worker_lease_release_failed", message)],
                     },
                 };
+                Ok(json_response(200, serde_json::to_value(result).unwrap()))
+            }
+            ("GET", ["api", "workspaces", _, "stages"]) => {
+                let result = runtime::workspace_stage_overview(workspace_id)
+                    .map_err(|message| (400, "workspace_stage_overview_failed", message))?;
                 Ok(json_response(200, serde_json::to_value(result).unwrap()))
             }
             ("POST", ["api", "workspaces", _, "stages"]) => {
@@ -922,7 +967,10 @@ mod tests {
                 workdir: ".".to_string(),
             },
             storage: None,
-            runtime: RuntimeConfig::default(),
+            runtime: RuntimeConfig {
+                file_stability_delay_ms: 0,
+                ..RuntimeConfig::default()
+            },
             stages,
         }
     }
@@ -1115,7 +1163,7 @@ mod tests {
             .join("incoming")
             .join("entity-1.json");
         fs::create_dir_all(source_path.parent().expect("source parent")).expect("parent");
-        fs::write(&source_path, r#"{"id":"entity-1"}"#).expect("source");
+        fs::write(&source_path, r#"{"id":"entity-1","payload":{"ok":true}}"#).expect("source");
         scan_workspace(&workdir, &database_path).expect("scan");
         let file_id = database::list_entity_files(&database_path, Some("entity-1"))
             .expect("files")
@@ -1163,7 +1211,7 @@ mod tests {
             .join("incoming")
             .join("миллиграмм.json");
         fs::create_dir_all(source_path.parent().expect("source parent")).expect("parent");
-        fs::write(&source_path, r#"{"id":"миллиграмм"}"#).expect("source");
+        fs::write(&source_path, r#"{"id":"миллиграмм","payload":{"ok":true}}"#).expect("source");
         scan_workspace(&workdir, &database_path).expect("scan");
         let connection = database::open_connection(&database_path).expect("open db");
         connection

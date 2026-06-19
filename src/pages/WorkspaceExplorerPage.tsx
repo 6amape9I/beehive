@@ -9,10 +9,12 @@ import {
   listEntities,
   listWorkspaceEntities,
   getWorkerSummary,
+  resetWorkspaceFailedBlockedEntityStagesToPending,
   pauseWorkerPool,
   pauseWorkers,
   releaseWorkerLease,
   recoverExpiredWorkerLeases,
+  repairWorkers,
   reconcileStuckWorkerStates,
   reconcileS3Workspace,
   reconcileS3WorkspaceById,
@@ -268,6 +270,32 @@ export function WorkspaceExplorerPage() {
     }
   }
 
+  async function handleBulkResetFailedBlocked() {
+    if (!workspaceId) return;
+    const confirmed = window.confirm(
+      "Reset all failed and blocked entity stages in this workspace to pending? Active worker leases will be skipped.",
+    );
+    if (!confirmed) return;
+
+    setActiveAction("bulk-reset-failed-blocked");
+    setActionMessage(null);
+    try {
+      const result = await resetWorkspaceFailedBlockedEntityStagesToPending(workspaceId, {
+        confirm: true,
+        reason: "bulk reset failed/blocked from Workspace Explorer",
+      });
+      setErrors(result.errors);
+      if (result.payload) {
+        setActionMessage(
+          `Bulk reset complete: ${result.payload.reset_count} reset to pending, ${result.payload.skipped_active_lease_count} skipped because of active leases. Failed before: ${result.payload.failed_before}, blocked before: ${result.payload.blocked_before}.`,
+        );
+        await loadEntities();
+      }
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
   async function handleLoadWorkerSummary() {
     if (!workspaceId) return;
     setActiveAction("worker-summary");
@@ -314,6 +342,28 @@ export function WorkspaceExplorerPage() {
         syncWorkerDesiredCounts(result.summary);
       }
       setActionMessage(`Worker stuck-state reconciliation complete: ${result.reconciled} repaired.`);
+      await loadEntities();
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
+  async function handleRepairWorkers() {
+    if (!workspaceId) return;
+    setActiveAction("worker-repair");
+    setActionMessage(null);
+    try {
+      const result = await repairWorkers(workspaceId);
+      setErrors(result.errors);
+      if (result.summary) {
+        setWorkerSummary(result.summary);
+        syncWorkerDesiredCounts(result.summary);
+      }
+      setActionMessage(
+        result.summary
+          ? `Worker repair complete: ${result.reconciled} lease/state repair(s). ${workerRuntimeSummaryText(result.summary)}.`
+          : `Worker repair complete: ${result.reconciled} lease/state repair(s).`,
+      );
       await loadEntities();
     } finally {
       setActiveAction(null);
@@ -551,6 +601,14 @@ export function WorkspaceExplorerPage() {
                 <button
                   type="button"
                   className="button secondary"
+                  disabled={!canUseWorkspaceActions || activeAction !== null}
+                  onClick={() => void handleBulkResetFailedBlocked()}
+                >
+                  {activeAction === "bulk-reset-failed-blocked" ? "Resetting..." : "Reset failed/blocked to pending"}
+                </button>
+                <button
+                  type="button"
+                  className="button secondary"
                   disabled={selectedEntityIds.length === 0}
                   onClick={() => setSelectedEntityIds([])}
                 >
@@ -637,6 +695,14 @@ export function WorkspaceExplorerPage() {
                 <div className="button-row">
                   <button
                     type="button"
+                    className="button primary"
+                    disabled={activeAction !== null}
+                    onClick={() => void handleRepairWorkers()}
+                  >
+                    {activeAction === "worker-repair" ? "Repairing..." : "Repair workers"}
+                  </button>
+                  <button
+                    type="button"
                     className="button secondary"
                     disabled={activeAction === "worker-recovery"}
                     onClick={() => void handleRecoverExpiredLeases()}
@@ -679,7 +745,7 @@ export function WorkspaceExplorerPage() {
                   onPausePool={handlePausePool}
                   onResumePool={handleResumePool}
                   onReleaseLease={handleReleaseWorkerLease}
-                  onReconcileStuck={handleReconcileStuckWorkerStates}
+                  onReconcileStuck={handleRepairWorkers}
                   onOpenEntity={goToEntityById}
                 />
               ) : null}
@@ -985,9 +1051,7 @@ function WorkerPoolsSummary({
                   disabled={activeAction !== null}
                   onClick={onReconcileStuck}
                 >
-                  {activeAction === "worker-reconcile-stuck"
-                    ? "Reconciling..."
-                    : "Reconcile stuck worker states"}
+                  {activeAction === "worker-repair" ? "Repairing..." : "Repair workers"}
                 </button>
               </div>
             </div>
